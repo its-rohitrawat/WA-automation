@@ -17,6 +17,12 @@ describe('Delete chat in the browser', () => {
     expect(readChat({ cleared: 'yes' }).cleared).toBe(false);
     expect(readChat({}).cleared).toBe(false);
   });
+
+  it('keeps the group’s phone label (more than one phone) as text, at most 60 characters; else none (final review, item 4)', () => {
+    expect(readChat({ phone: 'Rahul <b>phone' }).phone).toBe('Rahul <b>phone');
+    expect(readChat({ phone: 'x'.repeat(80) }).phone).toHaveLength(60);
+    for (const phone of [undefined, null, '', '  ', 2, {}]) expect(readChat({ phone }).phone, JSON.stringify(phone)).toBeNull();
+  });
 });
 
 describe('readChat: the names of the tags on the page (tagging)', () => {

@@ -545,8 +545,10 @@ button[disabled] { cursor: not-allowed; opacity: .55; }
 .drawer .syncline small { color: var(--muted); font-size: 12.5px; }
 @media (max-width: 520px) { .drawer .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (prefers-reduced-motion: reduce) { .ccard.busy::before, .cstat .dot, .drawer .status::before, .drawer .status .dot { animation: none; } }
-/* A Google card's title is its email: it wraps instead of running under the state pill. */
+/* A card's title wraps instead of running under the state pill. */
 .conn .top-row .grow-1 { min-width: 0; } .conn h3 { overflow-wrap: anywhere; }
+/* A Google card's title is its email: one line, cut with an ellipsis, never mid-word; the whole email is its tooltip (final review, item 11). */
+.conn[data-email] h3 { overflow-wrap: normal; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* Connections dialogs and setup mode (D3) */
 /* Centred without a transform, so the open animation's scale never fights the centring. */

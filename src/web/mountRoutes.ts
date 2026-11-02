@@ -187,10 +187,17 @@ export function mountAgentRoutes(m: DashboardMount, d: AgentRoutesDeps): void {
   if (d.platform) mountPlatformRoutes({ read: memberRead, change: memberChange }, { ...d.platform, isFounder: (o) => o.role === 'founder' });
   if (d.signup) mountSignupRoutes(router, d.signup);
   if (d.chat) {
-    const chat: ChatDeps = { ...d.chat, audit };
+    // The phone list Groups has: Delete's confirm names the group's phone when there are more (final review, item 4).
+    const chat: ChatDeps = { ...d.chat, audit, ...(d.groups.phones ? { phones: d.groups.phones } : {}) };
     read('/dashboard/api/clients/:code/chat', async ({ params, url }, o) =>
       await chatReadHandler(chat, o, params.code!, { before: url.searchParams.get('before'), limit: url.searchParams.get('limit') }));
-    read('/dashboard/api/clients/:code/chat/members', async ({ params }, o) => await chatMembersHandler(chat, o, params.code!));
+    // The members are read from WhatsApp: counted against the action limit, as a change is (final review, S6).
+    router.get('/dashboard/api/clients/:code/chat/members', async (ctx) => {
+      const s = await guard.requireSession(ctx.req);
+      inScope(s, tenant);
+      m.actions.hit(ctx.req, ctx.res);
+      send(ctx.res, await chatMembersHandler(chat, ownerOf(ctx, s), ctx.params.code!));
+    });
     change('/dashboard/api/clients/:code/chat/send', ({ params }, o, body) => chatSendHandler(chat, o, params.code!, body));
     change('/dashboard/api/clients/:code/chat/delete', ({ params }, o, body) => chatDeleteHandler(chat, o, params.code!, body));
   }

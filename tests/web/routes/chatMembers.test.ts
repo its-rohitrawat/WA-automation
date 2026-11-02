@@ -56,7 +56,7 @@ const view = (r: { body: unknown }) => r.body as View;
 const person = (jid: string, name: string | null, number: string | null = null) => upsertPerson(db, { clientId: sharma, jid, number, name, fromMe: false });
 
 describe('the group info panel: its members', () => {
-  it('names each member from the agent’s people, by its id, its hidden-number id or its number; else shows the number', async () => {
+  it('names each member from the agent’s people, by its id, its hidden-number id or its number; only a member with no name gets its number', async () => {
     await person(PN('919800000001'), 'Rahul');
     await person(LID('202222222222222'), 'Priya'); // known by the hidden-number id the group uses
     await person(PN('919800000003'), 'Anil'); // known by the phone-number id of a member the group lists by @lid
@@ -75,10 +75,11 @@ describe('the group info panel: its members', () => {
     expect(view(r)).toEqual({
       known: true, groupName: 'Sharma x Studio',
       members: [
-        { name: 'Rahul', number: '+91 98000 00001', tag: '919800000001', admin: true },
-        { name: 'Anil', number: '+91 98000 00003', tag: '203333333333333', admin: false },
-        { name: 'Meera', number: '+91 98000 00004', tag: '919800000004', admin: false },
-        { name: 'Priya', number: '+91 98000 00002', tag: '202222222222222', admin: false },
+        // Named: no number in the answer at all (final review, item 3); the tag keeps the digits a mention needs.
+        { name: 'Rahul', number: null, tag: '919800000001', admin: true },
+        { name: 'Anil', number: null, tag: '203333333333333', admin: false },
+        { name: 'Meera', number: null, tag: '919800000004', admin: false },
+        { name: 'Priya', number: null, tag: '202222222222222', admin: false },
         { name: null, number: '+447700900123', tag: '447700900123', admin: false },
         { name: null, number: '+91 98000 00005', tag: '919800000005', admin: false },
       ],

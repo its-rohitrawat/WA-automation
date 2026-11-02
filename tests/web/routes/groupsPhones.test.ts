@@ -4,8 +4,10 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { loadGroupsFile, type ClientConfig } from '../../../src/config/groups.ts';
 import { fileGroupsStore } from '../../../src/config/groupsStore.ts';
+import { readingPhoneFrom } from '../../../src/control/chatQueries.ts';
 import { GroupDirectory, type GroupSource } from '../../../src/control/groups.ts';
-import { syncClients } from '../../../src/store/clients.ts';
+import { getClientByGroupId, syncClients } from '../../../src/store/clients.ts';
+import { insertMessage } from '../../../src/store/messages.ts';
 import type { Db } from '../../../src/store/db.ts';
 import { manualClock } from '../../../src/util/clock.ts';
 import { createLogger } from '../../../src/util/logger.ts';
@@ -171,6 +173,21 @@ describe('Groups: read through another phone', () => {
     await deps.directory.list({ refresh: true });
     expect((await apply({ edit: [{ key: k(MEHTA.groupId), phone: 1 }] })).status).toBe(200);
     expect(fileEntry(MEHTA.groupId)).not.toHaveProperty('phone');
+  });
+
+  it('a move notes, for Delete chat, that the messages stored so far were read by another phone (final review, item 2)', async () => {
+    const mehta = (await getClientByGroupId(db, MEHTA.groupId))!;
+    await insertMessage(db, {
+      waId: 'M1', clientId: mehta.id, senderJid: 'self', senderNumber: null, senderName: null, fromMe: true, ts: '2026-11-02T07:00:00.000Z',
+      text: 'hi', quotedWaId: null, mediaType: null,
+    });
+    const id = Number((await db.get<{ id: number }>('SELECT id FROM messages WHERE wa_id = ?', ['M1']))!.id);
+    expect(await readingPhoneFrom(db, mehta.id)).toBeNull();
+    await apply({ edit: [{ key: k(MEHTA.groupId), phone: 2 }] });
+    expect(await readingPhoneFrom(db, mehta.id)).toBe(id);
+    // An approve of a group with no stored messages (here not even a client row yet) notes nothing.
+    await apply({ approve: [{ key: k(DESAI), name: 'Desai Foods', code: 'DES' }] });
+    expect((await db.all<{ k: string }>("SELECT k FROM kv WHERE k LIKE 'chat_phone_from:%'")).map((r) => r.k)).toEqual([`chat_phone_from:${mehta.id}`]);
   });
 
   it('nothing moves by itself: listing a group on an unlinked phone changes nothing', async () => {

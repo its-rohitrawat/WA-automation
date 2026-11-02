@@ -386,7 +386,8 @@ export async function fakeDashboard(o: { port: number; state: FakeState; log?: L
   const { state } = o;
   const web = createWebServer({ control: {}, env: { DASHBOARD_PORT: o.port }, log: o.log ?? silentLogger(), clock: systemClock });
   // Tasks, Meetings, Activity, Tracker, AI usage, Automations, Audit logs and Settings: the real routes on an in-memory db.
-  await mountFakeScreens(web, { signedIn: () => state.signedIn, csrf: FAKE_CSRF });
+  // Open chat reads the same phone list as Groups and Connections (made below; read only when a chat is asked for).
+  await mountFakeScreens(web, { signedIn: () => state.signedIn, csrf: FAKE_CSRF, phones: () => phones.map(({ id, label, state: s }) => ({ id, label, state: s })) });
   const guarded = (body: () => unknown) => (ctx: { res: ServerResponse }) => {
     if (!state.signedIn) return sendError(ctx.res, 401, 'unauthenticated', 'Sign in first.');
     sendJson(ctx.res, 200, body());

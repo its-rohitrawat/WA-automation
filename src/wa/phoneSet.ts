@@ -205,9 +205,9 @@ export class PhoneSet implements GatewayLike {
   }
 
   /** The group's members, read through its own phone; null when that phone is not in the set or cannot ask. */
-  async groupMembers(groupId: string): Promise<GroupMember[] | null> {
+  async groupMembers(groupId: string, o?: { fresh?: boolean }): Promise<GroupMember[] | null> {
     const m = this.#memberFor(groupId);
-    return m?.gateway.groupMembers ? m.gateway.groupMembers(groupId) : null;
+    return m?.gateway.groupMembers ? m.gateway.groupMembers(groupId, o) : null;
   }
 
   /** Delete chat's socket: the group's own phone's only, null otherwise (never another phone's). */

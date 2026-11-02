@@ -17,11 +17,17 @@ export interface GroupMember {
   admin: boolean;
 }
 
-/** The founder gateway's members of an approved group while open; null when it cannot ask (or the read failed). */
-export type GroupMembersSource = (groupId: string) => Promise<GroupMember[] | null>;
+/**
+ * The group's own phone's members of an approved group while open; null when it cannot ask (or the read failed). fresh:
+ * not from the 5-minute keep (a send with tags, final review S2), though still through a read already in flight.
+ */
+export type GroupMembersSource = (groupId: string, o?: MembersRead) => Promise<GroupMember[] | null>;
+export type MembersRead = { fresh?: boolean };
 
 /** How long a group's members are kept before WhatsApp is asked again. */
 export const MEMBERS_CACHE_MS = 5 * 60_000;
+/** How long a failed read is kept: no group is asked again sooner, whoever asks (final review, S6). */
+export const MEMBERS_FAILED_MS = 30_000;
 /** How long one read may take before it counts as failed. */
 export const MEMBERS_READ_MS = 5_000;
 

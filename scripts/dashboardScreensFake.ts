@@ -39,7 +39,7 @@ const day = (daysAgo: number) => new Date(Date.now() - daysAgo * 86_400_000).toI
  * Adds the screens' routes to the fake server, once their made-up data is stored (every write awaited, in order).
  * `signedIn` and `csrf` are the fake's own session flag and token.
  */
-export async function mountFakeScreens(web: WebServer, o: { signedIn: () => boolean; csrf: string }): Promise<void> {
+export async function mountFakeScreens(web: WebServer, o: { signedIn: () => boolean; csrf: string; phones?: ChatDeps['phones'] }): Promise<void> {
   const db = openDb(':memory:');
   const clock = systemClock;
   await syncClients(db, [
@@ -133,8 +133,9 @@ export async function mountFakeScreens(web: WebServer, o: { signedIn: () => bool
     { id: '919800000014@s.whatsapp.net', phoneNumber: '919800000014@s.whatsapp.net', lid: null, admin: false },
     { id: '209900000000015@lid', phoneNumber: null, lid: '209900000000015@lid', admin: false },
   ];
-  // Delete chat: a stand-in that answers as WhatsApp does and changes nothing anywhere.
-  const deleteSocket = { chatModify: async () => {} };
+  // Delete chat: a stand-in that answers as WhatsApp does and changes nothing anywhere. Its own account (made up), as
+  // Baileys gives it: the delete's key is checked against it (final review, item 2).
+  const deleteSocket = { user: { id: '919800000099:5@s.whatsapp.net' }, chatModify: async () => {} };
   const chat: ChatDeps = {
     db, clock, configs: () => [
       { groupId: ACME, name: 'Acme Traders', code: 'ACM', phases: PHASES, emailDomains: [], meetingKeywords: [] },
@@ -144,6 +145,7 @@ export async function mountFakeScreens(web: WebServer, o: { signedIn: () => bool
     groupSocket: (groupId) => (groupId === ACME ? socket : null),
     groupMembers: async (groupId) => (groupId === ACME ? members : null),
     chatDeleteSocket: (groupId) => (groupId === ACME ? deleteSocket : null),
+    ...(o.phones ? { phones: o.phones } : {}),
     directory: { cachedGroups: () => [{ id: ACME, subject: 'Acme Traders x Studio' }] },
     audit: (e) => audit.record({ ...e, detail: e.detail ?? '' }), log: silentLogger(),
   };

@@ -384,8 +384,10 @@ describe('SwitchableGateway: group members and the Delete chat socket (November 
     readonly members = [{ id: '919800000001@s.whatsapp.net', phoneNumber: '919800000001@s.whatsapp.net', lid: null, admin: false }];
     readonly sock = { chatModify: async () => {} };
     readonly asked: string[] = [];
-    async groupMembers(groupId: string) {
+    readonly fresh: (boolean | undefined)[] = [];
+    async groupMembers(groupId: string, o?: { fresh?: boolean }) {
       this.asked.push(groupId);
+      this.fresh.push(o?.fresh);
       return this.members;
     }
     chatDeleteSocket(groupId: string) {
@@ -408,6 +410,8 @@ describe('SwitchableGateway: group members and the Delete chat socket (November 
     expect(await g.groupMembers(G)).toBe(inner.members);
     expect(g.chatDeleteSocket(G)).toBe(inner.sock);
     expect(inner.asked).toEqual([G, G]);
+    await g.groupMembers(G, { fresh: true }); // a send with tags: fresh is passed on (final review, S2)
+    expect(inner.fresh).toEqual([undefined, true]);
   });
 
   it('after a swap the new gateway is asked; a gateway without these methods gives null', async () => {

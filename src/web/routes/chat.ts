@@ -1,6 +1,8 @@
 import { z } from 'zod';
-import { afterMark, chatHidden, chatHiddenKey, chatMembers, chatPage, outboxItem, type ChatHidden, type ChatMember, type ChatOutboxItem, type ChatPage } from '../../control/chatQueries.ts';
-import type { GroupDirectory } from '../../control/groups.ts';
+import {
+  chatHidden, chatHiddenKey, chatMembers, chatPage, newSinceMark, outboxItem, readingPhoneFrom, type ChatHidden, type ChatMember, type ChatOutboxItem, type ChatPage,
+} from '../../control/chatQueries.ts';
+import type { GroupDirectory, PhoneInfo } from '../../control/groups.ts';
 import type { ClientConfig } from '../../config/groups.ts';
 import { getClientByCode, type ClientRow } from '../../store/clients.ts';
 import type { Db } from '../../store/db.ts';
@@ -8,7 +10,7 @@ import { deleteKv, setKv } from '../../store/kv.ts';
 import { claimedSince, claimOutbox, finishOutbox, lastClaimedAt, markSending, outboxByUuid, type OutboxRow } from '../../store/outbox.ts';
 import type { Clock } from '../../util/clock.ts';
 import type { Logger } from '../../util/logger.ts';
-import { deleteGroupChat, lastMessageOf, type ChatDeleteSocketSource, type DeleteOutcome } from '../../wa/chatDelete.ts';
+import { deleteGroupChat, type ChatDeleteSocketSource, type DeleteOutcome } from '../../wa/chatDelete.ts';
 import { mentionTags, tagOf, type GroupMembersSource } from '../../wa/groupMembers.ts';
 import { sendGroupText, type GroupSocketSource, type QuotedMessage, type SendOutcome } from '../../wa/groupSend.ts';
 import { fail, ok, type ApiError, type ApiResult, type AuditFn, type OwnerContext } from './context.ts';
@@ -34,6 +36,8 @@ export interface ChatDeps {
   groupMembers?: GroupMembersSource;
   /** The socket for Delete chat, for an approved group while open (gateway.chatDeleteSocket); not wired: no delete. */
   chatDeleteSocket?: ChatDeleteSocketSource;
+  /** The workspace's reading phones (as Groups has them); not given: one phone. Delete's confirm names the group's. */
+  phones?: () => readonly PhoneInfo[];
   /** Only its last list is read, for the group's name. */
   directory: Pick<GroupDirectory, 'cachedGroups'>;
   audit: AuditFn;
@@ -68,6 +72,8 @@ export type ChatView = ChatPage & {
   /** Sending is switched on in Settings. */
   sendingOn: boolean;
   connected: boolean;
+  /** The group's phone by its label when the workspace has more than one; else null (final review, item 4). */
+  phone: string | null;
 };
 
 /** GET /dashboard/api/clients/:code/chat?before=<message>&limit=<1..100> */
@@ -81,11 +87,21 @@ export async function chatReadHandler(deps: ChatDeps, _ctx: OwnerContext, code: 
   const before = whole(search.before);
   const limit = whole(search.limit);
   const page = await chatPage(deps.db, c, deps.clock.now(), { ...(before !== undefined ? { before } : {}), ...(limit !== undefined ? { limit } : {}) });
-  return ok({ client: { code: c.code, name: c.name, groupName: groupNameOf(deps, c) }, sendingOn: deps.sendingOn(), connected: deps.connected(c.groupId), ...page });
+  return ok({
+    client: { code: c.code, name: c.name, groupName: groupNameOf(deps, c) }, sendingOn: deps.sendingOn(), connected: deps.connected(c.groupId), phone: phoneLabelOf(deps, c), ...page,
+  });
 }
 
 /** The group's name as WhatsApp last listed it, else the client's own name. */
 const groupNameOf = (deps: ChatDeps, c: ClientRow) => (deps.directory.cachedGroups() ?? []).find((g) => g.id === c.groupId)?.subject || c.name;
+
+/** The label of the phone the group is read through, when the workspace has more than one phone; else null. */
+function phoneLabelOf(deps: ChatDeps, c: ClientRow): string | null {
+  const phones = deps.phones?.() ?? [];
+  if (phones.length < 2) return null;
+  const id = deps.configs().find((x) => x.groupId === c.groupId)?.phone ?? 1;
+  return phones.find((p) => p.id === id)?.label ?? `Phone ${id}`;
+}
 
 export type MembersView =
   | { known: true; groupName: string; members: ChatMember[] }
@@ -166,13 +182,18 @@ export async function chatSendHandler(deps: ChatDeps, ctx: OwnerContext, code: s
   }
 
   // Tags (November release): "@<digits>" in the confirmed text names a member, and the message tags exactly the group's
-  // members named so. The members can't be read: refused here, before anything is claimed, so nothing goes untagged.
+  // members named so. Read fresh, not from the 5-minute keep (final review, S2). The members can't be read, or a tag
+  // names someone who is not a member now: refused here, before anything is claimed, so no tag goes out as a number.
   let mentions: string[] = [];
   const tags = mentionTags(text);
   if (tags.size > 0) {
-    const members = deps.connected(c.groupId) && deps.groupMembers ? await deps.groupMembers(c.groupId) : null;
+    const members = deps.connected(c.groupId) && deps.groupMembers ? await deps.groupMembers(c.groupId, { fresh: true }) : null;
     if (!members) {
       return fail(409, 'mentions_unavailable', "The group's members can't be read from WhatsApp right now, so the tags can't be checked. Nothing was sent. Try again in a minute.");
+    }
+    const inGroup = new Set(members.map((m) => tagOf(m.id)));
+    if ([...tags].some((t) => !inGroup.has(t))) {
+      return fail(409, 'tag_not_member', 'Someone tagged in the message is not in the group now, so the tag would show as their number. Remove that tag, or tag them again with @. Nothing was sent.');
     }
     mentions = members.filter((m) => tags.has(tagOf(m.id))).map((m) => m.id);
   }
@@ -236,12 +257,13 @@ const DELETE_WORDS: Record<DeleteOutcome['state'], { event: string; detail: (cod
 
 /**
  * POST /dashboard/api/clients/:code/chat/delete with { confirm: true } (November release, owner decision 2 Nov 2026):
- * deletes the chat on the founder's phone's WhatsApp, up to its newest stored message, and hides it here until a new
+ * deletes the chat on the group's phone's WhatsApp, up to its newest stored message, and hides it here until a new
  * message comes. The saved messages and tasks stay, and the group stays approved. Not gated on the sending switch: it
  * changes only the owner's own phone. The order, as for a send: the checks, the claim (the mark, written "asking"), the
- * log line, WhatsApp, the outcome, the audit (never a message's text). 200 with the outcome (a repeat with nothing new:
- * the earlier one's, and WhatsApp is not asked again); 400 not confirmed; 404 not an approved client; 409 nothing to
- * delete, a delete in progress, or Delete not wired in; 429 again within a minute.
+ * log line, WhatsApp, the outcome, the audit (never a message's text). 200 with the outcome (a repeat with nothing new
+ * after "deleted": that again, and WhatsApp is not asked; after "unknown", WhatsApp is asked again, final review item 5);
+ * 400 not confirmed; 404 not an approved client; 409 nothing to delete, a delete in progress, or Delete not wired in;
+ * 429 again within a minute.
  */
 export async function chatDeleteHandler(deps: ChatDeps, ctx: OwnerContext, code: string, body: unknown): Promise<ApiResult<DeleteView | ApiError>> {
   const parsed = DeleteBody.safeParse(body);
@@ -259,23 +281,26 @@ export async function chatDeleteHandler(deps: ChatDeps, ctx: OwnerContext, code:
     [c.id],
   );
   if (!newest) return fail(409, 'nothing_to_delete', 'There are no messages in this chat to delete.');
+  // What the press reaches by row (final review, item 1): the highest row and the oldest time stored now.
+  const span = (await deps.db.get<{ top: number; oldest: string }>('SELECT max(id) AS top, min(ts) AS oldest FROM messages WHERE client_id = ?', [c.id]))!;
 
   // The claim in one write transaction (on Postgres, under the customer's lock): two requests at once cannot both ask.
   const now = deps.clock.now();
   const key = chatHiddenKey(c.id);
   const claim = await deps.db.tx(async (tx): Promise<{ mark: ChatHidden; before: ChatHidden | null } | { done: ApiResult<DeleteView | ApiError> }> => {
     const before = await chatHidden(tx, c.id);
-    if (before && !afterMark(newest, before)) {
-      // Nothing new since the last delete: its outcome again, and WhatsApp is not asked.
+    if (before && !(await newSinceMark(tx, c.id, before))) {
+      // Nothing new since the last delete. One still asking: wait. Deleted: that again, and WhatsApp is not asked.
       if (before.state === 'asking' && now.getTime() - Date.parse(before.at) < ASKING_MAX_MS) {
         return { done: fail(409, 'delete_in_progress', 'This chat is being deleted. Wait a moment.') };
       }
-      return { done: ok(before.state === 'deleted' ? { state: 'deleted', code: null } : { state: 'unknown', code: before.state === 'asking' ? 'timeout' : before.code }) };
+      if (before.state === 'deleted') return { done: ok({ state: 'deleted', code: null }) };
+      // Not surely done (unknown, or asking that never finished): the owner may ask again, a minute apart (item 5).
     }
     if (before && now.getTime() - Date.parse(before.at) < DELETE_GAP_MS) {
       return { done: fail(429, 'rate_limited', 'This chat was deleted a moment ago. Try again in a minute.', { retryAfterSec: 60 }) };
     }
-    const mark: ChatHidden = { uptoTs: newest.ts, uptoId: newest.id, at: now.toISOString(), state: 'asking', code: null };
+    const mark: ChatHidden = { uptoTs: newest.ts, uptoId: newest.id, uptoRow: Number(span.top), floorTs: span.oldest, at: now.toISOString(), state: 'asking', code: null };
     await setKv(tx, key, JSON.stringify(mark));
     return { mark, before };
   });
@@ -283,15 +308,23 @@ export async function chatDeleteHandler(deps: ChatDeps, ctx: OwnerContext, code:
 
   // Logged before WhatsApp is asked: a crash mid-way leaves the mark "asking" (unknown later), and this line.
   deps.log.info({ client: c.code, requestId: ctx.requestId }, 'dashboard delete: asking WhatsApp');
-  const last = lastMessageOf(c.groupId, { waId: newest.waId, fromMe: newest.fromMe === 1, senderJid: newest.senderJid, ts: newest.ts });
-  const outcome = await deleteGroupChat(source, c.groupId, last, deps.deleteTimeoutMs);
+  // The newest message is surely the group's current phone's own only when stored since its last change of phone.
+  const changed = await readingPhoneFrom(deps.db, c.id);
+  const samePhone = changed === null || newest.id > changed;
+  const outcome = await deleteGroupChat(source, c.groupId, { waId: newest.waId, fromMe: newest.fromMe === 1, senderJid: newest.senderJid, ts: newest.ts, samePhone }, deps.deleteTimeoutMs);
   const codeOf = outcome.state === 'deleted' ? null : outcome.code;
-  if (outcome.state === 'failed') {
-    // Surely not done: the chat shows as it was before this request.
-    if (claim.before) await setKv(deps.db, key, JSON.stringify(claim.before));
-    else await deleteKv(deps.db, key);
-  } else {
-    await setKv(deps.db, key, JSON.stringify({ ...claim.mark, state: outcome.state, code: codeOf }));
+  try {
+    if (outcome.state === 'failed') {
+      // Surely not done: the chat shows as it was before this request.
+      if (claim.before) await setKv(deps.db, key, JSON.stringify(claim.before));
+      else await deleteKv(deps.db, key);
+    } else {
+      await setKv(deps.db, key, JSON.stringify({ ...claim.mark, state: outcome.state, code: codeOf }));
+    }
+  } catch (e) {
+    // WhatsApp has answered, so the outcome stands; only its record here failed (final review, N2). The mark stays
+    // "asking", so the chat stays hidden and a repeat after 90 seconds asks again. Logged and audited all the same.
+    deps.log.error({ client: c.code, outcome: outcome.state, code: codeOf, error: (e as Error | null)?.name ?? 'Error', requestId: ctx.requestId }, 'dashboard delete: its outcome could not be recorded');
   }
   deps.log.info({ client: c.code, outcome: outcome.state, code: codeOf, requestId: ctx.requestId }, 'dashboard delete: done');
   try {

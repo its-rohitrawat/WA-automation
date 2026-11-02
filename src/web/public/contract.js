@@ -371,6 +371,8 @@ export function readChat(raw) {
     client: { code: str(c.code), name: str(c.name), groupName: cut(str(c.groupName), 120) || str(c.name) },
     sendingOn: r.sendingOn === true,
     connected: r.connected === true,
+    // The group's phone by its label, only when the workspace has more than one (owner text: esc() it).
+    phone: typeof r.phone === 'string' && r.phone.trim() ? cut(r.phone, 60) : null,
     hasOlder: r.hasOlder === true,
     messages: arr(r.messages)
       .map((m) => {

@@ -32,7 +32,7 @@ let db: Db;
 let sharma: number;
 let sock: FakeSocket;
 let members: GroupMember[] | null;
-let source: ReturnType<typeof vi.fn<(groupId: string) => Promise<GroupMember[] | null>>>;
+let source: ReturnType<typeof vi.fn<(groupId: string, o?: { fresh?: boolean }) => Promise<GroupMember[] | null>>>;
 let audits: Parameters<AuditFn>[0][];
 let logLines: string[];
 let deps: ChatDeps;
@@ -46,7 +46,7 @@ beforeEach(async () => {
     { id: PN1, phoneNumber: PN1, lid: null, admin: true },
     { id: HIDDEN, phoneNumber: null, lid: HIDDEN, admin: false },
   ];
-  source = vi.fn(async (_groupId: string) => members);
+  source = vi.fn(async (_groupId: string, _o?: { fresh?: boolean }) => members);
   audits = [];
   logLines = [];
   deps = {
@@ -73,14 +73,25 @@ describe('sending with tags', () => {
     const r = await send(text);
     expect(r.status).toBe(200);
     expect(sock.calls).toEqual([{ jid: SHARMA.groupId, content: { text, mentions: [PN1, HIDDEN] }, quoted: undefined }]);
-    expect(source).toHaveBeenCalledWith(SHARMA.groupId);
+    // Read fresh, not from the 5-minute keep: someone who just left is not tagged (final review, S2).
+    expect(source).toHaveBeenCalledWith(SHARMA.groupId, { fresh: true });
     // The outbox keeps the text as sent.
     expect((await rows<{ text: string }>(db, 'SELECT text FROM outbox')).map((x) => x.text)).toEqual([text]);
   });
 
-  it('a "@number" that is not a member stays plain text: no tag', async () => {
-    await send('call @919811111111 tomorrow');
-    expect(sock.calls[0]!.content).toEqual({ text: 'call @919811111111 tomorrow' });
+  it('a "@number" that is not a member now is refused before anything is claimed: it would go out as a number (final review, S2)', async () => {
+    for (const [n, text] of [[1, 'call @919811111111 tomorrow'], [2, '@919800000001 and @919811111111 please check']] as const) {
+      const r = await send(text, n);
+      expect(r.status, text).toBe(409);
+      expect(errorOf(r).code).toBe('tag_not_member');
+      expect(JSON.stringify(r.body)).not.toContain('919811111111');
+    }
+    expect(sock.calls).toEqual([]);
+    expect(await rows(db, 'SELECT id FROM outbox')).toEqual([]);
+    // Once they are in the group again (a fresh read sees them), the same text is sent, tagged.
+    members = [...members!, { id: '919811111111@s.whatsapp.net', phoneNumber: '919811111111@s.whatsapp.net', lid: null, admin: false }];
+    expect((await send('call @919811111111 tomorrow', 3)).status).toBe(200);
+    expect(sock.calls[0]!.content).toEqual({ text: 'call @919811111111 tomorrow', mentions: ['919811111111@s.whatsapp.net'] });
   });
 
   it('a message without tags reads no members and is sent as before', async () => {

@@ -329,4 +329,15 @@ describe('reading the chat', () => {
     expect((await read({ limit: '-1' })).status).toBe(400);
     expect(view(await read()).sendingOn).toBe(true);
   });
+
+  it('names the group’s phone by its label only with more than one phone, for Delete’s confirm (final review, item 4)', async () => {
+    const phoneOf = async () => (await read()).body as { phone: string | null };
+    expect((await phoneOf()).phone).toBeNull(); // no phone list: one phone
+    deps.phones = () => [{ id: 1, label: 'Office', state: 'active' }];
+    expect((await phoneOf()).phone).toBeNull();
+    deps.phones = () => [{ id: 1, label: 'Office', state: 'active' }, { id: 2, label: 'Rahul <b>phone', state: 'active' }];
+    expect((await phoneOf()).phone).toBe('Office'); // SHARMA names no phone: phone 1
+    deps.configs = () => [{ ...SHARMA, phone: 2 }, MEHTA];
+    expect((await phoneOf()).phone).toBe('Rahul <b>phone'); // as the owner wrote it: the page escapes it
+  });
 });

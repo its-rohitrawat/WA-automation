@@ -35,7 +35,7 @@ const desk = matchMedia('(hover: hover) and (pointer: fine)');
  * `members` the group's members (read when the picker or the group info first needs them) and `labels` the name each
  * shows as in the composer ("@Label"); `picks` the members tagged in the draft, by label.
  * @type {{ code: string, el: HTMLElement, messages: Map<number, Msg>, outbox: Map<string, Out>, hasOlder: boolean,
- *   loadingOlder: boolean, sendingOn: boolean, connected: boolean, groupName: string, clientName: string, replyTo: Msg | null,
+ *   loadingOlder: boolean, sendingOn: boolean, connected: boolean, phone: string | null, groupName: string, clientName: string, replyTo: Msg | null,
  *   draft: string, armed: boolean, onBack: () => void, names: Record<string, string>, members: Member[] | null,
  *   reading: Promise<{ name: string, members: Member[] } | { name: string, note: string }> | null,
  *   failed: { note: string, at: number } | null, labels: Map<string, string>, picks: Map<string, string>,
@@ -226,6 +226,7 @@ function take(d, newest) {
   const footChanged = chat.sendingOn !== d.sendingOn || chat.connected !== d.connected;
   chat.sendingOn = d.sendingOn;
   chat.connected = d.connected;
+  chat.phone = d.phone;
   chat.groupName = d.client.groupName;
   const next = new Map(d.outbox.map((x) => [x.uuid, /** @type {Out} */ (x)]));
   for (const [uuid, o] of chat.outbox) if (o.local && !next.has(uuid)) next.set(uuid, o);
@@ -363,8 +364,9 @@ function infoBody(groupName, s) {
   const tag = canTag();
   const rows = s.members
     .map((m) => {
+      // A number only for a member the agent has no name for (final review, item 3): the agent sends no other.
       const title = m.name ?? m.number ?? 'Number hidden';
-      const sub = m.name ? m.number ?? 'Number hidden' : m.number ? '' : 'WhatsApp hides this member’s number';
+      const sub = m.name || m.number ? '' : 'WhatsApp hides this member’s number';
       const inner = `<span class="ch-mem-av" aria-hidden="true">${icon('user', 18)}</span><span class="grow-1 ch-mem-text"><b>${esc(title)}</b>${sub ? `<small>${esc(sub)}</small>` : ''}</span>${m.admin ? '<span class="ch-admin">Group admin</span>' : ''}`;
       return tag
         ? `<li><button class="ch-mem ch-mem-btn" type="button" data-tag="${esc(m.tag)}" aria-label="Tag ${esc(title)} in your message">${inner}</button></li>`
@@ -497,10 +499,9 @@ async function updatePicker() {
   p.active = Math.min(p.active, list.length - 1);
   box.hidden = false;
   box.innerHTML = list
-    .map((m, i) => {
-      const sub = m.name ? m.number ?? 'Number hidden' : '';
-      return `<button type="button" class="ch-pick-item${i === p.active ? ' on' : ''}" role="option" id="ch-pick-${i}" aria-selected="${i === p.active}" data-pick="${esc(m.tag)}" tabindex="-1"><span class="ch-mem-av" aria-hidden="true">${icon('user', 16)}</span><span class="ch-mem-text"><b>${esc(c.labels.get(m.tag) ?? '')}</b>${sub ? `<small>${esc(sub)}</small>` : ''}</span></button>`;
-    })
+    .map((m, i) =>
+      // The label alone: a name, else the number, else "Member" and 4 digits (final review, item 3).
+      `<button type="button" class="ch-pick-item${i === p.active ? ' on' : ''}" role="option" id="ch-pick-${i}" aria-selected="${i === p.active}" data-pick="${esc(m.tag)}" tabindex="-1"><span class="ch-mem-av" aria-hidden="true">${icon('user', 16)}</span><span class="ch-mem-text"><b>${esc(c.labels.get(m.tag) ?? '')}</b></span></button>`)
     .join('');
   t.setAttribute('aria-activedescendant', `ch-pick-${p.active}`);
 }
@@ -548,10 +549,12 @@ function toggleMenu(c, show) {
 async function deleteChat() {
   const c = chat;
   if (!c || c.deleting) return;
+  // With more than one phone, the group's own phone by name: the delete happens there (final review, item 4).
+  const where = c.phone ? `${c.phone}’s WhatsApp` : 'your phone’s WhatsApp';
   const yes = await confirmDialog({
     eyebrow: 'Delete chat',
     title: `Delete the chat with ${c.groupName}?`,
-    text: 'This deletes the chat on your phone’s WhatsApp and hides it here. It can’t be undone. The agent’s saved messages and tasks stay, and the group stays approved: the agent keeps reading it, and a new message brings the chat back.',
+    text: `This deletes the chat on ${where} and hides it here. It can’t be undone. The agent’s saved messages and tasks stay, and the group stays approved: the agent keeps reading it, and a new message brings the chat back.`,
     yes: 'Delete chat',
   });
   if (!yes || chat !== c) return;
@@ -563,7 +566,7 @@ async function deleteChat() {
       toast(r.code === 'whatsapp_not_connected' ? 'WhatsApp isn’t connected, so the chat was not deleted.' : 'The chat was not deleted.', false);
       return;
     }
-    toast(r.state === 'deleted' ? 'Chat deleted.' : 'Hidden here. It may not have been deleted on your phone: check WhatsApp.', r.state === 'deleted');
+    toast(r.state === 'deleted' ? 'Chat deleted.' : `Hidden here. It may not have been deleted on ${c.phone ?? 'your phone'}: check WhatsApp.`, r.state === 'deleted');
     // Emptied here at once; the dashboard's own messages still on their way stay.
     c.messages.clear();
     c.outbox = new Map([...c.outbox].filter(([, o]) => o.local === 'inflight'));
@@ -604,7 +607,7 @@ export function openChat(code, onBack) {
     <div class="ch-foot"></div>
     <section class="ch-info" aria-label="Group info" hidden></section>`, { onClose: forget });
   chat = {
-    code, el, messages: new Map(), outbox: new Map(), hasOlder: false, loadingOlder: false, sendingOn: false, connected: false,
+    code, el, messages: new Map(), outbox: new Map(), hasOlder: false, loadingOlder: false, sendingOn: false, connected: false, phone: null,
     groupName: code, clientName: '', replyTo: null, draft: '', armed: false, onBack,
     names: {}, members: null, reading: null, failed: null, labels: new Map(), picks: new Map(), picker: null, cleared: false, deleting: false,
   };

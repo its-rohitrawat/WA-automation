@@ -11,7 +11,7 @@ import type { WebServer } from '../../src/web/server.ts';
 import { SessionStore } from '../../src/web/sessions.ts';
 import { startDashboard } from '../../src/web/start.ts';
 import type { Db } from '../../src/store/db.ts';
-import { NOW, onSqlite, seededDb } from '../helpers/db.ts';
+import { NOW, onSqlite, seededDb, SHARMA } from '../helpers/db.ts';
 import { openTestPlatformDb } from '../helpers/pg.ts';
 import { OWNER } from '../helpers/web.ts';
 
@@ -35,8 +35,8 @@ function deps(db: Awaited<ReturnType<typeof seededDb>>, clock: ReturnType<typeof
   };
 }
 
-/** `extra` gets the platform Db: the platform and sign-up routes' own. */
-async function boot(extra: (platformDb: Db, clock: ReturnType<typeof manualClock>) => Partial<AgentRoutesDeps> = () => ({})) {
+/** `extra` gets the platform Db: the platform and sign-up routes' own; and the agent's own (tracker) Db. */
+async function boot(extra: (platformDb: Db, clock: ReturnType<typeof manualClock>, db: Db) => Partial<AgentRoutesDeps> = () => ({})) {
   const db = await seededDb();
   // The platform tables and the sessions: in tracker.db on SQLite (what main.ts does before the platform routes are
   // mounted, S5H.1); on Postgres their own, which P3 made (OWNER is this file's own there).
@@ -51,7 +51,7 @@ async function boot(extra: (platformDb: Db, clock: ReturnType<typeof manualClock
     },
     db, platformDb, log: silentLogger(), control: {}, clock,
     google: { exchange: () => Promise.reject(new Error('no Google')), verifier: () => Promise.reject(new Error('no Google')) },
-    mount: (m) => mountAgentRoutes(m, { ...deps(db, clock, started), ...extra(platformDb, clock) }),
+    mount: (m) => mountAgentRoutes(m, { ...deps(db, clock, started), ...extra(platformDb, clock, db) }),
   });
   servers.push(web!);
   const port = web!.address()!.port;
@@ -132,6 +132,22 @@ describe('the reading phones’ routes (lane C, change 7): mounted with their de
     expect((await post(`${PHONES}/2/unlink`, h, JSON.stringify({ confirm: true }))).status).toBe(200);
     expect((await post(`${PHONES}/2/remove`, h, JSON.stringify({ confirm: true }))).status).toBe(200);
     expect(calls).toEqual(['add Sales', 'rename 2', 'unlink 2', 'remove 2']);
+  });
+});
+
+describe('Open chat’s members (final review, S6)', () => {
+  it('each read of the members counts against the action limit, as a change does: the 31st in a minute is refused, unasked', async () => {
+    let asked = 0;
+    const { get } = await boot((_p, clock, db) => ({
+      chat: {
+        db, configs: () => [SHARMA], sendingOn: () => false, connected: () => true, groupSocket: () => null,
+        groupMembers: async () => (asked++, []), directory: { cachedGroups: () => [] }, log: silentLogger(), clock,
+      },
+    }));
+    const path = '/dashboard/api/clients/SHA/chat/members';
+    for (let i = 0; i < 30; i++) expect((await get(path)).status).toBe(200);
+    expect((await get(path)).status).toBe(429);
+    expect(asked).toBe(30);
   });
 });
 

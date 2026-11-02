@@ -7,7 +7,8 @@ const SRC = fileURLToPath(new URL('../../src/', import.meta.url));
 /**
  * Baileys socket methods, other than sendMessage, that put traffic on WhatsApp in the account's name: a receipt, presence,
  * a chat or profile change, a call rejection, a group, community or newsletter action, a retry or analytics packet, a raw
- * node or IQ query (sendNode, query), an app-state patch or a star, a block, a logout or a pairing-code request.
+ * node or IQ query (sendNode, query, sendRawMessage), an app-state patch or a star, a label or a contact change, a privacy
+ * setting, a block, a logout or a pairing-code request; and every group setting, invite and join request.
  * The scan matches whole words, also in comments: a comment in src/ that needs one of these words is reworded.
  * (updateMediaMessage and reuploadRequest are checked by tests/media/fetch.test.ts.)
  */
@@ -16,6 +17,10 @@ const OUTBOUND_NAMES = [
   'sendMessageAck', 'sendPeerDataOperationMessage', 'sendRetryRequest', 'rejectCall', 'updateProfile\\w*',
   'group(?:Create|Leave|ParticipantsUpdate|Update\\w*)', 'newsletter\\w*', 'sendWAMBuffer', 'sendNode', 'query', 'appPatch', 'star',
   'updateBlockStatus', 'logout', 'requestPairingCode', 'community\\w*',
+  // The security review's additions (final review, S4d).
+  'sendRawMessage', 'groupAcceptInvite(?:V4)?', 'groupRevokeInvite(?:V4)?', 'groupSettingUpdate', 'groupToggleEphemeral', 'groupMemberAddMode',
+  'groupJoinApprovalMode', 'groupRequestParticipantsUpdate', 'addChatLabel', 'removeChatLabel', 'addMessageLabel', 'addLabel', 'addOrEditContact',
+  'removeContact', 'update\\w*Privacy',
 ];
 const OUTBOUND = OUTBOUND_NAMES.join('|');
 /** Every Baileys method that sends something to WhatsApp. */
@@ -83,8 +88,12 @@ describe('who may send on WhatsApp', () => {
     const unlink = readFileSync(join(SRC, 'wa', 'deviceUnlink.ts'), 'utf8');
     expect(unlink.match(/\.logout\(/g)).toHaveLength(1);
     expect(unlink).not.toMatch(SEND_NAMES_BUT_LOGOUT);
-    // Who reaches it: the reading gateway's endLink alone (it is imported by no other module).
-    expect(sources().filter((s) => /\b(unlinkDevice|asDeviceUnlinkSocket)\(/.test(s.text)).map((s) => s.file).sort()).toEqual([DEVICE_UNLINK, 'wa/gateway.ts']);
+    // Who reaches it: the reading gateway's endLink alone (it is imported by no other module). Whole words, so an
+    // aliased import or a passed reference counts too (final review, S4a).
+    expect(sources().filter((s) => /\b(unlinkDevice|asDeviceUnlinkSocket)\b/.test(s.text)).map((s) => s.file).sort()).toEqual([DEVICE_UNLINK, 'wa/gateway.ts']);
+    // And who reaches endLink: the gateway defines it; only the phone control and the switchable gateway call it (S4c).
+    expect(sources().filter((s) => /\bendLink\b/.test(s.text)).map((s) => s.file).sort()).toEqual(['wa/gateway.ts', 'wa/phoneControl.ts', 'wa/switchableGateway.ts']);
+    expect(sources().filter((s) => /\.endLink\b/.test(s.text)).map((s) => s.file).sort()).toEqual(['wa/phoneControl.ts', 'wa/switchableGateway.ts']);
     const gateway = readFileSync(join(SRC, 'wa', 'gateway.ts'), 'utf8');
     const ask = gateway.indexOf('return unlinkDevice(unlinkable, this.#opts.unlinkTimeoutMs);');
     expect(ask).toBeGreaterThan(-1);
@@ -127,6 +136,15 @@ describe('who may send on WhatsApp', () => {
     ]) {
       expect(`sock.${name}(x)`).toMatch(SEND_NAMES);
       if (name !== 'sendMessage') expect(`sock.${name}(x)`).toMatch(OTHER_OUTBOUND);
+    }
+    // The security review's additions (final review, S4d).
+    for (const name of [
+      'sendRawMessage', 'groupAcceptInvite', 'groupAcceptInviteV4', 'groupRevokeInvite', 'groupRevokeInviteV4', 'groupSettingUpdate',
+      'groupToggleEphemeral', 'groupMemberAddMode', 'groupJoinApprovalMode', 'groupRequestParticipantsUpdate', 'addChatLabel', 'removeChatLabel',
+      'addMessageLabel', 'addLabel', 'addOrEditContact', 'removeContact', 'updateLastSeenPrivacy', 'updateOnlinePrivacy', 'updateGroupsAddPrivacy',
+    ]) {
+      expect(`sock.${name}(x)`, name).toMatch(SEND_NAMES);
+      expect(`sock.${name}(x)`, name).toMatch(OTHER_OUTBOUND);
     }
     for (const read of ['groupMetadata', 'groupFetchAllParticipating', 'onWhatsApp', 'profilePictureUrl']) {
       expect(`sock.${read}(x)`).not.toMatch(SEND_NAMES);
@@ -196,7 +214,8 @@ describe('the one send from the founder’s WhatsApp (Open chat, 29 Oct 2026)', 
   });
 
   it('only the dashboard’s chat route sends, and only the gateways hand out the socket', () => {
-    expect(sources().filter((s) => /\bsendGroupText\(/.test(s.text)).map((s) => s.file).sort()).toEqual(['wa/groupSend.ts', 'web/routes/chat.ts']);
+    // Whole words: an aliased import or a passed reference counts too (final review, S4a).
+    expect(sources().filter((s) => /\bsendGroupText\b/.test(s.text)).map((s) => s.file).sort()).toEqual(['wa/groupSend.ts', 'web/routes/chat.ts']);
     expect(sources().filter((s) => /\bgroupSocket\(/.test(s.text)).map((s) => s.file).sort()).toEqual(['runtime/phones.ts', 'wa/gateway.ts', 'wa/phoneSet.ts', 'wa/switchableGateway.ts']);
   });
 
@@ -257,12 +276,12 @@ describe('the one change Delete chat makes on the founder’s WhatsApp (November
   });
 
   it('only the dashboard’s chat route deletes, and only the gateways and the runtime hand out the socket', () => {
-    // The callers are exact (lane B, piece B4), as the send's are. The givers stay a list to choose from until the
-    // per-phone wiring (lane C, task 9) is in.
-    expect(sources().filter((s) => /\bdeleteGroupChat\(/.test(s.text)).map((s) => s.file).sort()).toEqual([CHAT_DELETE, 'web/routes/chat.ts']);
-    const givers = sources().filter((s) => /\bchatDeleteSocket\(/.test(s.text)).map((s) => s.file);
-    for (const f of givers) expect(['runtime/phones.ts', 'wa/gateway.ts', 'wa/phoneSet.ts', 'wa/switchableGateway.ts']).toContain(f);
-    expect(givers).toEqual(expect.arrayContaining(['wa/gateway.ts', 'wa/switchableGateway.ts']));
+    // The callers are exact (lane B, piece B4), as the send's are, by whole word: an aliased import or a passed reference
+    // counts too (final review, S4a). The givers are exact too now the per-phone wiring is in (S4b): the gateway, the
+    // switchable gateway, the phone set and the phones runtime pass it on; the chat route is its one taker (its deps).
+    expect(sources().filter((s) => /\bdeleteGroupChat\b/.test(s.text)).map((s) => s.file).sort()).toEqual([CHAT_DELETE, 'web/routes/chat.ts']);
+    expect(sources().filter((s) => /\bchatDeleteSocket\b/.test(s.text)).map((s) => s.file).sort())
+      .toEqual(['runtime/phones.ts', 'wa/gateway.ts', 'wa/phoneSet.ts', 'wa/switchableGateway.ts', 'web/routes/chat.ts']);
   });
 
   it('the chat route checks the confirm and the client, claims the mark and logs the attempt before it deletes', () => {

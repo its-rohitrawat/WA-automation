@@ -111,10 +111,10 @@ export class SwitchableGateway implements GatewayLike {
   }
 
   /** The current gateway's members of an approved group (groupMembers.ts); null without one, or while it is not open. */
-  async groupMembers(groupId: string): Promise<GroupMember[] | null> {
+  async groupMembers(groupId: string, o?: { fresh?: boolean }): Promise<GroupMember[] | null> {
     const inner = this.#inner;
     if (!inner?.groupMembers || inner.status().state !== 'open') return null;
-    return inner.groupMembers(groupId);
+    return inner.groupMembers(groupId, o);
   }
 
   /** The current gateway's socket for Delete chat (chatDelete.ts); null without one, or while it is not open. */

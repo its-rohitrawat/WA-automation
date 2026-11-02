@@ -85,7 +85,9 @@ class FakeGateway implements GatewayLike {
   droppedCount(): number {
     return this.dropped;
   }
-  async groupMembers(groupId: string) {
+  membersAsked: { groupId: string; o: { fresh?: boolean } | undefined }[] = [];
+  async groupMembers(groupId: string, o?: { fresh?: boolean }) {
+    this.membersAsked.push({ groupId, o });
     if (this.state !== 'open' || !this.allow.has(groupId)) return null;
     return [{ jid: `member-of-${groupId}` }] as unknown as GroupMember[];
   }
@@ -195,6 +197,18 @@ describe('PhoneSet', () => {
     expect(await set.groupMembers(G2)).toBeNull(); // phone 1 is open, but G2 is phone 2's
     expect(set.chatDeleteSocket(G2)).toBeNull();
     expect(set.chatDeleteSocket('120363000000000009@g.us')).toBeNull(); // approved nowhere
+  });
+
+  it('a fresh members read (a send with tags) reaches the group’s own phone’s gateway with fresh, and no other (final review, S2)', async () => {
+    const { set, add } = setup();
+    const one = add(1);
+    const two = add(2);
+    set.setConfigs([cfg(G1, 'AAA'), cfg(G2, 'BBB', 2)]);
+    set.start();
+    await set.groupMembers(G2, { fresh: true });
+    await set.groupMembers(G2);
+    expect(two.membersAsked).toEqual([{ groupId: G2, o: { fresh: true } }, { groupId: G2, o: undefined }]);
+    expect(one.membersAsked).toEqual([]);
   });
 
   it('status: open only when every phone is; otherwise the worst, naming that phone; phones() gives each', () => {

@@ -1,6 +1,6 @@
 import type { ClientRow } from '../store/clients.ts';
 import type { Db, Sql } from '../store/db.ts';
-import { getKv } from '../store/kv.ts';
+import { getKv, setKv } from '../store/kv.ts';
 import { outboxToShow, type OutboxRow, type OutboxState } from '../store/outbox.ts';
 import { mentionTags, tagOf, type GroupMember } from '../wa/groupMembers.ts';
 import { messageKind, oneLine, senderLabel, type ClientMessage } from './clientQueries.ts';
@@ -135,8 +135,7 @@ export async function chatPage(db: Db, c: ClientRow, now: Date, o: { before?: nu
   let rows: RawMessage[];
   // After Delete chat, only what came after its mark (by time, then row); with no mark, everything.
   const hidden = await chatHidden(db, c.id);
-  const floor = { hts: hidden?.uptoTs ?? '', hid: hidden?.uptoId ?? 0 };
-  const AFTER_MARK = '(m.ts > @hts OR (m.ts = @hts AND m.id > @hid))';
+  const floor = markParams(hidden);
   if (o.before !== undefined) {
     const cursor = await db.get<{ ts: string; id: number }>('SELECT ts, id FROM messages WHERE client_id = ? AND id = ?', [c.id, o.before]);
     rows = cursor
@@ -165,13 +164,31 @@ export async function chatPage(db: Db, c: ClientRow, now: Date, o: { before?: nu
  * Delete chat's mark for a client (November release, owner decision 2 Nov 2026), in the key-value store, so no schema
  * change: the newest message the delete reached (by time, then row), when it was asked, and how it went. The chat shows
  * only what came after it, so a new message brings the chat back. Nothing is removed from the agent's store.
+ * uptoRow and floorTs (final review, item 1): the highest row and the oldest time stored at the press. A row stored later
+ * shows even with an earlier WhatsApp time (a message written on a phone that was offline), unless it is older than
+ * everything the chat had then: history backfill only ever stores such older messages, and those stay hidden.
  */
 export interface ChatHidden {
   uptoTs: string;
   uptoId: number;
+  uptoRow?: number;
+  floorTs?: string;
   at: string;
   state: 'asking' | 'deleted' | 'unknown';
   code: string | null;
+}
+
+/** The messages a mark leaves showing (m is the messages table); no mark: every one. Its values: markParams. */
+const AFTER_MARK = '(m.ts > @hts OR (m.ts = @hts AND m.id > @hid) OR (m.id > @hrow AND m.ts >= @hfloor))';
+
+/** AFTER_MARK's values; a mark from before uptoRow (none in use) shows nothing stored later by row alone. */
+const markParams = (h: ChatHidden | null) => ({
+  hts: h?.uptoTs ?? '', hid: h?.uptoId ?? 0, hrow: h?.uptoRow ?? Number.MAX_SAFE_INTEGER, hfloor: h?.floorTs ?? '',
+});
+
+/** Whether a message shows after the mark: something new since that delete. */
+export async function newSinceMark(db: Sql, clientId: number, h: ChatHidden): Promise<boolean> {
+  return (await db.get<{ one: number }>(`SELECT 1 AS one FROM messages m WHERE m.client_id = @client AND ${AFTER_MARK} LIMIT 1`, { client: clientId, ...markParams(h) })) !== undefined;
 }
 
 export const chatHiddenKey = (clientId: number): string => `chat_hidden:${clientId}`;
@@ -185,7 +202,8 @@ export async function chatHidden(db: Sql, clientId: number): Promise<ChatHidden 
   try {
     const v = JSON.parse(raw) as Partial<ChatHidden>;
     if (typeof v.uptoTs === 'string' && typeof v.uptoId === 'number' && Number.isInteger(v.uptoId) && typeof v.at === 'string' && typeof v.state === 'string' && HIDDEN_STATES.includes(v.state)) {
-      return { uptoTs: v.uptoTs, uptoId: v.uptoId, at: v.at, state: v.state, code: typeof v.code === 'string' ? v.code : null };
+      const row = typeof v.uptoRow === 'number' && Number.isInteger(v.uptoRow) && typeof v.floorTs === 'string' ? { uptoRow: v.uptoRow, floorTs: v.floorTs } : {};
+      return { uptoTs: v.uptoTs, uptoId: v.uptoId, ...row, at: v.at, state: v.state, code: typeof v.code === 'string' ? v.code : null };
     }
   } catch {
     // an unreadable mark hides nothing
@@ -193,8 +211,28 @@ export async function chatHidden(db: Sql, clientId: number): Promise<ChatHidden 
   return null;
 }
 
-/** The message comes after the mark: by time, then row, as the chat orders them. */
-export const afterMark = (m: { ts: string; id: number }, h: ChatHidden): boolean => m.ts > h.uptoTs || (m.ts === h.uptoTs && m.id > h.uptoId);
+/**
+ * When a group's phone changes (a move, or an approval of a group that already has messages), the highest row stored
+ * until then: those were read by another phone, whose own messages are not the new phone's (final review, item 2).
+ */
+export const chatPhoneFromKey = (clientId: number): string => `chat_phone_from:${clientId}`;
+
+/** Records a change of the client's group's phone: every row stored so far was read by another phone. */
+export async function noteReadingPhoneChange(db: Sql, clientId: number): Promise<void> {
+  const top = (await db.get<{ id: number | null }>('SELECT max(id) AS id FROM messages WHERE client_id = ?', [clientId]))?.id ?? null;
+  if (top !== null) await setKv(db, chatPhoneFromKey(clientId), JSON.stringify({ fromRow: Number(top) }));
+}
+
+/** The highest row read by a phone before the group's current one, or null (no change of phone recorded). */
+export async function readingPhoneFrom(db: Sql, clientId: number): Promise<number | null> {
+  const raw = await getKv(db, chatPhoneFromKey(clientId));
+  try {
+    const v = raw ? (JSON.parse(raw) as { fromRow?: unknown }) : null;
+    return v && typeof v.fromRow === 'number' && Number.isInteger(v.fromRow) ? v.fromRow : null;
+  } catch {
+    return Number.MAX_SAFE_INTEGER; // unreadable: no stored row is surely this phone's
+  }
+}
 
 /**
  * The names of the tags in some texts: for each "@<digits>", this client's person whose id or number has those digits,
@@ -257,7 +295,9 @@ export async function chatMembers(db: Db, c: ClientRow, members: readonly GroupM
   const out = members.map((m): ChatMember => {
     const digits = m.phoneNumber ? m.phoneNumber.split('@')[0]! : null;
     const p = byJid.get(m.id) ?? (m.phoneNumber ? byJid.get(m.phoneNumber) : undefined) ?? (m.lid ? byJid.get(m.lid) : undefined) ?? (digits ? byNumber.get(digits) : undefined);
-    return { name: memberName(p?.name ?? null), number: m.phoneNumber ? shownNumber(m.phoneNumber) : null, tag: tagOf(m.id), admin: m.admin };
+    // A number only for a member the agent has no name for (final review, item 3): least data, and as the owner was told.
+    const name = memberName(p?.name ?? null);
+    return { name, number: !name && m.phoneNumber ? shownNumber(m.phoneNumber) : null, tag: tagOf(m.id), admin: m.admin };
   });
   const rank = (x: ChatMember) => (x.admin ? 0 : 3) + (x.name ? 0 : x.number ? 1 : 2);
   return out.sort((a, b) => rank(a) - rank(b) || (a.name ?? a.number ?? '').localeCompare(b.name ?? b.number ?? '', 'en'));

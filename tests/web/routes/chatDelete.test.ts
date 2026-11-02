@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { chatPage } from '../../../src/control/chatQueries.ts';
+import { chatPage, noteReadingPhoneChange } from '../../../src/control/chatQueries.ts';
 import { getClientByCode, type ClientRow } from '../../../src/store/clients.ts';
 import type { Db } from '../../../src/store/db.ts';
 import { insertMessage } from '../../../src/store/messages.ts';
@@ -18,8 +18,12 @@ import { MEHTA, NOW, row, seeded, SHARMA } from '../../helpers/db.ts';
 const CTX: OwnerContext = { actor: 'owner@example.com', sessionId: 'session-hash', requestId: 'a1b2c3d4e5f6' };
 const SECRET = 'TEXT-never-in-a-log';
 
+/** The group's phone's own account, as Baileys gives it (with a device part). Its own stored messages have fromMe. */
+const OWN = '919800000099:12@s.whatsapp.net';
+
 /** Records each delete, and how many log lines there were when WhatsApp was asked; answers as told. */
 class FakeDeleteSocket implements ChatDeleteSocket {
+  user: ChatDeleteSocket['user'] = { id: OWN };
   calls: { mod: { delete: true; lastMessages: LastMessage[] }; jid: string; logsBefore: number }[] = [];
   mode: 'ok' | 'throw' | 'hang' = 'ok';
   release: (() => void) | undefined;
@@ -63,9 +67,9 @@ beforeEach(async () => {
   };
 });
 
-async function say(waId: string, o: { ts?: string; fromMe?: boolean; client?: ClientRow } = {}) {
+async function say(waId: string, o: { ts?: string; fromMe?: boolean; client?: ClientRow; sender?: string } = {}) {
   await insertMessage(db, {
-    waId, clientId: (o.client ?? sharma).id, senderJid: o.fromMe ? '919800000099@s.whatsapp.net' : '919800000001@s.whatsapp.net', senderNumber: null, senderName: null,
+    waId, clientId: (o.client ?? sharma).id, senderJid: o.sender ?? (o.fromMe ? 'self' : '919800000001@s.whatsapp.net'), senderNumber: null, senderName: null,
     fromMe: o.fromMe ?? false, ts: o.ts ?? '2026-10-19T07:00:00.000Z', text: `${SECRET} ${waId}`, quotedWaId: null, mediaType: null,
   });
 }
@@ -192,13 +196,114 @@ describe('Delete chat: when it does not run', () => {
     expect(stateOf(await del())).toEqual({ state: 'deleted', code: null });
   });
 
-  it('no clear answer: hidden here, and the owner is told to check the phone; never asked again', async () => {
+  it('no clear answer: hidden here, and the owner is told to check the phone; they can try again a minute later (final review, item 5)', async () => {
     await say('M1');
     sock.mode = 'throw';
     expect(stateOf(await del())).toEqual({ state: 'unknown', code: 'delete_error' });
     expect(await shown()).toEqual([]);
     expect(audits[0]!.event).toBe('Chat delete may not have reached the phone · Sharma Interiors (SHA)');
-    expect(stateOf(await del())).toEqual({ state: 'unknown', code: 'delete_error' }); // nothing new: not asked again
+    const soon = await del(); // nothing new, still a minute apart
+    expect(soon.status).toBe(429);
     expect(sock.calls).toHaveLength(1);
+    clock.advance(60_000);
+    sock.mode = 'ok';
+    expect(stateOf(await del())).toEqual({ state: 'deleted', code: null }); // asked again, up to the same message
+    expect(sock.calls.map((c) => c.mod.lastMessages[0]!.key.id)).toEqual(['M1', 'M1']);
+    expect(stateOf(await del())).toEqual({ state: 'deleted', code: null }); // deleted, nothing new: not asked again
+    expect(sock.calls).toHaveLength(2);
+  });
+
+  it('a delete that never finished (the service stopped) can be asked again once it counts as unknown', async () => {
+    await say('M1');
+    sock.mode = 'hang';
+    const first = del();
+    while (sock.calls.length === 0) await new Promise((r) => setTimeout(r, 1));
+    clock.advance(90_000);
+    sock.mode = 'ok';
+    expect(stateOf(await del())).toEqual({ state: 'deleted', code: null });
+    expect(sock.calls).toHaveLength(2);
+    sock.release?.();
+    await first;
+  });
+
+  it('the outcome cannot be recorded here: still answered and audited, and logged (final review, N2)', async () => {
+    await say('M1');
+    const real = db;
+    // As the database failing just after WhatsApp answered: every write of the mark from then on fails.
+    deps.db = new Proxy(real, {
+      get(target, p) {
+        const v = Reflect.get(target, p, target) as unknown;
+        if (p === 'run') {
+          return async (sql: string, params?: unknown) => {
+            if (/\bkv\b/.test(sql) && sock.calls.length > 0) throw new Error(`disk I/O error ${SECRET}`);
+            return (v as (s: string, x?: unknown) => Promise<unknown>).call(target, sql, params);
+          };
+        }
+        return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      },
+    });
+    const r = await del();
+    expect(r.status).toBe(200);
+    expect(stateOf(r)).toEqual({ state: 'deleted', code: null });
+    expect(audits.map((a) => a.event)).toEqual(['Chat deleted · Sharma Interiors (SHA)']);
+    expect(logLines.some((l) => l.includes('dashboard delete: its outcome could not be recorded') && l.includes('"outcome":"deleted"'))).toBe(true);
+    expect(JSON.stringify(logLines)).not.toContain(SECRET);
+    expect(await shown()).toEqual([]); // the mark stays "asking": still hidden
+  });
+});
+
+describe('Delete chat: what shows after it (final review, item 1)', () => {
+  it('a message stored after it shows and brings the chat back, even with an earlier WhatsApp time (written while offline)', async () => {
+    await say('M1', { ts: '2026-10-19T07:00:00.000Z' });
+    await say('M2', { ts: '2026-10-19T07:10:00.000Z' });
+    await del();
+    expect((await page()).cleared).toBe(true);
+    await say('LATE', { ts: '2026-10-19T07:05:00.000Z' }); // sent before M2, stored after the press
+    expect(await shown()).toEqual(['LATE']);
+    expect((await page()).cleared).toBe(false);
+    // It is something new: after a minute the chat can be deleted again, and LATE is hidden with it.
+    clock.advance(60_000);
+    expect(stateOf(await del())).toEqual({ state: 'deleted', code: null });
+    expect(sock.calls).toHaveLength(2);
+    expect(await shown()).toEqual([]);
+  });
+
+  it('history read later (older than everything the chat had at the press) stays hidden, and is nothing new', async () => {
+    await say('M1', { ts: '2026-10-19T07:00:00.000Z' });
+    await say('M2', { ts: '2026-10-19T07:10:00.000Z' });
+    await del();
+    await say('OLD', { ts: '2026-10-18T09:00:00.000Z' }); // as the 7-day backfill stores it: older than M1
+    expect(await shown()).toEqual([]);
+    expect((await page()).cleared).toBe(true);
+    clock.advance(60_000);
+    expect(stateOf(await del())).toEqual({ state: 'deleted', code: null });
+    expect(sock.calls).toHaveLength(1); // nothing new: WhatsApp not asked again
+  });
+});
+
+describe('Delete chat: the key as the group’s phone sees it (final review, item 2)', () => {
+  it('the newest message is the phone’s own but was stored by another phone: asked with its own key, answered "check your phone"', async () => {
+    await say('M1', { sender: '919800000099@s.whatsapp.net' }); // the phone's own number, stored as a member's
+    expect(stateOf(await del())).toEqual({ state: 'unknown', code: 'check_phone' });
+    expect(sock.calls[0]!.mod.lastMessages[0]!.key).toEqual({ remoteJid: SHARMA.groupId, id: 'M1', fromMe: true });
+    expect(await shown()).toEqual([]);
+    expect(audits[0]!.event).toBe('Chat delete may not have reached the phone · Sharma Interiors (SHA)');
+    expect(audits[0]!.detail).toBe('hidden here · check_phone');
+  });
+
+  it('an own message stored before the group changed phone is not sure; one stored after the change is', async () => {
+    await say('M1', { fromMe: true });
+    await noteReadingPhoneChange(db, sharma.id); // the group moved to this phone after M1
+    expect(stateOf(await del())).toEqual({ state: 'unknown', code: 'check_phone' });
+    clock.advance(60_000);
+    await say('M2', { fromMe: true, ts: '2026-10-19T08:00:00.000Z' });
+    expect(stateOf(await del())).toEqual({ state: 'deleted', code: null });
+    expect(sock.calls[1]!.mod.lastMessages[0]!.key).toEqual({ remoteJid: SHARMA.groupId, id: 'M2', fromMe: true });
+  });
+
+  it('without the phone’s own account the key cannot be checked: "check your phone"', async () => {
+    await say('M1');
+    sock.user = undefined;
+    expect(stateOf(await del())).toEqual({ state: 'unknown', code: 'check_phone' });
   });
 });

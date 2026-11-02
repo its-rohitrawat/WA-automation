@@ -5,7 +5,7 @@ import { manualClock } from '../../src/util/clock.ts';
 import { AllowList } from '../../src/wa/allowlist.ts';
 import { openSessionDb, useEncryptedAuthState } from '../../src/wa/authState.ts';
 import { WhatsAppGateway, type GatewayOptions } from '../../src/wa/gateway.ts';
-import { MEMBERS_CACHE_MS, MEMBERS_READ_MS } from '../../src/wa/groupMembers.ts';
+import { MEMBERS_CACHE_MS, MEMBERS_FAILED_MS, MEMBERS_READ_MS } from '../../src/wa/groupMembers.ts';
 import { Ingestor } from '../../src/wa/ingest.ts';
 import type { NormalizedEvent } from '../../src/wa/normalize.ts';
 import { OTHER_GROUP, seededDb, SHARMA } from '../helpers/db.ts';
@@ -385,12 +385,18 @@ describe('WhatsAppGateway: group members for Open chat (November release)', () =
     expect(groupMetadata).toHaveBeenCalledTimes(2);
   });
 
-  it('a read that fails, or gives no answer in 5 s, is null and not kept', async () => {
+  it('a read that fails, or gives no answer in 5 s, is null; the failure is kept 30 s for every caller, fresh too (final review, S6)', async () => {
     expect(MEMBERS_READ_MS).toBe(5_000);
-    const { gw, sock, scheduled, groupMetadata } = await membersSetup();
+    expect(MEMBERS_FAILED_MS).toBe(30_000);
+    const { gw, sock, clock, scheduled, groupMetadata } = await membersSetup();
     sock.emit('connection.update', { connection: 'open' });
     groupMetadata.mockRejectedValueOnce(new Error(`no data for ${SHARMA.groupId}`));
     expect(await gw.groupMembers(SHARMA.groupId)).toBeNull();
+    clock.advance(MEMBERS_FAILED_MS - 1);
+    expect(await gw.groupMembers(SHARMA.groupId)).toBeNull();
+    expect(await gw.groupMembers(SHARMA.groupId, { fresh: true })).toBeNull();
+    expect(groupMetadata).toHaveBeenCalledTimes(1); // not asked again sooner
+    clock.advance(1);
     groupMetadata.mockImplementationOnce(() => new Promise<GroupMetadata>(() => {}));
     const before = scheduled.length; // the failed read's timer is there too: this test's scheduler keeps every timer
     const pending = gw.groupMembers(SHARMA.groupId);
@@ -398,8 +404,28 @@ describe('WhatsAppGateway: group members for Open chat (November release)', () =
     expect(timer).toHaveLength(1);
     timer[0]!.fn();
     expect(await pending).toBeNull();
-    expect(await gw.groupMembers(SHARMA.groupId)).toHaveLength(2); // nothing was kept: read again
+    expect(await gw.groupMembers(SHARMA.groupId)).toBeNull(); // no answer in time is a failure too: kept
+    expect(groupMetadata).toHaveBeenCalledTimes(2);
+    clock.advance(MEMBERS_FAILED_MS);
+    expect(await gw.groupMembers(SHARMA.groupId)).toHaveLength(2);
     expect(groupMetadata).toHaveBeenCalledTimes(3);
+  });
+
+  it('asks at the same moment share one read, fresh or not; fresh skips the 5-minute keep (final review, S2 and S6)', async () => {
+    const { gw, sock, groupMetadata } = await membersSetup();
+    sock.emit('connection.update', { connection: 'open' });
+    let answer: (m: GroupMetadata) => void = () => {};
+    groupMetadata.mockImplementationOnce(() => new Promise<GroupMetadata>((r) => (answer = r)));
+    const a = gw.groupMembers(SHARMA.groupId);
+    const b = gw.groupMembers(SHARMA.groupId, { fresh: true });
+    expect(groupMetadata).toHaveBeenCalledTimes(1);
+    answer({ id: SHARMA.groupId, subject: 'Sharma Interiors x Studio', participants: [{ id: PN1 }] } as unknown as GroupMetadata);
+    expect(await a).toEqual([{ id: PN1, phoneNumber: PN1, lid: null, admin: false }]);
+    expect(await b).toEqual(await a);
+    expect(await gw.groupMembers(SHARMA.groupId)).toHaveLength(1); // kept
+    expect(groupMetadata).toHaveBeenCalledTimes(1);
+    expect(await gw.groupMembers(SHARMA.groupId, { fresh: true })).toHaveLength(2); // fresh: WhatsApp is asked again
+    expect(groupMetadata).toHaveBeenCalledTimes(2);
   });
 
   it('a socket that cannot read group data gives null', async () => {

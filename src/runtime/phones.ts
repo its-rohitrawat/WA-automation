@@ -75,7 +75,7 @@ export interface WorkspacePhones {
   readonly chat: {
     connected: (groupId?: string) => boolean;
     groupSocket: (groupId: string) => ReturnType<PhoneSet['groupSocket']>;
-    groupMembers: (groupId: string) => ReturnType<PhoneSet['groupMembers']>;
+    groupMembers: (groupId: string, o?: { fresh?: boolean }) => ReturnType<PhoneSet['groupMembers']>;
     chatDeleteSocket: (groupId: string) => ReturnType<PhoneSet['chatDeleteSocket']>;
   };
   /** The approved groups changed: each phone's allow-list follows. */
@@ -263,7 +263,7 @@ export async function workspacePhones(d: WorkspacePhonesDeps): Promise<Workspace
     chat: {
       connected,
       groupSocket: (groupId) => set.groupSocket(groupId),
-      groupMembers: (groupId) => set.groupMembers(groupId),
+      groupMembers: (groupId, o) => set.groupMembers(groupId, o),
       chatDeleteSocket: (groupId) => set.chatDeleteSocket(groupId),
     },
     driver: (target) => {

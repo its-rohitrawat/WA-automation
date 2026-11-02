@@ -7,7 +7,7 @@ import type { AllowList } from './allowlist.ts';
 import { backoffMs } from './backoff.ts';
 import { asChatDeleteSocket, type ChatDeleteSocket } from './chatDelete.ts';
 import { asDeviceUnlinkSocket, unlinkDevice } from './deviceUnlink.ts';
-import { MEMBERS_CACHE_MS, MEMBERS_READ_MS, membersOf, type GroupMember } from './groupMembers.ts';
+import { MEMBERS_CACHE_MS, MEMBERS_FAILED_MS, MEMBERS_READ_MS, membersOf, type GroupMember, type MembersRead } from './groupMembers.ts';
 import { asGroupSendSocket, type GroupSendSocket } from './groupSend.ts';
 import { normalizeMessage, normalizeReaction, normalizeUpdate, type NormalizedEvent } from './normalize.ts';
 
@@ -132,9 +132,9 @@ export interface GatewayLike {
   groupSocket?(groupId: string): GroupSendSocket | null;
   /**
    * The members of an allowed group while open, from WhatsApp's group data (src/wa/groupMembers.ts); null when it cannot
-   * ask. A read: Open chat's group info and tagging.
+   * ask. A read: Open chat's group info and tagging. fresh: not from the 5-minute keep (a send with tags).
    */
-  groupMembers?(groupId: string): Promise<GroupMember[] | null>;
+  groupMembers?(groupId: string, o?: MembersRead): Promise<GroupMember[] | null>;
   /**
    * The socket for src/wa/chatDelete.ts, for an allowed group while open; null otherwise. Used only by the dashboard's
    * Delete chat, after the owner confirmed it.
@@ -189,6 +189,9 @@ export class WhatsAppGateway implements GatewayLike {
   readonly #emitter = new EventEmitter();
   /** Each approved group's members as last read, and when (groupMembers). */
   readonly #members = new Map<string, { at: number; members: GroupMember[] }>();
+  /** Each group's read in flight, shared by every ask meanwhile, and when a group's last read failed (final review, S6). */
+  readonly #membersReading = new Map<string, Promise<GroupMember[] | null>>();
+  readonly #membersFailedAt = new Map<string, number>();
   /** Baileys only reads cachedGroupMetadata on the send path, which this passive client never uses. Kept for completeness. */
   readonly #groupCache = new Map<string, GroupMetadata>();
   readonly #clock: Clock;
@@ -254,26 +257,47 @@ export class WhatsAppGateway implements GatewayLike {
     return asGroupSendSocket(sock);
   }
 
-  /** An approved group's members, read from WhatsApp's group data at most every 5 minutes; null when it cannot ask. */
-  async groupMembers(groupId: string): Promise<GroupMember[] | null> {
+  /**
+   * An approved group's members, read from WhatsApp's group data at most every 5 minutes (fresh: now, for a send with
+   * tags); null when it cannot ask. One read per group at a time, shared by every ask meanwhile; a failed read is kept
+   * 30 seconds, so nothing asks that group again sooner (final review, S6).
+   */
+  async groupMembers(groupId: string, o: MembersRead = {}): Promise<GroupMember[] | null> {
     const sock = this.#sock;
     // The same guard as the sockets: a group that is not approved is never asked about, and nothing kept is given.
     if (this.#stopped || !sock || this.#status.state !== 'open' || !this.#opts.allow.has(groupId)) return null;
     const now = this.#clock.now().getTime();
     const kept = this.#members.get(groupId);
-    if (kept && now - kept.at < MEMBERS_CACHE_MS) return kept.members;
+    if (!o.fresh && kept && now - kept.at < MEMBERS_CACHE_MS) return kept.members;
+    const failedAt = this.#membersFailedAt.get(groupId);
+    if (failedAt !== undefined && now - failedAt < MEMBERS_FAILED_MS) return null;
     if (typeof sock.groupMetadata !== 'function') return null;
+    const inFlight = this.#membersReading.get(groupId);
+    if (inFlight) return inFlight;
+    const read = this.#readMembers(sock, groupId, now).finally(() => {
+      if (this.#membersReading.get(groupId) === read) this.#membersReading.delete(groupId);
+    });
+    this.#membersReading.set(groupId, read);
+    return read;
+  }
+
+  async #readMembers(sock: SocketLike, groupId: string, now: number): Promise<GroupMember[] | null> {
     let timer: { cancel(): void } | undefined;
     const timeout = new Promise<null>((resolve) => {
       timer = this.#schedule(() => resolve(null), MEMBERS_READ_MS);
     });
     try {
-      const meta = await Promise.race([sock.groupMetadata(groupId), timeout]);
-      if (!meta) return null;
+      const meta = await Promise.race([sock.groupMetadata!(groupId), timeout]);
+      if (!meta) {
+        this.#membersFailedAt.set(groupId, this.#clock.now().getTime());
+        return null;
+      }
       const members = membersOf(meta);
       this.#members.set(groupId, { at: now, members });
+      this.#membersFailedAt.delete(groupId);
       return members;
     } catch {
+      this.#membersFailedAt.set(groupId, this.#clock.now().getTime());
       return null; // never the error: it can carry the group's id
     } finally {
       timer?.cancel();

@@ -4,6 +4,7 @@ import { DomainSchema } from '../../config/domains.ts';
 import type { ClientConfig } from '../../config/groups.ts';
 import type { GroupsStore } from '../../config/groupsStore.ts';
 import { GroupChangeError, type ApproveChange, type EditChange, type GroupChangeResult, type GroupChanges } from '../../config/groupsWriter.ts';
+import { noteReadingPhoneChange } from '../../control/chatQueries.ts';
 import { groupsOverview, ONE_PHONE, seenByOf, type GroupDirectory, type GroupFilter, type GroupRow, type GroupsOverview, type PhoneInfo } from '../../control/groups.ts';
 import { getClientByGroupId, listClients } from '../../store/clients.ts';
 import type { Db } from '../../store/db.ts';
@@ -242,8 +243,23 @@ export async function groupsApplyHandler(deps: GroupsDeps, ctx: OwnerContext, bo
   }
   // A group approved is no longer set aside.
   for (const g of result.approved) await deleteKv(deps.db, IGNORED + deps.groupKey(g.groupId));
+  for (const g of [...result.approved, ...result.edited.filter((x) => moves.has(x.groupId))]) await notePhoneChange(deps, ctx, g.groupId);
   // From the cached list: the answer never waits on WhatsApp.
   return ok(await cachedView(deps, result.configs));
+}
+
+/**
+ * Delete chat's key (final review, item 2): a group moved to another phone, or approved again with messages already
+ * stored, had those read by another phone, whose own messages are not this phone's. Noted per client; the save is done,
+ * so a failure here is logged (by error type only) and the rest carry on.
+ */
+async function notePhoneChange(deps: GroupsDeps, ctx: OwnerContext, groupId: string): Promise<void> {
+  try {
+    const client = await getClientByGroupId(deps.db, groupId);
+    if (client) await noteReadingPhoneChange(deps.db, client.id);
+  } catch (e) {
+    deps.log.warn({ code: (e as Error | null)?.name ?? 'Error', requestId: ctx.requestId }, "a group's change of phone could not be noted for Delete chat");
+  }
 }
 
 const BulkBody = z.strictObject({
@@ -336,6 +352,7 @@ export async function groupsBulkHandler(deps: GroupsDeps, ctx: OwnerContext, bod
       configs = result.configs;
       await deleteKv(deps.db, IGNORED + key);
       for (const g of result.approved) await auditLine(deps, ctx, `Group approved · ${g.name} (${g.code})`);
+      await notePhoneChange(deps, ctx, groupId);
       done(key);
     } catch (e) {
       if (e instanceof GroupChangeError) failed(key, withoutIds(e.message));
