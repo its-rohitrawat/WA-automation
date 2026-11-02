@@ -1,5 +1,5 @@
 /* The AI assistant (views/assistant.js): its page and the round "Ask the assistant" button at the bottom right. The
-   look follows the website's hero: an emerald glow on dark, the agent's particle core on an empty chat, mono uppercase
+   look follows the website's hero: an emerald glow on dark, a wave field of points behind an empty chat, mono uppercase
    eyebrows, a tight heading with one green word, glass panels and glowing primary buttons. The theme's tokens, so light
    mode is WhatsApp Web's light theme with the glow kept faint. The conversation keeps to a readable column; on a phone
    the chat list is a drawer. Motion only without reduced motion, and none on keyboard-driven controls. */
@@ -74,6 +74,16 @@ body.has-asst .toast { bottom: max(92px, calc(env(safe-area-inset-bottom) + 84px
   background: radial-gradient(48% 46% at 50% 38%, var(--asst-glow), transparent 70%), radial-gradient(30% 30% at 92% 4%, rgba(52,183,241,.08), transparent 70%),
     radial-gradient(35% 40% at 6% 96%, var(--asst-glow-2), transparent 70%); }
 :root[data-theme="light"] .asst-main { background: #FFFFFF; box-shadow: var(--shadow); }
+/* The wave field (wavefield.js), over the glow and under the conversation: it fills the lower part of the panel, under
+   and behind the cards, its far rows fading in below the heading. Behind the first answer it dims, so the text stays
+   easy to read; when that answer ends it fades out. With no canvas (none yet, or no WebGL) it is not there at all. */
+.asst-waves { position: absolute; inset: 0; z-index: -1; pointer-events: none;
+  -webkit-mask-image: linear-gradient(180deg, transparent 30%, #000 48%); mask-image: linear-gradient(180deg, transparent 30%, #000 48%); }
+.asst-waves:empty { display: none; }
+.asst-waves canvas { width: 100%; height: 100%; display: block; }
+.asst-waves.behind { opacity: .42; }
+:root[data-theme="light"] .asst-waves.behind { opacity: .5; }
+.asst-waves.out { opacity: 0; }
 .asst-bar { display: flex; align-items: center; gap: 12px; padding: 12px 20px; border-bottom: 1px solid var(--asst-edge); }
 .asst-bar-title { min-width: 0; }
 .asst-bar-title .eyebrow { font: 500 10.5px/1 var(--mono); letter-spacing: .2em; text-transform: uppercase; color: var(--green); }
@@ -96,10 +106,8 @@ body.has-asst .toast { bottom: max(92px, calc(env(safe-area-inset-bottom) + 84px
 .asst-bar-orb { width: 26px; height: 26px; }
 :root[data-theme="light"] .asst-orb { box-shadow: 0 0 0 1px rgba(0,168,132,.3), 0 4px 12px -4px rgba(0,128,105,.45); }
 
-/* The empty chat: the core, the eyebrow, the heading with one green word, and the offered questions as glass cards. */
+/* The empty chat, over the waves: the eyebrow, the heading with one green word, and the offered questions as glass cards. */
 .asst-hero { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 8px 0 12px; }
-.asst-core { width: min(240px, 52vw); aspect-ratio: 1; margin-bottom: 6px; }
-.asst-core canvas { width: 100%; height: 100%; display: block; }
 .asst-hero-eyebrow { max-width: 40ch; margin: 0 auto; font: 500 11px/1.6 var(--mono); letter-spacing: .18em; text-transform: uppercase; color: var(--green); text-wrap: balance; }
 :root[data-theme="light"] .asst-hero-eyebrow { color: #008069; }
 /* Inline with the words, so a line that wraps keeps its dot at the start. */
@@ -172,7 +180,6 @@ body.has-asst .toast { bottom: max(92px, calc(env(safe-area-inset-bottom) + 84px
   .asst-log { padding: 16px; }
   .asst-dock { padding: 8px 12px max(10px, env(safe-area-inset-bottom)); }
   .asst-hero-sugg { grid-template-columns: minmax(0, 1fr); }
-  .asst-core { width: min(170px, 46vw); }
   .asst-msg.me { max-width: 88%; }
   /* The chat list as a drawer over the conversation. */
   .asst-drawer-btn, .asst-side-close { display: grid; }
@@ -196,6 +203,9 @@ body.has-asst .toast { bottom: max(92px, calc(env(safe-area-inset-bottom) + 84px
   /* The drawer slides; opening it from the keyboard is the same slide, as the rest of the dashboard's drawers. */
   .asst-side { transition: transform 260ms var(--ease-drawer), visibility 0s linear 260ms; }
   .asst-page.side-open .asst-side { transition: transform 260ms var(--ease-drawer), visibility 0s; }
+  /* The waves fade in when they start, dim behind the first answer and fade out after it. */
+  .asst-waves { transition: opacity 600ms ease; }
+  .asst-waves canvas { animation: asst-fade-in 900ms ease both; }
   /* A message added now fades up once (a chat opened again draws still). */
   .asst-msg.enter { animation: asst-enter 200ms var(--ease-out) both; }
   /* The orb turns slowly, and quickens and breathes while the agent thinks. */
@@ -212,6 +222,7 @@ body.has-asst .toast { bottom: max(92px, calc(env(safe-area-inset-bottom) + 84px
   .asst-open:hover { background: rgba(52,183,241,.14); }
 }
 @keyframes asst-enter { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes asst-fade-in { from { opacity: 0; } }
 @keyframes asst-spin { to { transform: rotate(360deg); } }
 @keyframes asst-breathe { 0%, 100% { box-shadow: 0 0 0 1px rgba(37,211,102,.35), 0 0 14px -2px rgba(37,211,102,.45); }
   50% { box-shadow: 0 0 0 1px rgba(37,211,102,.6), 0 0 26px 2px rgba(37,211,102,.7); } }

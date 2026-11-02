@@ -7,9 +7,10 @@
 // change runs only on the owner's Confirm here, with this session's CSRF token. Leaving the page stops its work in the
 // browser (the stream's reading and the polls); an answer still running finishes on the agent and is saved, and a chat
 // opened while its answer runs is read again every 2 s until it ends. The look follows the website's hero: an empty
-// chat shows the agent's particle core (core3d.js, loaded only then, one still frame with reduced motion, nothing without
-// WebGL, stopped as soon as the chat has messages or the page is left); after that a small CSS orb stands beside each
-// answer and quickens while the agent is thinking.
+// chat has a wave field of points behind it (wavefield.js, loaded only then, one still frame with reduced motion, nothing
+// without WebGL), which thinks behind that chat's first answer, dimmed, and fades out and is freed when the answer ends
+// (or the page is left); a past chat and later questions have none. A small CSS orb stands beside each answer and
+// quickens while the agent is thinking.
 import { ApiError, get, post, postLines } from '../api.js';
 import { $, esc, icon, reduceMotion } from '../dom.js';
 import { SCREENS } from '../router.js';
@@ -31,6 +32,10 @@ const SEARCH = /^(\?[\w=&%+.,-]*)?$/;
 /** How often a chat whose answer runs elsewhere (another visit, another owner) is read again. */
 const RUNNING_POLL_MS = 2_000;
 const PHONE = '(max-width: 960px)';
+/** A mouse: the waves drift with it only there. */
+const FINE = '(hover: hover) and (pointer: fine)';
+/** The waves' fade when the first answer ends (assistant.css). */
+const WAVES_FADE_MS = 600;
 
 /**
  * @typedef {{ id: string, title: string, lines: string[], expiresAt: string, state: 'live' | 'busy' | 'done' | 'cancelled' | 'expired' | 'failed', said?: string }} Card
@@ -147,12 +152,11 @@ export function entryHtml(e, i) {
 }
 
 /**
- * The empty chat: the agent's core, the heading in the website's style, and the questions it offers as cards.
+ * The empty chat: the heading in the website's style, and the questions it offers as cards (the waves are behind).
  * @param {string[]} suggestions
  */
 export function heroHtml(suggestions) {
   return `<div class="asst-hero">
-    <div class="asst-core" data-core aria-hidden="true"><canvas></canvas></div>
     <div class="eyebrow asst-hero-eyebrow"><span class="asst-live-dot" aria-hidden="true"></span>Your agent · answers from your workspace</div>
     <h3 class="asst-hero-title">Ask your agent <em>anything.</em></h3>
     <p class="asst-hero-sub">Clients, tasks, messages, meetings and AI spend. Changes wait for your Confirm.</p>
@@ -196,6 +200,7 @@ export function mountAssistant(ctx) {
     </aside>
     <div class="asst-scrim" data-scrim hidden></div>
     <section class="asst-main" aria-label="Assistant">
+      <div class="asst-waves" data-waves aria-hidden="true"></div>
       <div class="asst-bar"><button class="icon-btn asst-drawer-btn" type="button" data-drawer aria-label="Past chats" aria-expanded="false">${icon('sidebar', 17)}</button>
         <span class="asst-orb asst-bar-orb" data-bar-orb aria-hidden="true"></span>
         <div class="asst-bar-title"><div class="eyebrow">AI assistant</div><h2 class="asst-title" data-title>New chat</h2></div></div>
@@ -215,6 +220,7 @@ export function mountAssistant(ctx) {
   const log = /** @type {HTMLElement} */ ($('[data-log]', page));
   const col = /** @type {HTMLElement} */ ($('[data-col]', page));
   const barOrb = /** @type {HTMLElement} */ ($('[data-bar-orb]', page));
+  const wavesEl = /** @type {HTMLElement} */ ($('[data-waves]', page));
   const form = /** @type {HTMLFormElement} */ ($('[data-form]', page));
   const input = /** @type {HTMLTextAreaElement} */ ($('#asst-q', page));
   const send = /** @type {HTMLButtonElement} */ ($('.asst-send', page));
@@ -233,9 +239,16 @@ export function mountAssistant(ctx) {
   let alive = true;
   /** The platform has the assistant switched off (GET /assistant is a 404): the page says so instead of a chat. */
   let switchedOff = false;
-  /** The particle core's stop, while the empty chat shows it; `coreTurn` drops a start that finishes too late. */
-  let stopCore = /** @type {(() => void) | null} */ (null);
-  let coreTurn = 0;
+  /** The wave field, while it shows; `wavesTurn` drops a start that finishes too late. One field (one WebGL context) at a time. */
+  let waves = /** @type {import('../wavefield.js').Waves | null} */ (null);
+  let wavesTurn = 0;
+  let wavesStarting = false;
+  let wavesThink = false;
+  /** The empty chat's first question, while the waves think behind its answer. */
+  let wavesFirst = /** @type {AbortController | null} */ (null);
+  let wavesFade = /** @type {ReturnType<typeof setTimeout> | undefined} */ (undefined);
+  /** No WebGL here: the page keeps its CSS glow, and does not try again. */
+  let wavesNone = false;
 
   const scrollDown = () => {
     log.scrollTop = log.scrollHeight;
@@ -248,39 +261,77 @@ export function mountAssistant(ctx) {
     if (box) box.innerHTML = suggestionsHtml(offer?.suggestions ?? []);
   }
 
-  /** The core, on the empty chat's canvas: loaded only now, and never left running when it is gone. */
-  function coreOn() {
-    const canvas = /** @type {HTMLCanvasElement | null} */ (col.querySelector('[data-core] canvas'));
-    if (!canvas || stopCore) return;
-    const turn = ++coreTurn;
-    const still = () => alive && turn === coreTurn && canvas.isConnected;
-    void import('../core3d.js').then(async ({ startCore }) => {
+  /** The waves, idle or thinking (dimmed behind an answer): loaded only now, on a new canvas. @param {boolean} thinking */
+  function wavesOn(thinking) {
+    wavesThink = thinking;
+    clearTimeout(wavesFade);
+    wavesEl.classList.remove('out');
+    wavesEl.classList.toggle('behind', thinking);
+    if (waves) return void waves.think(thinking);
+    if (wavesStarting || wavesNone) return;
+    wavesStarting = true;
+    const turn = ++wavesTurn;
+    const canvas = document.createElement('canvas');
+    wavesEl.replaceChildren(canvas);
+    const still = () => alive && turn === wavesTurn;
+    const none = () => {
+      wavesStarting = false;
+      wavesNone = true;
+      wavesEl.replaceChildren();
+    };
+    void import('../wavefield.js').then(async ({ startWaves }) => {
       if (!still()) return;
-      const stop = await startCore(canvas, { reduceMotion });
-      if (still()) stopCore = stop;
-      else stop();
-    }).catch(() => {});
+      const phone = matchMedia(PHONE).matches;
+      const w = await startWaves(canvas, { reduceMotion, phone, parallax: !phone && matchMedia(FINE).matches });
+      if (!still()) return void w?.stop();
+      if (!w) return none();
+      wavesStarting = false;
+      waves = w;
+      w.think(wavesThink);
+    }).catch(() => {
+      if (still()) none();
+    });
   }
 
-  function coreOff() {
-    coreTurn++;
-    stopCore?.();
-    stopCore = null;
+  /** The waves stopped and freed, their canvas too: never left running when they are gone. */
+  function wavesOff() {
+    wavesTurn++;
+    wavesStarting = false;
+    wavesFirst = null;
+    clearTimeout(wavesFade);
+    waves?.stop();
+    waves = null;
+    wavesEl.replaceChildren();
+    wavesEl.classList.remove('behind', 'out');
+  }
+
+  /** The first answer ended: the waves ease back to idle and fade out, then are freed. */
+  function wavesDone() {
+    wavesFirst = null;
+    if (!waves || reduceMotion) return void wavesOff();
+    waves.think(false);
+    wavesEl.classList.add('out');
+    wavesFade = setTimeout(wavesOff, WAVES_FADE_MS);
   }
 
   function drawChat() {
     titleEl.textContent = title;
-    coreOff();
     input.disabled = switchedOff;
     send.disabled = switchedOff;
     if (switchedOff) {
+      wavesOff();
       col.innerHTML = '<div class="asst-off"><span class="asst-orb" aria-hidden="true"></span><h3>The assistant is switched off</h3><p>It is not on for this workspace. Ask the person who runs the dashboard to switch it on.</p></div>';
     } else if (entries.length === 0 && chatId !== null) {
+      wavesOff();
       col.innerHTML = '<div class="asst-loading" aria-hidden="true"><span class="asst-orb thinking"></span></div>'; // a past chat, being read
     } else if (entries.length === 0) {
       col.innerHTML = heroHtml(offer?.suggestions ?? []);
-      coreOn();
+      wavesFirst = null;
+      wavesOn(false);
     } else {
+      // The empty chat's first answer runs over the waves, thinking; any other chat has none.
+      if (wavesFirst) wavesOn(true);
+      else wavesOff();
       col.innerHTML = entries.map(entryHtml).join('');
       for (const e of entries) e.fresh = false; // each fades up once
     }
@@ -379,6 +430,7 @@ export function mountAssistant(ctx) {
   async function ask(question) {
     const q = question.trim();
     if (!q || busy()) return;
+    const first = entries.length === 0 && chatId === null; // asked from the empty chat, over its waves
     input.value = '';
     entries.push({ who: 'me', text: q, fresh: true });
     const bot = /** @type {Extract<Entry, { who: 'bot' }>} */ ({ who: 'bot', text: '', links: [], cards: [], meta: '', warn: false, running: true, step: '', fresh: true });
@@ -386,6 +438,7 @@ export function mountAssistant(ctx) {
     const at = entries.length - 1;
     const ctrl = new AbortController();
     reading = ctrl;
+    if (first) wavesFirst = ctrl;
     drawChat();
     const textEl = () => /** @type {HTMLElement | null} */ (col.querySelector(`[data-entry="${at}"] .asst-text`));
     try {
@@ -428,6 +481,7 @@ export function mountAssistant(ctx) {
       if (reading === ctrl) reading = null;
       bot.running = false;
       if (alive) {
+        if (wavesFirst === ctrl) wavesDone();
         drawEntry(at);
         drawDock();
         chats = chats.map((c) => (c.id === chatId ? { ...c, running: false } : c));
@@ -626,7 +680,7 @@ export function mountAssistant(ctx) {
   // answer itself runs on in the agent and is saved.
   return () => {
     alive = false;
-    coreOff();
+    wavesOff();
     clearTimeout(pollTimer);
     reading?.abort();
     reading = null;
