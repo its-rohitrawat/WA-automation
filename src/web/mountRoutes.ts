@@ -106,6 +106,13 @@ function redirect(res: ServerResponse, location: string): void {
   res.end();
 }
 
+/**
+ * Each workspace's assistant listener for ended sessions, per session store (review N1). A restarted runtime's routes
+ * are mounted again, and the listener of the earlier mount is removed then: one per workspace. A stopped workspace's
+ * stays until it is mounted again; it only drops cards that no one can confirm any more.
+ */
+const assistantEnds = new WeakMap<DashboardMount['sessions'], Map<string, () => void>>();
+
 export function mountAgentRoutes(m: DashboardMount, d: AgentRoutesDeps): void {
   const { router, guard: memberGuard } = m;
   const tenant = d.tenantId ?? FOUNDER_TENANT_ID;
@@ -228,7 +235,11 @@ export function mountAgentRoutes(m: DashboardMount, d: AgentRoutesDeps): void {
       db: d.db, control: d.control, spend: d.spend, voiceLocal: d.voiceLocal, health: d.health, ...(d.accountOf ? { accountOf: d.accountOf } : {}),
       customer: tenant !== FOUNDER_TENANT_ID, // a customer's assistant: no Connections or AI usage
     });
-    m.sessions.onEnd((e) => assistant.forget(e));
+    // One listener per workspace: a mount again (its runtime restarted) first removes the earlier mount's.
+    const ends = assistantEnds.get(m.sessions) ?? new Map<string, () => void>();
+    assistantEnds.set(m.sessions, ends);
+    ends.get(tenant)?.();
+    ends.set(tenant, m.sessions.onEnd((e) => assistant.forget(e)));
     registerAssistantApi(router, { ...action, db: d.db, clock: d.clock, assistant, pending, settings: d.settings, audit: m.audit });
   }
 

@@ -205,25 +205,51 @@ export async function startAnswer(db: Sql, chatId: number, at: string): Promise<
   return Number(r.id);
 }
 
-/** The answer so far, while it runs (it stays running). */
-export async function saveAnswer(db: Sql, id: number, o: { body: string; cards: readonly StoredCard[]; links: readonly StoredLink[]; at: string }): Promise<void> {
-  await db.run(
-    "UPDATE assistant_messages SET body = ?, cards = ?, links = ?, updated_at = ? WHERE id = ? AND status = 'running'",
-    [o.body.slice(0, BODY_MAX), cardsText(o.cards), linksText(o.links), o.at, id],
-  );
+/**
+ * The running answer's cards over the stored ones: a card the owner already decided (setCardState) stays as decided,
+ * with what Confirm said. The run's own copy of a card still says waiting, and its save can land after the decision.
+ */
+function keepDecided(cards: readonly StoredCard[], stored: string | undefined): readonly StoredCard[] {
+  const decided = new Map(readCards(stored ?? '[]').filter((c) => c.state !== 'waiting').map((c) => [c.id, c]));
+  if (decided.size === 0) return cards;
+  return cards.map((c) => {
+    const d = decided.get(c.id);
+    return d ? { ...c, state: d.state, ...(d.said === undefined ? {} : { said: d.said }) } : c;
+  });
 }
 
-/** The answer as it ended: done, stopped (the owner's Stop) or failed, with its note and cost; the chat moves up. */
+/**
+ * The answer so far, while it runs (it stays running). Read and written in one transaction, as setCardState is, so a
+ * card decided meanwhile stays decided.
+ */
+export async function saveAnswer(db: Db, id: number, o: { body: string; cards: readonly StoredCard[]; links: readonly StoredLink[]; at: string }): Promise<void> {
+  await db.tx(async (q) => {
+    const r = await q.get<{ cards: string }>("SELECT cards FROM assistant_messages WHERE id = ? AND status = 'running'", [id]);
+    if (!r) return;
+    await q.run(
+      "UPDATE assistant_messages SET body = ?, cards = ?, links = ?, updated_at = ? WHERE id = ? AND status = 'running'",
+      [o.body.slice(0, BODY_MAX), cardsText(keepDecided(o.cards, r.cards)), linksText(o.links), o.at, id],
+    );
+  });
+}
+
+/**
+ * The answer as it ended: done, stopped (the owner's Stop) or failed, with its note and cost; the chat moves up. In one
+ * transaction, as saveAnswer: a card decided while it ran stays decided.
+ */
 export async function finishAnswer(
-  db: Sql,
+  db: Db,
   id: number,
   o: { chatId: number; body: string; status: Exclude<MessageStatus, 'running'>; note?: string | null; costUsd: number; cards: readonly StoredCard[]; links: readonly StoredLink[]; at: string },
 ): Promise<void> {
-  await db.run(
-    'UPDATE assistant_messages SET body = ?, status = ?, note = ?, cost_usd = ?, cards = ?, links = ?, updated_at = ? WHERE id = ?',
-    [o.body.slice(0, BODY_MAX), o.status, noteText(o.note), Number.isFinite(o.costUsd) && o.costUsd > 0 ? o.costUsd : 0, cardsText(o.cards), linksText(o.links), o.at, id],
-  );
-  await db.run('UPDATE assistant_chats SET updated_at = ? WHERE id = ?', [o.at, o.chatId]);
+  await db.tx(async (q) => {
+    const r = await q.get<{ cards: string }>('SELECT cards FROM assistant_messages WHERE id = ?', [id]);
+    await q.run(
+      'UPDATE assistant_messages SET body = ?, status = ?, note = ?, cost_usd = ?, cards = ?, links = ?, updated_at = ? WHERE id = ?',
+      [o.body.slice(0, BODY_MAX), o.status, noteText(o.note), Number.isFinite(o.costUsd) && o.costUsd > 0 ? o.costUsd : 0, cardsText(keepDecided(o.cards, r?.cards)), linksText(o.links), o.at, id],
+    );
+    await q.run('UPDATE assistant_chats SET updated_at = ? WHERE id = ?', [o.at, o.chatId]);
+  });
 }
 
 /**

@@ -84,6 +84,27 @@ describe('the chat store', () => {
       expect(m.cards.map((x) => [x.state, x.said])).toEqual([['confirmed', 'ACM-006 added.'], ['cancelled', undefined]]);
     }));
 
+  it('a card decided while its answer still runs stays decided through the answer\'s later saves and its end', () =>
+    withDb(async (db) => {
+      const c = await createChat(db, { createdBy: 'owner@example.com', title: 'Task', at: AT(1) });
+      const id = await startAnswer(db, c.id, AT(1));
+      const other: StoredCard = { ...CARD, id: 'd'.repeat(24) };
+      await saveAnswer(db, id, { body: 'Drafted', cards: [CARD, other], links: [], at: AT(2) });
+      expect(await setCardState(db, id, CARD.id, 'confirmed', 'ACM-006 added.', AT(3))).toBe(true);
+      expect(await setCardState(db, id, other.id, 'cancelled', undefined, AT(3))).toBe(true);
+      // The run's own copy still says waiting, and it drafted one more since: the save keeps both decisions, adds the new one.
+      const later: StoredCard = { ...CARD, id: 'e'.repeat(24) };
+      const cards = async () => (await chatMessages(db, c.id))[0]!.cards.map((x) => [x.id, x.state, x.said]);
+      const decided = [[CARD.id, 'confirmed', 'ACM-006 added.'], [other.id, 'cancelled', undefined], [later.id, 'waiting', undefined]];
+      await saveAnswer(db, id, { body: 'Drafted, and more', cards: [CARD, other, later], links: [], at: AT(4) });
+      expect(await cards()).toEqual(decided);
+      expect((await chatMessages(db, c.id))[0]).toMatchObject({ status: 'running', body: 'Drafted, and more' });
+      await finishAnswer(db, id, { chatId: c.id, body: 'Done.', status: 'done', costUsd: 0.01, cards: [CARD, other, later], links: [], at: AT(5) });
+      expect(await cards()).toEqual(decided);
+      expect((await chatMessages(db, c.id))[0]).toMatchObject({ status: 'done', body: 'Done.' });
+      expect((await getChat(db, c.id))!.updatedAt).toBe(AT(5));
+    }));
+
   it('cuts a long answer to its limit, and reads damaged JSON as nothing rather than failing', () =>
     withDb(async (db) => {
       const c = await createChat(db, { createdBy: 'owner@example.com', title: 'Long', at: AT(1) });

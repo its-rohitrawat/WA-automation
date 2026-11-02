@@ -43,9 +43,17 @@ class ProposingAi implements AssistantAi {
   }
 }
 
-/** Streams a first part, then waits for open() before the rest: an answer still running. */
+/**
+ * Streams a first part, then waits for open() before the rest: an answer still running. `drafts`: its first step drafts
+ * marking SHA-001 done, so the card can be decided while the answer still runs.
+ */
 class GatedAi implements AssistantAi {
   readonly attempts = 1;
+  readonly drafts: boolean;
+  calls = 0;
+  constructor(drafts = false) {
+    this.drafts = drafts;
+  }
   #open!: () => void;
   readonly #gate = new Promise<void>((r) => {
     this.#open = r;
@@ -58,6 +66,9 @@ class GatedAi implements AssistantAi {
     this.#open();
   }
   async turn(_req: unknown, onText: (d: string) => void): Promise<AssistantTurn> {
+    if (this.drafts && ++this.calls === 1) {
+      return { content: [{ type: 'tool_use', id: 't1', name: 'propose_task_change', input: { code: 'SHA-1', status: 'done' } } as AssistantBlock], stopReason: 'tool_use', costUsd: 0.01, fallbackUsed: false };
+    }
     onText('Part one. ');
     this.#started();
     await this.#gate;
@@ -92,7 +103,7 @@ async function boot(o: { askCapacity?: number; ai?: AssistantAi } = {}) {
   });
   closers.push(() => h.close());
   // The fake the test gave, or the proposing one (whose calls the tests count).
-  return { db, h, ai: ai as ProposingAi, pending, assistant };
+  return { db, h, ai: ai as ProposingAi, pending, assistant, clock };
 }
 
 /** The answer's events, one JSON object per line. */
@@ -241,5 +252,28 @@ describe('assistant API', () => {
     expect(events.at(-1)).toMatchObject({ type: 'done', status: 'stopped', note: 'Stopped.' });
     expect(assistant.running(id)).toBe(false);
     expect((await h.get(`/dashboard/api/assistant/chats/${id}`)).json).toMatchObject({ messages: [{}, { status: 'stopped', body: 'Part one.', note: 'Stopped.' }] });
+  });
+
+  it('a card confirmed or cancelled while its answer still runs stays so through the answer\'s later saves and its end', async () => {
+    for (const decide of ['confirm', 'cancel'] as const) {
+      const ai = new GatedAi(true);
+      const { db, h, assistant, clock } = await boot({ ai });
+      const asking = h.post('/dashboard/api/assistant/ask', { body: { question: 'Mark SHA-1 done' } });
+      await ai.started; // the card is drafted and saved; the answer still runs
+      const chatId = ((await h.get('/dashboard/api/assistant/chats')).json as { chats: { id: number }[] }).chats[0]!.id;
+      const cardsNow = async () => ((await h.get(`/dashboard/api/assistant/chats/${chatId}`)).json as { messages: { cards?: { id: string }[] }[] }).messages[1]?.cards ?? [];
+      await expect.poll(cardsNow).toHaveLength(1);
+      const card = (await cardsNow())[0]!;
+      expect(card, decide).toMatchObject({ state: 'waiting', live: true });
+      expect((await h.post(`/dashboard/api/assistant/${decide}`, { body: { id: card.id } })).status, decide).toBe(200);
+      clock.advance(5_000); // past the save throttle: the rest of the answer is saved as it comes, then as it ended
+      ai.open();
+      expect(lines((await asking).json).at(-1), decide).toMatchObject({ type: 'done', status: 'done' });
+      expect(assistant.running(chatId)).toBe(false);
+      const want = decide === 'confirm' ? { state: 'confirmed', said: 'SHA-001 updated.' } : { state: 'cancelled' };
+      expect((await chatMessages(db, chatId))[1], decide).toMatchObject({ status: 'done', body: 'Part one. Part two.', cards: [{ id: card.id, ...want }] });
+      expect((await h.get(`/dashboard/api/assistant/chats/${chatId}`)).json, decide).toMatchObject({ messages: [{}, { cards: [{ id: card.id, ...want, live: false }] }] });
+      expect((await getTaskByCode(db, 'SHA-001'))?.status, decide).toBe(decide === 'confirm' ? 'done' : 'open');
+    }
   });
 });
