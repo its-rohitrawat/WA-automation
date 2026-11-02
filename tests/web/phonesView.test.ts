@@ -75,6 +75,27 @@ describe("WhatsApp's own name on each phone card", () => {
   });
 });
 
+describe("WhatsApp's own name on the spare phone's card", () => {
+  const spareCard = (accountName: unknown) =>
+    readConnections({ spare: { state: 'ok', label: 'Linked', recipientMasked: '•••• 0000', accountName } }).find((c: { id: string }) => c.id === 'spare');
+
+  it("is read as a phone's name is: one line of at most 60 characters with no control or invisible characters", () => {
+    expect(spareCard('Morning​ de‮sk\u0007\n').accountName).toBe('Morning desk');
+    expect(spareCard('A'.repeat(70)).accountName).toBe('A'.repeat(60));
+    for (const bad of [undefined, null, '', ' ​ ', 7, { toString: 1 }]) expect(spareCard(bad).accountName, JSON.stringify(bad)).toBeNull();
+  });
+
+  it('shows "WhatsApp name: …" under the card title, escaped, the title on the full width; nothing when it is not known', async () => {
+    const { renderConnections } = await views();
+    const html = renderConnections([spareCard('Desk <b>2</b> & "co"')]);
+    expect(html).toContain('WhatsApp name: Desk &lt;b&gt;2&lt;/b&gt; &amp; &quot;co&quot;');
+    expect(html).not.toContain('<b>2');
+    expect(html.indexOf('Spare WhatsApp')).toBeLessThan(html.indexOf('WhatsApp name:'));
+    expect(html).toContain('<article class="card conn conn-stack" data-conn="spare"');
+    expect(renderConnections([spareCard(null)])).not.toContain('WhatsApp name');
+  });
+});
+
 describe("a Google card's email", () => {
   const google = (email: string) => readConnections({ google: [{ label: 'org2', email, state: 'ok', usedFor: ['Meetings'] }] }).filter((c: { kind: string }) => c.kind === 'google');
   const LONG = 'meetings.and.calendar@example-consulting.co.in';

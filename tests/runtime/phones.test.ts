@@ -1,13 +1,13 @@
 import { randomBytes } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { AuditEntry } from '../../src/control/errors.ts';
-import { accountNameOf, workspacePhones } from '../../src/runtime/phones.ts';
+import { workspacePhones } from '../../src/runtime/phones.ts';
 import type { Db, Sql } from '../../src/store/db.ts';
 import { getKv } from '../../src/store/kv.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { silentLogger } from '../../src/util/logger.ts';
 import type { AllowList } from '../../src/wa/allowlist.ts';
-import { openPhoneSession, openSessionDb, phoneNumberIn, phoneSessionKey, useEncryptedAuthState, type EncryptedAuth, type ReadingPhone, type SessionHome } from '../../src/wa/authState.ts';
+import { accountNameOf, openPhoneSession, openSessionDb, phoneNumberIn, phoneSessionKey, useEncryptedAuthState, type EncryptedAuth, type ReadingPhone, type SessionHome } from '../../src/wa/authState.ts';
 import type { GatewayLike, GatewayState, GatewayStatus } from '../../src/wa/gateway.ts';
 import { PHONES_KV_KEY } from '../../src/wa/phoneList.ts';
 import { SHARMA, testDb } from '../helpers/db.ts';

@@ -358,17 +358,24 @@ export async function useSenderAuthState(db: Db, masterKey: Buffer): Promise<Enc
  * compares again at every start, where it reads the founder's session anyway.
  */
 export function readFounderNumber(file: string, key: Buffer): string | undefined {
+  return digitsOfMe(readMe(file, key));
+}
+
+/** The account a saved link names (creds.me), read from a session file as readFounderNumber reads it; undefined as it is. */
+function readMe(file: string, key: Buffer): AuthenticationCreds['me'] {
   try {
     const { rowId, open } = sessionCodec(key);
     const id = rowId('creds');
     const v = readSessionRow(file, id);
     if (!v) return undefined;
-    const me = (open(id, v) as AuthenticationCreds | null)?.me?.id;
-    return me ? me.split(/[:@]/)[0] : undefined;
+    return (open(id, v) as AuthenticationCreds | null)?.me ?? undefined;
   } catch {
     return undefined;
   }
 }
+
+/** The phone number of an account: the digits of its id before the device part (":7") or "@". */
+const digitsOfMe = (me: AuthenticationCreds['me']): string | undefined => (me?.id ? me.id.split(/[:@]/)[0] : undefined);
 
 /**
  * readFounderNumber for either engine. On Postgres it reads the founder's creds row (slot 'live') and, like the file
@@ -394,18 +401,54 @@ export async function spareNumberIn(home: SessionHome, workspaceKey: Buffer): Pr
   return numberIn(home, 'spare', deriveSubkey(workspaceKey, SENDER_SESSION_INFO));
 }
 
+/**
+ * WhatsApp's own name for the spare's linked account, for its Connections card (owner follow-up, 2 Nov): read from its
+ * saved link on either engine as spareNumberIn reads it, cleaned as a reading phone's is (accountNameOf). Writes nothing;
+ * null for no link, no name, or a row this key cannot open.
+ */
+export async function spareAccountNameIn(home: SessionHome, workspaceKey: Buffer): Promise<string | null> {
+  const me = await meIn(home, 'spare', deriveSubkey(workspaceKey, SENDER_SESSION_INFO));
+  return me?.id ? accountNameOf(me) : null;
+}
+
 async function numberIn(home: SessionHome, phone: Phone, key: Buffer): Promise<string | undefined> {
-  if (home.engine === 'sqlite') return readFounderNumber(sessionFileOf(home.dataDir, phone), key);
+  return digitsOfMe(await meIn(home, phone, key));
+}
+
+/** The account a phone's saved link names (creds.me), on either engine. Writes nothing; undefined for no link or a row this key cannot open. */
+async function meIn(home: SessionHome, phone: Phone, key: Buffer): Promise<AuthenticationCreds['me']> {
+  if (home.engine === 'sqlite') return readMe(sessionFileOf(home.dataDir, phone), key);
   try {
     const { rowId, open } = sessionCodec(key);
     const id = rowId('creds');
     const v = (await home.db.get<{ v: Buffer }>(authSql(new PgSessionDb(home.db, phone)).get, [id]))?.v;
     if (!v) return undefined;
-    const me = (open(id, v) as AuthenticationCreds | null)?.me?.id;
-    return me ? me.split(/[:@]/)[0] : undefined;
+    return (open(id, v) as AuthenticationCreds | null)?.me ?? undefined;
   } catch {
     return undefined;
   }
+}
+
+const ACCOUNT_NAME_MAX = 60;
+/** More digits than this and a "name" could be a phone number: never shown (a label refuses the same, wa/phoneList.ts). */
+const ACCOUNT_NAME_DIGITS_MAX = 6;
+
+/**
+ * WhatsApp's own name for a linked account (owner follow-up, 2 Nov): its profile name as Baileys keeps it in creds.me,
+ * else the name WhatsApp shows others (notify). It is the account holder's text, so it comes out as one line of plain text
+ * of at most 60 characters: control and line-break characters become spaces, invisible format characters (zero-width,
+ * direction) are dropped. Null when not known: none, blank, Baileys' "~" (a pairing-code link before WhatsApp says the
+ * name), or text with more than 6 digits, which could be a phone number.
+ */
+export function accountNameOf(me: { name?: string; notify?: string } | undefined): string | null {
+  for (const raw of [me?.name, me?.notify]) {
+    if (typeof raw !== 'string') continue;
+    const one = raw.replace(/[\p{Cc}\p{Zl}\p{Zp}]+/gu, ' ').replace(/\p{Cf}+/gu, '').replace(/\s+/g, ' ').trim();
+    if (one === '' || one === '~') continue;
+    if ((one.match(/\p{Nd}/gu) ?? []).length > ACCOUNT_NAME_DIGITS_MAX) return null;
+    return Array.from(one).slice(0, ACCOUNT_NAME_MAX).join('').trim();
+  }
+  return null;
 }
 
 /**

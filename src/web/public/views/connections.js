@@ -152,8 +152,10 @@ function otherConnections(cards) {
   if (!cards.length) return '<p class="empty-note">No connections to show yet.</p>';
   const card = (/** @type {Card} */ c) => {
     const kind = /** @type {keyof typeof ICON} */ (c.kind);
-    return `<article class="card conn${c.email ? ' conn-stack' : ''}" data-conn="${esc(c.id)}"${c.email ? ` data-email="${esc(c.email)}"` : ''}${c.meetings ? ' data-meetings="1"' : ''}><div class="top-row"><div class="badge">${icon(ICON[kind] ?? 'plug', 21)}</div>
-        <div class="grow-1"><h3${c.email ? ` title="${esc(c.title)}"` : ''}>${c.email ? emailBreaks(c.email) : esc(c.title)}</h3><div class="sub">${esc(c.subtitle)}</div></div>
+    // A Google card's email and the spare's WhatsApp name take the card's full width, as the phone cards' names do.
+    const stack = Boolean(c.email) || c.kind === 'spare';
+    return `<article class="card conn${stack ? ' conn-stack' : ''}" data-conn="${esc(c.id)}"${c.email ? ` data-email="${esc(c.email)}"` : ''}${c.meetings ? ' data-meetings="1"' : ''}><div class="top-row"><div class="badge">${icon(ICON[kind] ?? 'plug', 21)}</div>
+        <div class="grow-1"><h3${c.email ? ` title="${esc(c.title)}"` : ''}>${c.email ? emailBreaks(c.email) : esc(c.title)}</h3>${c.accountName ? `<div class="sub wa-name">WhatsApp name: ${esc(c.accountName)}</div>` : ''}<div class="sub">${esc(c.subtitle)}</div></div>
         <span class="pill ${PILL[c.state]}"><i></i>${esc(c.stateLabel || DEFAULT_LABEL[c.state])}</span></div>
       <dl class="kv">${c.rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>
       ${c.note ? `<div class="note">${icon('info', 16)}<span>${esc(c.note)}</span></div>` : ''}

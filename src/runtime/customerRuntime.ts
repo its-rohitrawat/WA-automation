@@ -48,7 +48,7 @@ import { silentLogger } from '../util/logger.ts';
 import { istDate } from '../util/time.ts';
 import { buildVoiceDeps } from '../voiceDeps.ts';
 import { AllowList } from '../wa/allowlist.ts';
-import { FounderNumberWatch, openPhoneSession, readFounderNumber, sessionHomeOf, spareNumberIn, useEncryptedAuthState } from '../wa/authState.ts';
+import { FounderNumberWatch, openPhoneSession, readFounderNumber, sessionHomeOf, spareAccountNameIn, spareNumberIn, useEncryptedAuthState } from '../wa/authState.ts';
 import { baileysSocketFactory, WhatsAppGateway, type SocketFactory } from '../wa/gateway.ts';
 import { LinkSessions } from '../wa/linkSession.ts';
 import { customerSpare } from './customerSpare.ts';
@@ -488,6 +488,8 @@ export async function buildCustomerRuntime(
       ...(liveReport ? { sender: () => liveReport.sender() } : sender ? { sender: { status: () => sender.status(), maskedRecipient: () => sender.maskedRecipient() } } : {}),
       ...(heartbeat ? { heartbeat: { lastBeatAt: () => heartbeat.lastBeatAt() } } : {}),
       ...(spareCheck ? { spareLinked: spareCheck } : {}),
+      // WhatsApp's own name for the spare, from its saved link (read only while the card shows it linked).
+      spareName: () => spareAccountNameIn(sessions, key),
     });
     // A customer's own spare phone (S4.6 A): linked from its dashboard into its own session rows (customerSpare.ts).
     const ownSpare = t.founder ? undefined : await customerSpare({ dataDir: env.DATA_DIR, sessions, key, factory: senderFactory, founderNumber, log });

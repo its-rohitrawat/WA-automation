@@ -16,7 +16,7 @@ import { idOf, seededDb } from '../helpers/db.ts';
 const NOW = '2026-10-19T08:00:00.000Z';
 const KEY = Buffer.alloc(32, 7);
 
-async function setup(o: { env?: Record<string, string>; sender?: SenderState; heartbeat?: Date | null | 'none'; cap?: number; spareLinked?: () => boolean } = {}) {
+async function setup(o: { env?: Record<string, string>; sender?: SenderState; heartbeat?: Date | null | 'none'; cap?: number; spareLinked?: () => boolean; spareName?: () => Promise<string | null> } = {}) {
   const db = await seededDb();
   const clock = manualClock(NOW);
   const spend = new SpendGuard({ db, clock, capUsd: o.cap ?? 10 });
@@ -39,6 +39,7 @@ async function setup(o: { env?: Record<string, string>; sender?: SenderState; he
     }),
     ...(o.heartbeat === undefined || o.heartbeat === 'none' ? {} : { heartbeat: { lastBeatAt: () => o.heartbeat as Date | null } }),
     ...(o.spareLinked ? { spareLinked: o.spareLinked } : {}),
+    ...(o.spareName ? { spareName: o.spareName } : {}),
   });
   return { db, clock, spend, health, control, setGateway, setSender: (s: SenderState) => (senderState = s) };
 }
@@ -180,7 +181,7 @@ describe('AgentControl.connections', () => {
     await db_publish(t.db);
     expect((await t.control.connections())).toEqual({
       founder: { state: 'ok', label: 'Connected', groups: 2, lastActivityAt: '2026-10-19T07:00:00.000Z', device: 'WA Agent - Tracker' },
-      spare: { state: 'ok', label: 'Linked', device: 'WA Agent - Morning report', recipientMasked: '…5678' },
+      spare: { state: 'ok', label: 'Linked', device: 'WA Agent - Morning report', recipientMasked: '…5678', accountName: null },
       google: [
         { label: 'main', email: null, usedFor: ['Tracker on Drive', 'Meetings'], state: 'ok', stateLabel: 'Connected' },
         { label: 'company2', email: null, usedFor: ['Meetings'], state: 'down', stateLabel: 'Sign-in lost' },
@@ -212,13 +213,13 @@ describe('AgentControl.connections', () => {
   });
 
   it('maps the spare phone states, and has no spare card state without the report', async () => {
-    expect((await (await setup()).control.connections()).spare).toEqual({ state: 'off', label: 'Switched off', device: 'WA Agent - Morning report', recipientMasked: null });
+    expect((await (await setup()).control.connections()).spare).toEqual({ state: 'off', label: 'Switched off', device: 'WA Agent - Morning report', recipientMasked: null, accountName: null });
     // With the dashboard, the briefing may be off with no sender open: the saved link decides (Automations' switch needs it).
     let saved = true;
     const off = await setup({ spareLinked: () => saved });
-    expect((await off.control.connections()).spare).toEqual({ state: 'ok', label: 'Linked', device: 'WA Agent - Morning report', recipientMasked: null });
+    expect((await off.control.connections()).spare).toEqual({ state: 'ok', label: 'Linked', device: 'WA Agent - Morning report', recipientMasked: null, accountName: null });
     saved = false;
-    expect((await off.control.connections()).spare).toEqual({ state: 'warn', label: 'Not linked', device: 'WA Agent - Morning report', recipientMasked: null });
+    expect((await off.control.connections()).spare).toEqual({ state: 'warn', label: 'Not linked', device: 'WA Agent - Morning report', recipientMasked: null, accountName: null });
     // An open sender's own state comes first.
     expect((await (await setup({ sender: 'logged_out', spareLinked: () => true })).control.connections()).spare).toMatchObject({ state: 'down', label: 'Logged out' });
     const t = await setup({ sender: 'not_linked' });
@@ -229,6 +230,37 @@ describe('AgentControl.connections', () => {
       t.setSender(s);
       expect((await spare()).state, s).toBe(st);
     }
+  });
+
+  it("shows WhatsApp's own name for the spare while it is linked, read only then, and none otherwise (owner follow-up)", async () => {
+    let name: string | null = 'Morning desk';
+    let reads = 0;
+    const spareName = async () => (reads++, name);
+    const t = await setup({ sender: 'idle', spareName });
+    const spare = async () => (await t.control.connections()).spare;
+    expect(await spare()).toMatchObject({ state: 'ok', accountName: 'Morning desk' });
+    t.setSender('open');
+    expect((await spare()).accountName).toBe('Morning desk');
+    name = null;
+    expect((await spare()).accountName).toBeNull();
+    name = 'Morning desk';
+    for (const s of ['not_linked', 'logged_out', 'unreadable', 'self_send'] as const) {
+      t.setSender(s);
+      const before = reads;
+      expect((await spare()).accountName, s).toBeNull();
+      expect(reads, s).toBe(before); // not read at all
+    }
+    // A failed read is no name, never an error on the page.
+    const failing = await setup({ sender: 'idle', spareName: () => Promise.reject(new Error('disk')) });
+    expect((await failing.control.connections()).spare).toMatchObject({ state: 'ok', accountName: null });
+    // With the briefing off, the saved link decides, as it does the state.
+    let saved = true;
+    const off = await setup({ spareLinked: () => saved, spareName });
+    expect((await off.control.connections()).spare.accountName).toBe('Morning desk');
+    saved = false;
+    expect((await off.control.connections()).spare.accountName).toBeNull();
+    // Switched off (no report): none.
+    expect((await (await setup({ spareName })).control.connections()).spare.accountName).toBeNull();
   });
 
   it("main's Google state follows a publish sign-in failure and the meetings' Google pause", async () => {

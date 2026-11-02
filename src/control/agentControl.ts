@@ -37,7 +37,8 @@ export interface AgentStatus {
 
 export interface Connections {
   founder: { state: PartState; label: string; groups: number; lastActivityAt: string | null; device: string };
-  spare: { state: PartState; label: string; device: string; recipientMasked: string | null };
+  /** accountName: WhatsApp's own name for the spare's account while it is linked; null otherwise or when not known. */
+  spare: { state: PartState; label: string; device: string; recipientMasked: string | null; accountName: string | null };
   google: { label: string; email: string | null; usedFor: string[]; state: PartState; stateLabel: string }[];
   /** The tracker file: its name, folder, the main account's email (when known) and its Drive link (once uploaded). */
   drive: { state: PartState; label: string; lastUploadAt: string | null; file: string; folder: string; account: string | null; url: string | null };
@@ -67,6 +68,11 @@ export interface AgentControlDeps {
    * given: the spare phone shows as switched off then, as before.
    */
   spareLinked?: () => boolean | Promise<boolean>;
+  /**
+   * WhatsApp's own name for the spare's account, from its saved link (wa/authState.ts spareAccountNameIn, already
+   * cleaned; null when not known). Read only while the spare shows as linked; a failed read is no name.
+   */
+  spareName?: () => Promise<string | null>;
   /** The uptime heartbeat, when HEARTBEAT_URL is set. */
   heartbeat?: { lastBeatAt(): Date | null };
 }
@@ -232,12 +238,14 @@ export class AgentControl {
     const calls = (await db.get<{ n: number }>("SELECT COUNT(*) AS n FROM spend WHERE day = ? AND kind = 'ai'", [istDate(now)]))!.n;
     const beat = heartbeat?.lastBeatAt() ?? null;
     const file = await trackerFile(db);
+    const spare = sender ? { ...spareState(sender.status()), device: SPARE_DEVICE, recipientMasked: sender.maskedRecipient() }
+      : this.#d.spareLinked
+        ? { ...((await this.#d.spareLinked()) ? { state: 'ok' as const, label: 'Linked' } : { state: 'warn' as const, label: 'Not linked' }), device: SPARE_DEVICE, recipientMasked: null }
+        : { state: 'off' as const, label: 'Switched off', device: SPARE_DEVICE, recipientMasked: null };
+    const spareName = this.#d.spareName;
     return {
       founder: { ...this.#whatsapp(), groups, lastActivityAt: await this.#lastMessageAt(), device: FOUNDER_DEVICE },
-      spare: sender ? { ...spareState(sender.status()), device: SPARE_DEVICE, recipientMasked: sender.maskedRecipient() }
-        : this.#d.spareLinked
-          ? { ...((await this.#d.spareLinked()) ? { state: 'ok' as const, label: 'Linked' } : { state: 'warn' as const, label: 'Not linked' }), device: SPARE_DEVICE, recipientMasked: null }
-          : { state: 'off', label: 'Switched off', device: SPARE_DEVICE, recipientMasked: null },
+      spare: { ...spare, accountName: spare.state === 'ok' && spareName ? await spareName().catch(() => null) : null },
       google,
       drive: {
         ...(await this.#tracker(snap)), lastUploadAt: await lastTrackerUpload(db, snap.lastPublishedAt), file: file.name, folder: file.folder, account: file.account,

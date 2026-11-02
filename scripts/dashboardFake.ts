@@ -63,7 +63,7 @@ export const fixtures = (st: FakeState) => {
       },
   connections: {
     founder: st.setup ? { state: 'down', label: 'Not linked', groups: 0, lastActivityAt: null } : { state: 'ok', label: 'Connected', groups: 3, lastActivityAt: at(3) },
-    spare: st.spareLinked ? { state: 'ok', label: 'Connected', recipientMasked: '•••• 0000' } : { state: 'warn', label: 'Not linked', recipientMasked: '•••• 0000' },
+    spare: st.spareLinked ? { state: 'ok', label: 'Connected', recipientMasked: '•••• 0000', accountName: 'Sharma Traders (briefing)' } : { state: 'warn', label: 'Not linked', recipientMasked: '•••• 0000', accountName: null },
     google: [
       { label: 'main', email: 'owner@example.com', state: 'ok', stateLabel: 'Connected', usedFor: ['Mail', 'Drive', 'Meetings'] },
       st.org2Ok

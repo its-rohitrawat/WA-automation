@@ -79,7 +79,7 @@ export function readOverview(raw) {
 /**
  * One card on the Connections screen.
  * @typedef {{ id: string, kind: string, title: string, subtitle: string, state: PartState, stateLabel: string, rows: [string, string][], note: string,
- *   email?: string, meetings?: boolean, link?: string }} Card
+ *   email?: string, meetings?: boolean, link?: string, accountName?: string | null }} Card
  */
 
 /**
@@ -104,6 +104,8 @@ export function readConnections(raw) {
     state: spareState, stateLabel: str(s.label),
     rows: [['Sends', 'Morning briefing only'], ['Sends to', str(s.recipientMasked) || '—']],
     note: spareState === 'ok' ? '' : "Link it with the spare phone, not the founder's. The agent refuses a link from the founder's own number.",
+    // WhatsApp's own name for its account, read as a reading phone's is (the account holder's text: esc() it).
+    accountName: accountName(s.accountName),
   });
   for (const g of arr(r.google)) {
     const o = obj(g);

@@ -7,7 +7,7 @@ import type { Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
 import { AllowList } from '../wa/allowlist.ts';
 import {
-  openPhoneSession, phoneIdOf, phoneName, phoneNumberIn, phoneSessionKey, resetSession, SessionDecryptError, useEncryptedAuthState,
+  accountNameOf, openPhoneSession, phoneIdOf, phoneName, phoneNumberIn, phoneSessionKey, resetSession, SessionDecryptError, useEncryptedAuthState,
   type EncryptedAuth, type PhoneId, type ReadingPhone, type SessionHome,
 } from '../wa/authState.ts';
 import type { GatewayLike } from '../wa/gateway.ts';
@@ -92,28 +92,6 @@ export interface WorkspacePhones {
 }
 
 const digitsOf = (auth: EncryptedAuth | undefined): string | undefined => auth?.state.creds.me?.id?.split(/[:@]/)[0];
-
-const ACCOUNT_NAME_MAX = 60;
-/** More digits than this and a "name" could be a phone number: never shown (a label refuses the same, wa/phoneList.ts). */
-const ACCOUNT_NAME_DIGITS_MAX = 6;
-
-/**
- * WhatsApp's own name for a linked account (owner follow-up, 2 Nov): its profile name as Baileys keeps it in creds.me,
- * else the name WhatsApp shows others (notify). It is the account holder's text, so it comes out as one line of plain text
- * of at most 60 characters: control and line-break characters become spaces, invisible format characters (zero-width,
- * direction) are dropped. Null when not known: none, blank, Baileys' "~" (a pairing-code link before WhatsApp says the
- * name), or text with more than 6 digits, which could be a phone number.
- */
-export function accountNameOf(me: { name?: string; notify?: string } | undefined): string | null {
-  for (const raw of [me?.name, me?.notify]) {
-    if (typeof raw !== 'string') continue;
-    const one = raw.replace(/[\p{Cc}\p{Zl}\p{Zp}]+/gu, ' ').replace(/\p{Cf}+/gu, '').replace(/\s+/g, ' ').trim();
-    if (one === '' || one === '~') continue;
-    if ((one.match(/\p{Nd}/gu) ?? []).length > ACCOUNT_NAME_DIGITS_MAX) return null;
-    return Array.from(one).slice(0, ACCOUNT_NAME_MAX).join('').trim();
-  }
-  return null;
-}
 
 export async function workspacePhones(d: WorkspacePhonesDeps): Promise<WorkspacePhones> {
   let configs = d.configs;

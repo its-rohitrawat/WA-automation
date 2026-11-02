@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { Db } from '../../src/store/db.ts';
 import {
   backupAndReset, hasSessionRows, openPhoneSession, openSessionDb, PgSessionDb, phoneIdOf, phoneName, phoneNumberIn, phoneSessionKey,
-  resetSession, restoreBackup, SessionDecryptError, sessionStored, spareNumberIn, useEncryptedAuthState, useSenderAuthState,
+  resetSession, restoreBackup, SessionDecryptError, sessionStored, spareAccountNameIn, spareNumberIn, useEncryptedAuthState, useSenderAuthState,
   type Phone, type SessionHome,
 } from '../../src/wa/authState.ts';
 
@@ -140,6 +140,30 @@ describe('the spare’s number, for the reading phones to refuse (security revie
       // A reading phone's rows are not the spare's.
       await link(await open(h, 'phone2'), 'phone2', '919800000002');
       expect(await spareNumberIn(h, key)).toBe('919800000009');
+    });
+  }
+});
+
+describe('WhatsApp’s own name for the spare, for its Connections card (owner follow-up, 2 Nov)', () => {
+  for (const engine of ['sqlite', 'postgres'] as const) {
+    it(`${engine}: read as the spare's session is sealed, cleaned as a phone's name is; none when not linked or not readable`, async () => {
+      const h = engine === 'sqlite' ? sqliteHome() : await pgHome();
+      expect(await spareAccountNameIn(h, key)).toBeNull();
+      if (h.engine === 'sqlite') expect(existsSync(join(h.dataDir, 'sender-session.db'))).toBe(false); // nothing made
+      await link(await open(h, 'phone2'), 'phone2', '919800000002'); // a reading phone's name is not the spare's
+      expect(await spareAccountNameIn(h, key)).toBeNull();
+      const auth = await useSenderAuthState(await open(h, 'spare'), key);
+      const creds = auth.state.creds as ReturnType<typeof initAuthCreds>;
+      creds.me = { id: '919800000009:4@s.whatsapp.net', name: 'Morning​ desk\n' };
+      await auth.saveCreds();
+      expect(await spareAccountNameIn(h, key)).toBe('Morning desk');
+      expect(await spareAccountNameIn(h, randomBytes(32))).toBeNull(); // another key: not readable
+      creds.me = { id: '919800000009:4@s.whatsapp.net', name: '~' }; // Baileys' placeholder before WhatsApp says the name
+      await auth.saveCreds();
+      expect(await spareAccountNameIn(h, key)).toBeNull();
+      creds.me = { name: 'Morning desk' } as never; // no linked account: not its name
+      await auth.saveCreds();
+      expect(await spareAccountNameIn(h, key)).toBeNull();
     });
   }
 });

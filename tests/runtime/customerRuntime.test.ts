@@ -18,7 +18,7 @@ import { SessionStore } from '../../src/web/sessions.ts';
 import { OWNER } from '../helpers/web.ts';
 import { onSqlite, seededDb, SHARMA } from '../helpers/db.ts';
 import { getKv, setKv } from '../../src/store/kv.ts';
-import { openPhoneSession, phoneNumberIn, phoneSessionKey, sessionHomeOf, useEncryptedAuthState } from '../../src/wa/authState.ts';
+import { openPhoneSession, phoneNumberIn, phoneSessionKey, sessionHomeOf, useEncryptedAuthState, useSenderAuthState } from '../../src/wa/authState.ts';
 import { PHONES_KV_KEY } from '../../src/wa/phoneList.ts';
 import { FakeSocket } from '../helpers/fakeSocket.ts';
 import { openTestPlatformDb } from '../helpers/pg.ts';
@@ -112,6 +112,26 @@ describe('several phones (lane C, change 7): with one phone the founder starts e
     expect(await phoneNumberIn(home, shared.key, 'founder')).toBe('919800000001'); // the same link
     expect(await getKv(db, 'session_reset_at')).toBeUndefined(); // no relink happened
     expect(await getKv(db, PHONES_KV_KEY)).toBeUndefined(); // no phone list written
+  });
+
+  it('the spare’s card shows WhatsApp’s own name for it, read from its saved link (the runtime hands the reader over)', async () => {
+    const db = await seededDb();
+    opened.push(db);
+    const shared = fakeShared(onSqlite ? {} : {
+      DB_ENGINE: 'postgres', DATABASE_URL: 'postgres://wa_app:placeholder@127.0.0.1:5432/wa_agent',
+      DATABASE_PLATFORM_URL: 'postgres://wa_platform:placeholder@127.0.0.1:5432/wa_agent',
+    });
+    const saved = await openPhoneSession(sessionHomeOf(shared.env, db), 'spare');
+    const auth = await useSenderAuthState(saved, shared.key);
+    auth.state.creds.me = { id: '919800000009:4@s.whatsapp.net', name: 'Morning desk' };
+    await auth.saveCreds();
+    await saved.close();
+    const rt = await buildCustomerRuntime({ id: FOUNDER, founder: true }, { ...shared, db, configs: [SHARMA] });
+    try {
+      expect((await rt.control.connections()).spare).toMatchObject({ state: 'ok', label: 'Linked', accountName: 'Morning desk' });
+    } finally {
+      await rt.stop();
+    }
   });
 
   it('with a stored phone 2 the monitor’s one WhatsApp part counts both phones (the runtime hands them over)', async () => {
