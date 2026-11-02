@@ -479,6 +479,8 @@ export async function buildCustomerRuntime(
       app: { health: app.health, spend: app.spend }, db, clock: systemClock,
       env: { MEETINGS_ENABLED: env.MEETINGS_ENABLED, VOICE_STT_PROVIDER: env.VOICE_STT_PROVIDER },
       gateway: { status: () => gateway.status() },
+      // Each reading phone's state (lane C): with several, the WhatsApp part says how many are connected.
+      phones: () => gateway.phones(),
       ...(liveReport ? { sender: () => liveReport.sender() } : sender ? { sender: { status: () => sender.status(), maskedRecipient: () => sender.maskedRecipient() } } : {}),
       ...(heartbeat ? { heartbeat: { lastBeatAt: () => heartbeat.lastBeatAt() } } : {}),
       ...(spareCheck ? { spareLinked: spareCheck } : {}),

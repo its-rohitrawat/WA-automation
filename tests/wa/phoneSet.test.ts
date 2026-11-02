@@ -219,6 +219,21 @@ describe('PhoneSet', () => {
     expect(set.isOpenFor(G1)).toBe(false);
   });
 
+  it('a phone added but not linked yet does not make the set "not linked" while another reads; with none linked it does', () => {
+    const { set, add } = setup();
+    const one = add(1);
+    const two = add(2, 'Front desk');
+    set.start();
+    two.set('not_linked');
+    expect(set.status()).toMatchObject({ state: 'open', count: 2 });
+    expect(set.status().phone).toBeUndefined();
+    expect(set.phones().map((p) => [p.id, p.status.state])).toEqual([[1, 'open'], [2, 'not_linked']]);
+    one.set('closed');
+    expect(set.status()).toMatchObject({ state: 'closed', phone: { id: 1 }, count: 2 });
+    one.set('not_linked');
+    expect(set.status()).toMatchObject({ state: 'not_linked', phone: { id: 1 }, count: 2 });
+  });
+
   it('listGroups unions the open phones’ groups, each with the phones that see it', async () => {
     const { set, add } = setup();
     const one = add(1);

@@ -271,16 +271,25 @@ export class Health {
     return this.#compute(false);
   }
 
+  /** Several reading phones (lane C): the phone the WhatsApp state is about, to name in the line; none with one phone. */
+  #phoneNamed(): { id: number; label: string } | undefined {
+    const s = this.#wa as GatewayStatus & { phone?: { id: number; label: string }; count?: number };
+    return s.phone && (s.count ?? 1) > 1 ? s.phone : undefined;
+  }
+
   #compute(withPublish: boolean): HealthLine {
     const now = this.#clock.now();
-    const setup = setupLine(this.#wa.state, this.#googleConnected);
+    const named = this.#phoneNamed();
+    const setup = setupLine(this.#wa.state, this.#googleConnected, named);
     if (setup) return setup;
     const since = stamp(new Date(this.#wa.since));
-    if (this.#wa.state === 'logged_out') return { ok: false, text: `❌ WhatsApp unlinked since ${since}. Follow docs/SETUP.md → "Status logged_out".` };
-    if (this.#wa.state === 'replaced') return { ok: false, text: `❌ Another copy of WA Agent took over the WhatsApp session at ${since}. Stop the other copy, then restart the service.` };
-    if (this.#wa.state === 'forbidden') return { ok: false, text: `❌ WhatsApp refused this number (403) since ${since}. Check the founder's phone.` };
+    // With several phones the line names the one it is about; with one, the texts as before.
+    const on = named ? ` (${named.label}, phone ${named.id})` : '';
+    if (this.#wa.state === 'logged_out') return { ok: false, text: `❌ WhatsApp unlinked${on} since ${since}. Follow docs/SETUP.md → "Status logged_out".` };
+    if (this.#wa.state === 'replaced') return { ok: false, text: `❌ Another copy of WA Agent took over the WhatsApp session${on} at ${since}. Stop the other copy, then restart the service.` };
+    if (this.#wa.state === 'forbidden') return { ok: false, text: `❌ WhatsApp refused this number (403)${on} since ${since}. Check ${named ? 'that phone' : "the founder's phone"}.` };
     if (this.#downSince && now.getTime() - this.#downSince.getTime() > DISCONNECT_GRACE_MS) {
-      return { ok: false, text: `❌ Disconnected since ${stamp(this.#downSince)}` };
+      return { ok: false, text: `❌ Disconnected${on} since ${stamp(this.#downSince)}` };
     }
     const pubFail = withPublish ? this.#publishFailedSince : null;
     if (pubFail && this.#publishAuthFailed) return { ok: false, text: '❌ Google sign-in expired. Run: npm run cli -- google-auth, then restart the service' };

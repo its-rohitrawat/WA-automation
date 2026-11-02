@@ -13,8 +13,8 @@ import type { Db } from '../../src/store/db.ts';
 import { silentLogger } from '../../src/util/logger.ts';
 import { istDate } from '../../src/util/time.ts';
 import { onSqlite, seededDb, SHARMA } from '../helpers/db.ts';
-import { getKv } from '../../src/store/kv.ts';
-import { openPhoneSession, phoneNumberIn, sessionHomeOf, useEncryptedAuthState } from '../../src/wa/authState.ts';
+import { getKv, setKv } from '../../src/store/kv.ts';
+import { openPhoneSession, phoneNumberIn, phoneSessionKey, sessionHomeOf, useEncryptedAuthState } from '../../src/wa/authState.ts';
 import { PHONES_KV_KEY } from '../../src/wa/phoneList.ts';
 import { FakeSocket } from '../helpers/fakeSocket.ts';
 import { openTestPlatformDb } from '../helpers/pg.ts';
@@ -108,6 +108,39 @@ describe('several phones (lane C, change 7): with one phone the founder starts e
     expect(await phoneNumberIn(home, shared.key, 'founder')).toBe('919800000001'); // the same link
     expect(await getKv(db, 'session_reset_at')).toBeUndefined(); // no relink happened
     expect(await getKv(db, PHONES_KV_KEY)).toBeUndefined(); // no phone list written
+  });
+
+  it('with a stored phone 2 the monitor’s one WhatsApp part counts both phones (the runtime hands them over)', async () => {
+    const db = await seededDb();
+    opened.push(db);
+    const shared = fakeShared(onSqlite ? {} : {
+      DB_ENGINE: 'postgres', DATABASE_URL: 'postgres://wa_app:placeholder@127.0.0.1:5432/wa_agent',
+      DATABASE_PLATFORM_URL: 'postgres://wa_platform:placeholder@127.0.0.1:5432/wa_agent',
+    });
+    const home = sessionHomeOf(shared.env, db);
+    for (const [phone, number] of [['founder', '919800000001'], ['phone2', '919800000002']] as const) {
+      const saved = await openPhoneSession(home, phone);
+      const auth = await useEncryptedAuthState(saved, phoneSessionKey(shared.key, phone));
+      auth.state.creds.me = { id: `${number}:3@s.whatsapp.net`, name: 'x' };
+      await auth.saveCreds();
+      await saved.close();
+    }
+    await setKv(db, PHONES_KV_KEY, JSON.stringify({ phones: [
+      { id: 1, label: 'Phone 1', state: 'active', addedAt: null }, { id: 2, label: 'Front desk', state: 'active', addedAt: '2026-11-02T10:00:00.000Z' },
+    ] }));
+    const sockets: FakeSocket[] = [];
+    const rt = await buildCustomerRuntime({ id: FOUNDER, founder: true }, {
+      ...shared, db, configs: [SHARMA],
+      waSockets: { gateway: () => (sockets.push(new FakeSocket()), sockets.at(-1)!) },
+    });
+    const whatsapp = async () => (await rt.control.status()).parts.find((p) => p.key === 'whatsapp');
+    rt.start();
+    expect(sockets).toHaveLength(2);
+    sockets[0]!.emit('connection.update', { connection: 'open' });
+    expect(await whatsapp()).toMatchObject({ label: '1 of 2 phones connected' });
+    sockets[1]!.emit('connection.update', { connection: 'open' });
+    expect(await whatsapp()).toMatchObject({ state: 'ok', label: '2 of 2 phones connected' });
+    await rt.stop();
   });
 });
 

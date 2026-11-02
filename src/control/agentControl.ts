@@ -50,6 +50,11 @@ export interface AgentControlDeps {
   db: Db;
   /** The founder-number gateway: its status only. */
   gateway: { status(): GatewayStatus };
+  /**
+   * The workspace's reading phones and each one's state (lane C, change 7). With more than one, the WhatsApp part says
+   * how many are connected; each phone is on Connections. Absent or one phone: the part as before.
+   */
+  phones?: () => { id: number; label: string; status: GatewayStatus }[];
   env: Pick<Env, 'MEETINGS_ENABLED' | 'VOICE_STT_PROVIDER'>;
   clock: Clock;
   /**
@@ -84,6 +89,17 @@ export class AgentControl {
   }
 
   #whatsapp(): { state: PartState; label: string } {
+    const one = this.#oneWhatsApp();
+    const phones = this.#d.phones?.() ?? [];
+    if (phones.length <= 1) return one;
+    // Several phones: the same part (the monitor keeps its shape), saying how many are connected. All of them: as the
+    // set's status says; some: needs attention; none: as the worst phone's.
+    const open = phones.filter((p) => p.status.state === 'open').length;
+    const state: PartState = open === phones.length ? one.state : open > 0 ? 'warn' : one.state;
+    return { state, label: `${open} of ${phones.length} phones connected` };
+  }
+
+  #oneWhatsApp(): { state: PartState; label: string } {
     const s = this.#d.gateway.status();
     switch (s.state) {
       case 'logged_out':

@@ -23,8 +23,11 @@ export interface PhoneSlot {
   allow: AllowList;
 }
 
-/** The set's status: the worst phone's, with that phone named (undefined when every phone is open, or there is none). */
-export type PhoneSetStatus = GatewayStatus & { phone?: { id: PhoneId; label: string } };
+/**
+ * The set's status: the worst phone's, with that phone named (undefined when every phone is open, or there is none), and
+ * how many phones the set has (health names the phone only when there are several).
+ */
+export type PhoneSetStatus = GatewayStatus & { phone?: { id: PhoneId; label: string }; count?: number };
 
 export interface PhoneView {
   id: PhoneId;
@@ -232,16 +235,21 @@ export class PhoneSet implements GatewayLike {
 
   #combine(): PhoneSetStatus {
     const members = [...this.#members.values()].sort((a, b) => a.id - b.id);
-    if (members.length === 0) return { state: 'not_linked', since: this.#clock.now().toISOString(), lastErrorCode: null, credsSaveFailures: 0 };
-    let worst = members[0]!;
-    for (const m of members) if (SEVERITY.indexOf(m.gateway.status().state) < SEVERITY.indexOf(worst.gateway.status().state)) worst = m;
+    const count = members.length;
+    if (count === 0) return { state: 'not_linked', since: this.#clock.now().toISOString(), lastErrorCode: null, credsSaveFailures: 0, count };
+    // A phone waiting for its first link (added, not linked yet) is not a failure while another phone is linked: it does
+    // not make the whole set "not linked" (setup mode) when phone 1 reads. Only when no phone is linked does it count.
+    const linked = members.filter((m) => m.gateway.status().state !== 'not_linked');
+    const pool = linked.length > 0 ? linked : members;
+    let worst = pool[0]!;
+    for (const m of pool) if (SEVERITY.indexOf(m.gateway.status().state) < SEVERITY.indexOf(worst.gateway.status().state)) worst = m;
     const s = worst.gateway.status();
     const credsSaveFailures = members.reduce((n, m) => n + m.gateway.status().credsSaveFailures, 0);
     if (s.state === 'open') {
-      const since = members.map((m) => m.gateway.status().since).sort().at(-1)!; // open since the last phone opened
-      return { state: 'open', since, lastErrorCode: null, credsSaveFailures };
+      const since = pool.map((m) => m.gateway.status().since).sort().at(-1)!; // open since the last phone opened
+      return { state: 'open', since, lastErrorCode: null, credsSaveFailures, count };
     }
-    return { ...s, credsSaveFailures, phone: { id: worst.id, label: worst.label } };
+    return { ...s, credsSaveFailures, phone: { id: worst.id, label: worst.label }, count };
   }
 
   /** Recomputes the combined status, and tells the listeners only when it changed. */

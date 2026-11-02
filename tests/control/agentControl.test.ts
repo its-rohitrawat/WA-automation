@@ -303,6 +303,26 @@ describe('AgentControl review fixes', () => {
     expect(await part(t, 'whatsapp')).toMatchObject({ state: 'warn', label: 'Starting' });
   });
 
+  it('several reading phones (lane C): the one WhatsApp part says how many are connected; one phone, as before', async () => {
+    const t = await setup();
+    const st = (state: GatewayState): GatewayStatus => ({ state, since: NOW, lastErrorCode: null, credsSaveFailures: 0 });
+    let gw = st('logged_out'); // the set's status: its worst phone, down; the part still only needs attention
+    let phones = [{ id: 1, label: 'Phone 1', status: st('open') }, { id: 2, label: 'Front desk', status: st('open') }, { id: 3, label: 'Site', status: st('logged_out') }];
+    const c = new AgentControl({ app: { health: t.health, spend: t.spend }, db: t.db, gateway: { status: () => gw }, phones: () => phones, env: parseEnv({}), clock: t.clock });
+    const wa = async () => (await c.status()).parts.find((p) => p.key === 'whatsapp');
+    expect(await wa()).toMatchObject({ state: 'warn', label: '2 of 3 phones connected' });
+    // Connections' founder row is the same part.
+    expect((await c.connections()).founder).toMatchObject({ state: 'warn', label: '2 of 3 phones connected' });
+    gw = st('logged_out');
+    phones = phones.map((p) => ({ ...p, status: st('logged_out') }));
+    expect(await wa()).toMatchObject({ state: 'down', label: '0 of 3 phones connected' });
+    gw = st('open');
+    phones = phones.map((p) => ({ ...p, status: st('open') }));
+    expect(await wa()).toMatchObject({ state: 'ok', label: '3 of 3 phones connected' });
+    phones = [{ id: 1, label: 'Phone 1', status: st('open') }];
+    expect(await wa()).toMatchObject({ state: 'ok', label: 'Connected' });
+  });
+
   it('counts approved groups only, and main is used for the tracker only while meetings are off', async () => {
     const t = await setup();
     await t.db.run("UPDATE clients SET active = 0 WHERE code = 'MEH'");
