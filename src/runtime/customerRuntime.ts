@@ -571,6 +571,8 @@ export async function buildCustomerRuntime(
                 currentConfigs = next;
               } }),
             groupKey: makeGroupKey(deriveSubkey(key, GROUP_KEY_INFO)), log, clock: systemClock,
+            // The workspace's reading phones (lane C): each group shows and keeps its phone.
+            phones: () => readingPhones.list.list(),
           },
           clients: { db: trackerStore, directory, clock: systemClock, quietMinutes: env.QUIET_MINUTES },
           // Open chat. Sending goes through the founder gateway's own check (an approved group, while open) and only

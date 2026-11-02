@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -10,8 +11,11 @@ import { ensureFounderTenant } from '../../src/platform/store.ts';
 import { GlobalSpend } from '../../src/spend/globalSpend.ts';
 import { startDashboard } from '../../src/web/start.ts';
 import type { Db } from '../../src/store/db.ts';
+import { systemClock } from '../../src/util/clock.ts';
 import { silentLogger } from '../../src/util/logger.ts';
 import { istDate } from '../../src/util/time.ts';
+import { SessionStore } from '../../src/web/sessions.ts';
+import { OWNER } from '../helpers/web.ts';
 import { onSqlite, seededDb, SHARMA } from '../helpers/db.ts';
 import { getKv, setKv } from '../../src/store/kv.ts';
 import { openPhoneSession, phoneNumberIn, phoneSessionKey, sessionHomeOf, useEncryptedAuthState } from '../../src/wa/authState.ts';
@@ -141,6 +145,43 @@ describe('several phones (lane C, change 7): with one phone the founder starts e
     sockets[1]!.emit('connection.update', { connection: 'open' });
     expect(await whatsapp()).toMatchObject({ state: 'ok', label: '2 of 2 phones connected' });
     await rt.stop();
+  });
+
+  it('with a stored phone 2 the Groups view lists both phones (the runtime hands its phone list to Groups)', async () => {
+    const db = await seededDb();
+    opened.push(db);
+    // The dashboard as main.ts starts it, as in the platform tests below: the sessions in the platform tables.
+    const platformDb = onSqlite ? db : openTestPlatformDb();
+    if (onSqlite) await ensurePlatformSchema(db);
+    await ensureFounderTenant(platformDb, { name: 'Your business', at: new Date().toISOString() });
+    await setKv(db, PHONES_KV_KEY, JSON.stringify({ phones: [
+      { id: 1, label: 'Phone 1', state: 'active', addedAt: null }, { id: 2, label: 'Front desk', state: 'active', addedAt: '2026-11-02T10:00:00.000Z' },
+    ] }));
+    const shared = fakeShared({ DASHBOARD_OWNER_EMAILS: OWNER });
+    const rt = await buildCustomerRuntime({ id: FOUNDER, founder: true }, { ...shared, db, configs: [SHARMA] });
+    const noGoogle = () => Promise.reject(new Error('no Google in tests'));
+    const web = await startDashboard({
+      env: { ...shared.env, DASHBOARD_PORT: 0 }, db, platformDb, log: silentLogger(), control: rt.control, platform: rt.platform, ...rt.agentRoutes,
+      google: { exchange: noGoogle, verifier: noGoogle },
+    });
+    try {
+      const session = await new SessionStore(platformDb, systemClock).create(OWNER);
+      const answer = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+        const r = request({ host: '127.0.0.1', port: web!.address()!.port, path: '/dashboard/api/groups', headers: { cookie: `wa_session=${session.id}` } }, (res) => {
+          let body = '';
+          res.setEncoding('utf8');
+          res.on('data', (c: string) => (body += c));
+          res.on('end', () => resolve({ status: res.statusCode ?? 0, body }));
+        });
+        r.on('error', reject);
+        r.end();
+      });
+      expect(answer.status).toBe(200);
+      expect((JSON.parse(answer.body) as { phones: { id: number; label: string }[] }).phones.map((p) => [p.id, p.label])).toEqual([[1, 'Phone 1'], [2, 'Front desk']]);
+    } finally {
+      await web?.stop();
+      await rt.stop();
+    }
   });
 });
 
