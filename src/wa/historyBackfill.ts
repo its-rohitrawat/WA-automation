@@ -37,7 +37,13 @@ export const HOLD_MAX_MS = 15 * 60_000;
 
 export interface HistoryBackfillOptions {
   db: Db;
-  gateway: Pick<GatewayLike, 'status'> & Required<Pick<GatewayLike, 'fetchHistory' | 'onHistory'>>;
+  gateway: Pick<GatewayLike, 'status'> & Required<Pick<GatewayLike, 'fetchHistory' | 'onHistory'>> & {
+    /**
+     * Whether this group's own phone is open (src/wa/phoneSet.ts, several reading phones): a group waits for its phone
+     * alone, and the others go on. Without it, one gateway: its status, as before.
+     */
+    isOpenFor?(groupId: string): boolean;
+  };
   /**
    * The app's ingest of a live event (the same path), awaited event by event. May throw or reject; a failure is
    * counted, never the event logged.
@@ -69,6 +75,8 @@ export class HistoryBackfill {
   #active: number | undefined;
   /** When the active client's reading began (its entry's fetchingSince), kept here so held() reads no database. */
   #activeSince: string | null = null;
+  /** The active client's group, whose phone held() asks about. */
+  #activeGroup: string | undefined;
   /** Answers are handled one after another, in the order they came. */
   #answers: Promise<void> = Promise.resolve();
 
@@ -106,8 +114,15 @@ export class HistoryBackfill {
    * the debouncer asks on every message, so it reads what the steps keep in memory (#active and #activeSince).
    */
   held(clientId: number): boolean {
-    if (this.#stopped || this.#active !== clientId || this.#activeSince === null || this.#o.gateway.status().state !== 'open') return false;
+    if (this.#stopped || this.#active !== clientId || this.#activeSince === null || this.#activeGroup === undefined) return false;
+    if (!this.#openFor(this.#activeGroup)) return false;
     return this.#o.clock.now().getTime() - Date.parse(this.#activeSince) < HOLD_MAX_MS;
+  }
+
+  /** The group's own phone is open (one gateway: the gateway is). */
+  #openFor(groupId: string): boolean {
+    const g = this.#o.gateway;
+    return g.isOpenFor ? g.isOpenFor(groupId) : g.status().state === 'open';
   }
 
   /** Resolves once the answers that came so far are handled (tests). */
@@ -145,7 +160,8 @@ export class HistoryBackfill {
         await this.#finish(b, true);
         continue;
       }
-      if (gateway.status().state !== 'open' || this.#o.spendPaused()) return; // waits; the tick tries again
+      if (this.#o.spendPaused()) return; // waits; the tick tries again
+      if (!this.#openFor(b.groupId)) continue; // its phone is not open: it waits (not a failure); the others go on
       // Where the answers got to, or the group's first message since it was approved.
       const anchor = b.cursor ?? (await firstAnchor(db, b.clientId, b.until));
       if (!anchor) continue; // waiting for the group's first message
@@ -160,6 +176,7 @@ export class HistoryBackfill {
       this.#outstanding = { groupId: b.groupId, timeout };
       this.#active = b.clientId;
       this.#activeSince = asking.fetchingSince;
+      this.#activeGroup = b.groupId;
       const asked = await gateway.fetchHistory(b.groupId, { waId: anchor.waId, fromMe: anchor.fromMe, ts: new Date(anchor.ts) }, PAGE_SIZE);
       if (!asked && this.#outstanding?.groupId === b.groupId) {
         // Not asked (the connection dropped, or the request failed): not a request, but a failure, with a growing wait,
