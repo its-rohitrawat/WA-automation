@@ -140,14 +140,48 @@ a { color: inherit; text-decoration: none; }
 .nav a.locked { opacity: .55; }
 .nav a.locked > svg:last-child { margin-left: auto; width: 14px; height: 14px; }
 .nav a .count { margin-left: auto; font: 600 11px var(--mono); padding: 2px 7px; border-radius: 999px; background: rgba(217,79,99,.16); color: #f07585; }
-.app.collapsed .nav a span, .app.collapsed .nav a .count, .app.collapsed .nav-label, .app.collapsed .side-top span, .app.collapsed .side-health div { display: none; }
-.app.collapsed .nav a { justify-content: center; padding: 10px; }
-.side-health { margin-top: auto; display: flex; gap: 10px; align-items: center; padding: 12px; border-radius: 14px; background: var(--panel-2); border: 1px solid var(--line); font-size: 12.5px; }
+/* The menu's links scroll on a short screen, so the status monitor, Ask the assistant and Collapse at its foot always
+   show at full size (November release, change 10). The negative margin keeps the selected link's bar inside the box. */
+.nav { flex: 1 1 auto; min-height: 0; overflow-x: hidden; overflow-y: auto; margin: 0 -12px; padding: 0 12px 6px; }
+.nav::-webkit-scrollbar { width: 4px; } .nav::-webkit-scrollbar-thumb { background: var(--line-2); border: 0; border-radius: 4px; }
+@supports not selector(::-webkit-scrollbar) { .nav { scrollbar-width: thin; scrollbar-color: var(--line-2) transparent; } }
+.side-health, .side-ask, .collapse { flex: none; }
+.side-health { margin-top: 12px; display: flex; gap: 10px; align-items: center; padding: 12px; border-radius: 14px; background: var(--panel-2); border: 1px solid var(--line); font-size: 12.5px; }
 .side-health svg.ecg { flex: none; }
 .side-health b { display: block; font-size: 13px; }
 .side-health small { color: var(--muted); }
-.collapse { margin-top: 10px; display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 12px; border: 0; background: none; color: var(--faint); cursor: pointer; white-space: nowrap; }
-.app.collapsed .collapse span { display: none; } .app.collapsed .collapse { justify-content: center; } .app.collapsed .collapse svg { transform: scaleX(-1); }
+.collapse { margin-top: 10px; display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 12px; border: 1px solid transparent; background: none; color: var(--faint); cursor: pointer; white-space: nowrap;
+  transition: color 160ms ease, border-color 160ms ease, background-color 160ms ease; }
+.collapse > span:first-child { display: grid; }
+.collapse:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+@media (hover: hover) and (pointer: fine) { .collapse:hover { color: var(--text); } }
+/* Collapsed (a laptop only: on a phone the menu is a drawer with its words): icons with their tooltips, the logo, the
+   status monitor as a small dark screen whose line and lamp show the state (its words in a tooltip, and still read by
+   screen readers), and a clear button to open the menu again. */
+@media (min-width: 961px) {
+  .app.collapsed .nav a span, .app.collapsed .nav-label, .app.collapsed .side-top span:not(.logo-mark), .app.collapsed .collapse > span:last-child { display: none; }
+  .app.collapsed .side-top { justify-content: center; padding: 2px 0 18px; }
+  .app.collapsed .nav a { justify-content: center; padding: 10px; }
+  .app.collapsed .nav a.locked > svg:last-child { display: none; }
+  .app.collapsed .nav a .count { position: absolute; top: 6px; right: 8px; width: 9px; height: 9px; padding: 0; overflow: hidden; color: transparent; background: var(--s-overdue); border: 2px solid var(--bg-2); }
+  .app.collapsed .side-health { flex-direction: column; justify-content: center; gap: 6px; min-height: 52px; padding: 8px 0; background: #071014; border-color: #12302a; cursor: default; }
+  .app.collapsed .side-health > div { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .app.collapsed .side-health svg.ecg { width: 32px; height: 18px; stroke: #25D366; }
+  .app.collapsed .side-health::after { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #25D366; box-shadow: 0 0 0 3px rgba(37,211,102,.18); }
+  .app.collapsed .side-health.warn { border-color: rgba(226,169,59,.45); }
+  .app.collapsed .side-health.warn svg.ecg { stroke: #E2A93B; }
+  .app.collapsed .side-health.warn::after { background: #E2A93B; box-shadow: 0 0 0 3px rgba(226,169,59,.2); }
+  .app.collapsed .collapse { justify-content: center; width: 44px; height: 40px; margin: 10px auto 0; padding: 0; border-color: var(--line-2); background: var(--panel-2); color: var(--text); }
+  .app.collapsed .collapse svg { transform: scaleX(-1); }
+}
+@media (min-width: 961px) and (hover: hover) and (pointer: fine) { .app.collapsed .collapse:hover { border-color: var(--accent); color: var(--accent); } }
+/* On a phone the menu is a drawer: nothing to collapse, and a menu collapsed on a laptop still shows its words there
+   (Ask the assistant's words too, which assistant.css hides whenever the menu is collapsed). */
+@media (max-width: 960px) {
+  .collapse { display: none; }
+  .app.collapsed .side .side-ask { justify-content: flex-start; padding: 10px 12px; }
+  .app.collapsed .side .side-ask span:last-child { display: inline; }
+}
 
 .top { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 14px; padding: 14px 28px; border-bottom: 1px solid var(--line);
   background: color-mix(in srgb, var(--bg) 82%, transparent); -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px); }

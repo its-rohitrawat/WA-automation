@@ -188,7 +188,11 @@ function wireShell() {
     }
     if (!target.closest('.me')) closeMenu(false);
   });
-  $('#collapse').addEventListener('click', () => $('#app').classList.toggle('collapsed'));
+  $('#collapse').addEventListener('click', () => {
+    $('#app').classList.toggle('collapsed');
+    $('#tip').hidden = true; // the tooltip of the button just pressed would stay up after its words show
+    sideTips();
+  });
   $('#mnav').addEventListener('click', () => setDrawer(!$('#app').classList.contains('nav-open')));
   $('#theme').addEventListener('click', () => {
     const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
@@ -251,6 +255,26 @@ function setDrawer(open) {
   $('#mnav').setAttribute('aria-expanded', String(open));
 }
 
+/**
+ * The collapsed side menu shows icons only (November release, change 10): the button that opens it again and the
+ * status monitor say what they are in a tooltip, and the button says whether the menu is open. Expanded, their words
+ * show, so there is no tooltip.
+ */
+function sideTips() {
+  const collapsed = $('#app').classList.contains('collapsed');
+  const btn = $('#collapse');
+  const health = $('#side-health');
+  btn.setAttribute('aria-expanded', String(!collapsed));
+  btn.setAttribute('aria-label', collapsed ? 'Open the menu' : 'Collapse the menu');
+  if (collapsed) {
+    btn.dataset.tip = 'Open the menu';
+    health.dataset.tip = `${$('#sh-t').textContent ?? ''} · ${$('#sh-s').textContent ?? ''}`;
+  } else {
+    delete btn.dataset.tip;
+    delete health.dataset.tip;
+  }
+}
+
 // ---------- status: health pill, sidebar box, Connections badge, offline bar ----------
 async function refreshStatus() {
   try {
@@ -270,6 +294,7 @@ async function refreshStatus() {
   $('#sh-t').textContent = p.length ? `${p.length} part${p.length === 1 ? '' : 's'} need${p.length === 1 ? 's' : ''} you` : 'Agent is healthy';
   $('#sh-s').textContent = p.length ? (p[0].detail ? `${p[0].label}: ${p[0].detail}` : p[0].label) : 'All parts answering';
   $('#side-health').classList.toggle('warn', p.length > 0);
+  sideTips();
   const nav = $('#nav [data-go="connections"]');
   nav?.querySelector('.count')?.remove();
   if (p.length && nav) {
