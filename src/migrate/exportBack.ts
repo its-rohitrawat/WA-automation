@@ -16,7 +16,8 @@ import type { CopyTarget } from './target.ts';
 // Postgres back into NEW SQLite files (tracker.db, session.db, and session-2.db to session-5.db and sender-session.db
 // for each phone that has keys), in a folder that must not exist yet. It never writes into data/: the owner moves the files in by hand. Postgres is only
 // read (the transaction is rolled back at the end). Each table is checked as the copy checks it: the rows read from
-// Postgres against the rows read back from the new file. A mismatch leaves the files with a DO-NOT-USE.txt beside them.
+// Postgres against the rows read back from the new file. A mismatch, or an export that stops part-way, leaves the files
+// with a DO-NOT-USE.txt beside them; nothing in the folder is deleted.
 
 export interface ExportOptions {
   /** The agent's data folder: its instance lock must be free (the agent stopped), so nothing writes meanwhile. */
@@ -72,11 +73,16 @@ export async function exportToSqlite(o: ExportOptions, source: CopyTarget): Prom
     throw e;
   }
   mkdirSync(o.out, { recursive: true, mode: 0o700 });
-  const tracker = openDb(join(o.out, 'tracker.db')); // every SQLite migration, as the agent would make it
-  const session = openSessionFile(sessionFileOf(o.out, 'founder'));
-  /** The other phones' files: each made only when that phone has keys. */
-  const more: Partial<Record<TablePlan['source'], Db>> = {};
+  const opened: Db[] = [];
+  const open = (db: Db): Db => {
+    opened.push(db);
+    return db;
+  };
   try {
+    const tracker = open(openDb(join(o.out, 'tracker.db'))); // every SQLite migration, as the agent would make it
+    const session = open(openSessionFile(sessionFileOf(o.out, 'founder')));
+    /** The other phones' files: each made only when that phone has keys. */
+    const more: Partial<Record<TablePlan['source'], Db>> = {};
     await ensurePlatformSchema(tracker);
     const plans: TablePlan[] = [...(await copyPlan(tracker)), ...SESSION_PLANS].filter((p) => o.platform !== false || !p.platform);
     try {
@@ -88,7 +94,7 @@ export async function exportToSqlite(o: ExportOptions, source: CopyTarget): Prom
         // Phones 2 to 5 and the spare: a file only when it has keys, as on a Mac where the spare number was never linked.
         for (const p of plans) {
           if (p.source === 'tracker' || p.source === 'session' || more[p.source] || read.get(p)!.length === 0) continue;
-          more[p.source] = openSessionFile(sessionFileOf(o.out, SESSION_PHONE[p.source]));
+          more[p.source] = open(openSessionFile(sessionFileOf(o.out, SESSION_PHONE[p.source])));
         }
         const fileFor = (p: TablePlan): Db | undefined => (p.source === 'tracker' ? tracker : p.source === 'session' ? session : more[p.source]);
         for (const p of plans) {
@@ -112,10 +118,22 @@ export async function exportToSqlite(o: ExportOptions, source: CopyTarget): Prom
       if (e instanceof Done) return e.report;
       throw e;
     }
+  } catch (e) {
+    // Stopped part-way (data review N9: a refused insert, a lost connection, Postgres at another version): the folder
+    // stays as it is, as evidence, marked not to be used. The error that stopped it goes on.
+    markIncomplete(o.out);
+    throw e;
   } finally {
-    await tracker.close().catch(() => undefined);
-    await session.close().catch(() => undefined);
-    for (const db of Object.values(more)) await db?.close().catch(() => undefined);
+    for (const db of opened) await db.close().catch(() => undefined);
     await lock.release();
+  }
+}
+
+/** The marker rollback B's manual step looks for; best effort, so the error that stopped the export is the one seen. */
+function markIncomplete(out: string): void {
+  try {
+    writeFileSync(join(out, 'DO-NOT-USE.txt'), 'The export stopped before it finished. These files are incomplete. Do not move them into data/.\n');
+  } catch {
+    // The folder is gone or not writable: nothing to mark.
   }
 }

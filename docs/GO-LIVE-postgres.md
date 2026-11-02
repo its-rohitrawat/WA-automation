@@ -431,8 +431,8 @@ Postgres days with you.
    npm run cli -- export-to-sqlite --out /opt/wa-agent-db/from-postgres-$(date +%Y%m%d-%H%M)
    ```
 
-   Every line should say `OK`, and the last one `EXPORTED: every table matched. …`. If any says `MISMATCH`, stop and
-   use A instead (a `DO-NOT-USE.txt` is then beside the files).
+   Every line should say `OK`, and the last one `EXPORTED: every table matched. …`. If any says `MISMATCH`, or it
+   stops with an error, stop and use A instead (a `DO-NOT-USE.txt` is then beside the files).
 3. Waagent window: move today's files aside (nothing is deleted), then put the exported ones in place. The moved
    files include each phone's `-wal` and `-shm` files, so no old one is left beside a new file:
 

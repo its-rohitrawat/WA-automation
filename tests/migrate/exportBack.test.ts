@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { senderSessionDbPath, sessionDbPath, trackerDbPath } from '../../src/config/paths.ts';
@@ -129,6 +129,25 @@ describe.runIf(onSqlite)('export-to-sqlite', () => {
     } }, pg);
     expect(r.ok).toBe(false);
     expect(r.tables.filter((t) => !t.match).map((t) => t.table)).toEqual(['tracker:clients']);
+    expect(existsSync(join(out, 'DO-NOT-USE.txt'))).toBe(true);
+  });
+
+  it('an insert that throws leaves the half-written folder as evidence, marked not to be used, and the error goes on (data review N9)', async () => {
+    // A row the new tracker.db refuses: a message whose client is not there (let into the stand-in with its checks off).
+    await pg.db.exec('PRAGMA foreign_keys = OFF');
+    await pg.db.run("UPDATE messages SET client_id = 999 WHERE wa_id = 'WA1'");
+    await pg.db.exec('PRAGMA foreign_keys = ON');
+    const out = join(f.dir, 'from-postgres');
+    await expect(exportToSqlite({ dataDir: f.data, tenantId: FOUNDER_TENANT_ID, out }, pg)).rejects.toThrow(/FOREIGN KEY/);
+    expect(readFileSync(join(out, 'DO-NOT-USE.txt'), 'utf8')).toMatch(/^The export stopped before it finished/);
+    expect(existsSync(join(out, 'tracker.db'))).toBe(true); // kept, never deleted
+    expect(await pg.count('messages')).toBe(5); // Postgres only read
+  });
+
+  it('a failure before anything is read (Postgres at another version) leaves the marker too', async () => {
+    pg.version = 2;
+    const out = join(f.dir, 'from-postgres');
+    await expect(exportToSqlite({ dataDir: f.data, tenantId: FOUNDER_TENANT_ID, out }, pg)).rejects.toThrow(/Postgres is at P2/);
     expect(existsSync(join(out, 'DO-NOT-USE.txt'))).toBe(true);
   });
 });
