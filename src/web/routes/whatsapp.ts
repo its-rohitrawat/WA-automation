@@ -1,6 +1,9 @@
 import { z } from 'zod';
 import { SPARE_LINK_MESSAGES } from '../../report/senderLink.ts';
-import { phoneIdOf } from '../../wa/authState.ts';
+import { ControlError } from '../../control/errors.ts';
+import { MAX_PHONES, phoneIdOf, type PhoneId } from '../../wa/authState.ts';
+import type { UnlinkResult } from '../../wa/phoneControl.ts';
+import type { PhoneEntry } from '../../wa/phoneList.ts';
 import { LinkBusyError, type LinkEvent, type LinkSessions, type LinkState, type LinkTarget } from '../../wa/linkSession.ts';
 import { jsonText } from '../http.ts';
 import { renderQrSvg } from '../qrSvg.ts';
@@ -185,5 +188,93 @@ export class WhatsAppLinkRoutes {
         close();
       }
     });
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The workspace's reading phones (lane C, change 7): list, add, rename, unlink and remove. Linking is the link API above.
+
+/** One phone as the Connections screen shows it: never the full number. */
+export interface PhoneRow {
+  id: PhoneId;
+  label: string;
+  state: 'active' | 'unlinked';
+  /** The linked number, masked (…0001); null when not linked. */
+  number: string | null;
+  /** Its gateway's state while active ('open', 'closed', 'not_linked', …); null when unlinked. */
+  status: string | null;
+  /** Approved groups on this phone. */
+  groups: number;
+}
+
+export interface PhoneRoutesDeps {
+  list(): PhoneRow[];
+  add(label: unknown, actor: string): Promise<PhoneEntry>;
+  rename(id: PhoneId, label: unknown, actor: string): Promise<PhoneEntry>;
+  unlink(id: PhoneId, actor: string): Promise<UnlinkResult>;
+  remove(id: PhoneId, actor: string): Promise<PhoneEntry>;
+}
+
+const LabelBody = z.object({ label: z.unknown() }).strict();
+const ConfirmBody = z.object({ confirm: z.literal(true) }).strict();
+const PhoneParam = z.coerce.number().int().min(1).max(5);
+
+export class PhoneRoutes {
+  readonly #d: PhoneRoutesDeps;
+
+  constructor(d: PhoneRoutesDeps) {
+    this.#d = d;
+  }
+
+  /** GET /dashboard/api/whatsapp/phones */
+  list(): ApiResult<{ phones: PhoneRow[]; max: number }> {
+    return ok({ phones: this.#d.list(), max: MAX_PHONES });
+  }
+
+  /** POST /dashboard/api/whatsapp/phones, body { label }. */
+  add(ctx: OwnerContext, body: unknown): Promise<ApiResult<{ phone: PhoneEntry } | ApiError>> {
+    const parsed = LabelBody.safeParse(body);
+    if (!parsed.success) return Promise.resolve(fail(400, 'invalid', 'Give the phone a name.'));
+    return answer(async () => ok({ phone: await this.#d.add(parsed.data.label, ctx.actor) }));
+  }
+
+  /** POST /dashboard/api/whatsapp/phones/:id/rename, body { label }. */
+  rename(ctx: OwnerContext, id: unknown, body: unknown): Promise<ApiResult<{ phone: PhoneEntry } | ApiError>> {
+    const n = PhoneParam.safeParse(id);
+    const parsed = LabelBody.safeParse(body);
+    if (!n.success || !parsed.success) return Promise.resolve(fail(400, 'invalid', 'Choose a phone and give it a name.'));
+    return answer(async () => ok({ phone: await this.#d.rename(n.data as PhoneId, parsed.data.label, ctx.actor) }));
+  }
+
+  /**
+   * POST /dashboard/api/whatsapp/phones/:id/unlink, body { confirm: true }: the page's confirm named the phone and its
+   * masked number and said what stays (messages, tasks, approvals).
+   */
+  unlink(ctx: OwnerContext, id: unknown, body: unknown): Promise<ApiResult<{ phone: PhoneEntry; loggedOut: boolean } | ApiError>> {
+    const n = PhoneParam.safeParse(id);
+    if (!n.success || !ConfirmBody.safeParse(body).success) return Promise.resolve(fail(400, 'invalid', 'Choose a phone, and confirm.'));
+    return answer(async () => {
+      const r = await this.#d.unlink(n.data as PhoneId, ctx.actor);
+      return ok({ phone: r.phone, loggedOut: r.loggedOut });
+    });
+  }
+
+  /** POST /dashboard/api/whatsapp/phones/:id/remove, body { confirm: true }: frees its number (never phone 1). */
+  remove(ctx: OwnerContext, id: unknown, body: unknown): Promise<ApiResult<{ phone: PhoneEntry } | ApiError>> {
+    const n = PhoneParam.safeParse(id);
+    if (!n.success || !ConfirmBody.safeParse(body).success) return Promise.resolve(fail(400, 'invalid', 'Choose a phone, and confirm.'));
+    return answer(async () => ok({ phone: await this.#d.remove(n.data as PhoneId, ctx.actor) }));
+  }
+}
+
+const CONTROL_CODES: Record<ControlError['status'], string> = { 400: 'bad_request', 404: 'not_found', 409: 'conflict', 422: 'invalid' };
+
+/** Runs a phone change; a ControlError (fixed text, safe to show) becomes its answer; anything else goes to the server. */
+async function answer<T>(fn: () => Promise<ApiResult<T>>): Promise<ApiResult<T | ApiError>> {
+  try {
+    return await fn();
+  } catch (e) {
+    if (e instanceof ControlError) return fail(e.status, CONTROL_CODES[e.status], e.message, e.field ? { field: e.field } : {});
+    throw e;
   }
 }

@@ -124,6 +124,12 @@ export class SwitchableGateway implements GatewayLike {
     return inner.chatDeleteSocket(groupId);
   }
 
+  /** An unlink (lane C): the current gateway's endLink at WhatsApp; false without one, or one that cannot. */
+  async endLink(): Promise<boolean> {
+    const inner = this.#inner;
+    return inner?.endLink ? inner.endLink() : false;
+  }
+
   status(): GatewayStatus {
     if (this.#inner) return this.#inner.status();
     return { state: this.#held.state, since: this.#held.since, lastErrorCode: null, credsSaveFailures: 0 };

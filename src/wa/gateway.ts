@@ -6,6 +6,7 @@ import { systemClock, type Clock } from '../util/clock.ts';
 import type { AllowList } from './allowlist.ts';
 import { backoffMs } from './backoff.ts';
 import { asChatDeleteSocket, type ChatDeleteSocket } from './chatDelete.ts';
+import { asDeviceUnlinkSocket, unlinkDevice } from './deviceUnlink.ts';
 import { MEMBERS_CACHE_MS, MEMBERS_READ_MS, membersOf, type GroupMember } from './groupMembers.ts';
 import { asGroupSendSocket, type GroupSendSocket } from './groupSend.ts';
 import { normalizeMessage, normalizeReaction, normalizeUpdate, type NormalizedEvent } from './normalize.ts';
@@ -144,6 +145,11 @@ export interface GatewayLike {
    * gateway: its status says.
    */
   isOpenFor?(groupId: string): boolean;
+  /**
+   * An unlink (lane C): asks WhatsApp to unlink this device (src/wa/deviceUnlink.ts). True when WhatsApp took it, false
+   * when it could not be asked (not open, or no answer in time). The caller stops the gateway and clears the session.
+   */
+  endLink?(): Promise<boolean>;
 }
 
 export type Scheduler = (fn: () => void, ms: number) => { cancel(): void };
@@ -171,6 +177,8 @@ export interface GatewayOptions {
    */
   tenantId?: string;
   report?: CrashReport;
+  /** Tests: how long endLink() waits for WhatsApp. Default UNLINK_TIMEOUT_MS (src/wa/deviceUnlink.ts). */
+  unlinkTimeoutMs?: number;
 }
 
 type Guard = <A extends unknown[], R>(fn: (...a: A) => R) => (...a: A) => R | undefined;
@@ -298,6 +306,18 @@ export class WhatsAppGateway implements GatewayLike {
     this.#attempt = 0;
     this.#restarts = 0;
     this.#connect();
+  }
+
+  /**
+   * An unlink (lane C): asks WhatsApp to unlink this device (src/wa/deviceUnlink.ts), only while open. True when WhatsApp
+   * took it; false when it was not open, the socket cannot, the request failed or no answer came in time. Never throws.
+   */
+  async endLink(): Promise<boolean> {
+    const sock = this.#sock;
+    if (this.#stopped || !sock || this.#status.state !== 'open') return false;
+    const unlinkable = asDeviceUnlinkSocket(sock);
+    if (!unlinkable) return false;
+    return unlinkDevice(unlinkable, this.#opts.unlinkTimeoutMs);
   }
 
   async stop(): Promise<void> {
