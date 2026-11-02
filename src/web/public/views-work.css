@@ -41,11 +41,24 @@
 .hero .grow-1 { min-width: 220px; }
 .hero-ic { width: 56px; height: 56px; border-radius: 16px; display: grid; place-items: center; background: rgba(37, 211, 102, .12); color: var(--accent); flex: none; }
 
-/* usage */
+/* usage (November release, change 4): the KPI cards keep their own padding (the Overview's cards put it on their link),
+   4 across on a wide screen, 2 on a laptop with the menu open, a tablet and a phone. */
 .kpis.kpis-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-.num.num-word { font-size: 24px; margin-top: 22px; color: var(--accent); }
-.num.num-word.is-warn { color: var(--s-warn); }
-.ubars .b { transform-origin: bottom; }
+.u-kpis .kpi { padding: 18px 20px; }
+.num.num-word { font: 600 22px/1.2 var(--font); letter-spacing: -0.02em; margin-top: 18px; color: var(--accent); }
+.num.num-word.is-warn { color: var(--s-warn); } :root[data-theme="light"] .num.num-word.is-warn { color: #9a6a10; }
+.u-env { display: block; margin-top: 2px; font: 400 11px/1.4 var(--mono); color: var(--faint); overflow-wrap: anywhere; }
+.u-meter { height: 6px; margin-top: 10px; border-radius: 999px; background: var(--panel-2); overflow: hidden; }
+.u-meter i { display: block; height: 100%; border-radius: inherit; background: var(--accent); }
+.u-meter.is-high i { background: var(--s-warn); } .u-meter.is-full i { background: var(--s-overdue); }
+.u-kinds .li { padding: 10px 0; } .u-kinds .li:first-child { border-top: 0; }
+.u-kind { min-width: 0; font-weight: 500; font-size: 13.5px; line-height: 1.3; overflow-wrap: anywhere; }
+.u-amt { font-variant-numeric: tabular-nums; } .li b.u-amt.is-zero { color: var(--faint); font-weight: 500; }
+@media (max-width: 1100px) { .kpis.kpis-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 640px) {
+  .u-kpis { gap: 12px; } .u-kpis .kpi { padding: 14px 16px; }
+  .u-kpis .kpi .num { font-size: clamp(24px, 7vw, 32px); margin-top: 10px; } .u-kpis .kpi .num.num-word { font-size: 18px; margin-top: 14px; }
+}
 
 /* automations and settings */
 .kv.kv-top { margin-top: 16px; }

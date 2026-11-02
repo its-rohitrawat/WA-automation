@@ -41,7 +41,6 @@
 :root[data-theme="light"] .phone .chat { background: #EFEAE2 radial-gradient(rgba(11,20,26,.05) 1px, transparent 1px) 0 0/14px 14px; }
 :root[data-theme="light"] .phone .msg { background: #D9FDD3; color: #111B21; } :root[data-theme="light"] .phone .msg u { color: #027EB5; }
 :root[data-theme="light"] .phone .bar { background: #F0F2F5; color: #111B21; } :root[data-theme="light"] .phone { background: #FFFFFF; border-color: #E9EDEF; }
-:root[data-theme="light"] .ubars .b.today { background: var(--wa-fill); }
 :root[data-theme="light"] .qr { box-shadow: 0 0 0 6px rgba(0,168,132,.12), 0 10px 30px -10px rgba(11,20,26,.25); }
 * { box-sizing: border-box; }
 ::-webkit-scrollbar { width: 9px; height: 9px; } ::-webkit-scrollbar-track { background: transparent; }
@@ -311,13 +310,38 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .note { margin-top: 14px; padding: 10px 12px; border-radius: 12px; background: var(--panel-2); color: var(--muted); font-size: 12.5px; display: flex; gap: 8px; }
 .note code { font: 500 12px var(--mono); color: var(--text); }
 
-/* usage bars */
-.ubars { position: relative; height: 200px; display: flex; align-items: flex-end; gap: 8px; padding-top: 10px; border-bottom: 1px solid var(--line); }
-.ubars .b { flex: 1; border-radius: 4px 4px 0 0; background: var(--s-open); position: relative; transform-origin: bottom; cursor: default; }
-.ubars .b.today { background: var(--green); }
-.capline { position: absolute; left: 0; right: 0; border-top: 1.5px dashed rgba(217,79,99,.6); }
-.capline span { position: absolute; right: 0; top: -20px; font: 500 11px var(--mono); color: #f07585; }
-.uaxis { display: flex; gap: 8px; margin-top: 6px; } .uaxis span { flex: 1; text-align: center; font: 400 10.5px var(--mono); color: var(--faint); }
+/* AI usage chart (November release, change 4): one US$ axis, a recessive grid, the cap as a dashed line with its label,
+   today in the accent colour, a column per day that shows its tip on hover (also a day at $0). */
+.u-card { display: flex; flex-direction: column; }
+.u-card .card-head { flex-wrap: wrap; }
+.u-keys { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--muted); }
+.u-keys span { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.u-key { width: 10px; height: 10px; border-radius: 3px; background: var(--u-bar); }
+.u-key.is-today { background: var(--u-today); }
+.u-key.is-cap { width: 16px; height: 0; border-radius: 0; background: none; border-top: 2px dashed var(--s-overdue); }
+.uchart { flex: 1; display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-rows: minmax(190px, 1fr) auto; column-gap: 10px; min-height: 230px; padding-top: 8px; }
+.u-card { --u-bar: color-mix(in srgb, var(--s-open) 62%, var(--panel)); --u-today: var(--green); }
+:root[data-theme="light"] .u-card { --u-bar: color-mix(in srgb, var(--s-open) 45%, var(--panel)); --u-today: var(--wa-fill); }
+.uyaxis { position: relative; min-width: 30px; }
+.uyaxis span { position: absolute; right: 0; transform: translateY(50%); font: 400 10.5px/1 var(--mono); color: var(--faint); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.uplot { position: relative; }
+.ugrid { position: absolute; left: 0; right: 0; height: 0; border-top: 1px solid var(--line); }
+.ugrid.is-base { border-top-color: var(--line-2); }
+.ubars { position: absolute; inset: 0; display: flex; align-items: stretch; gap: 8px; }
+.ucol { flex: 1; min-width: 0; display: flex; align-items: flex-end; border-radius: 6px 6px 0 0; cursor: default; transition: background-color 120ms ease; }
+.ucol .b { width: 100%; border-radius: 4px 4px 0 0; background: var(--u-bar); transform-origin: bottom; }
+.ucol.today .b { background: var(--u-today); }
+.ucol.over .b { background: var(--s-warn); }
+.ucol:hover { background: color-mix(in srgb, var(--text) 6%, transparent); }
+.capline { position: absolute; left: 0; right: 0; height: 0; border-top: 1.5px dashed var(--s-overdue); pointer-events: none; z-index: 1; }
+.capline span { position: absolute; left: 4px; bottom: 4px; padding: 1px 6px; border-radius: 6px; font: 500 11px/1.4 var(--mono); color: #f07585; background: color-mix(in srgb, var(--panel) 85%, transparent); white-space: nowrap; }
+.capline.is-top span { bottom: auto; top: 4px; }
+:root[data-theme="light"] .capline span { color: #b23247; }
+.uaxis { grid-column: 2; display: flex; gap: 8px; margin-top: 8px; }
+.uaxis span { flex: 1; min-width: 0; text-align: center; font: 400 10.5px var(--mono); color: var(--faint); }
+.uaxis span.today { color: var(--text); font-weight: 600; }
+.u-none { position: absolute; left: 50%; top: 45%; transform: translate(-50%, -50%); margin: 0; padding: 0 12px; font-size: 13px; color: var(--muted); text-align: center; }
+@media (max-width: 640px) { .ubars, .uaxis { gap: 3px; } .uaxis span { font-size: 9.5px; letter-spacing: -0.02em; } .uchart { min-height: 210px; column-gap: 6px; } }
 
 /* automations */
 .phone { width: 280px; border-radius: 34px; padding: 12px; background: #0b141a; border: 1px solid rgba(233,237,239,.12); box-shadow: var(--shadow); margin: 0 auto; }
