@@ -39,7 +39,9 @@ function fakeBuild() {
       for (const fn of statusFns) fn(status());
     };
     const n = built.length; // which build this is: the sockets say so
-    const own = (groupId: string) => state === 'open' && allow.has(groupId);
+    // Answers for any group while open (unlike a real gateway, which also checks its allow-list): so a test sees which
+    // phone was asked, and a wrong route shows as the wrong build, not as a null the allow-list would give anyway.
+    const own = (_groupId: string) => state === 'open';
     const gateway: GatewayLike = {
       onEvent: () => undefined, onStatus: (fn) => void statusFns.push(fn), onHistory: () => undefined, status,
       start: () => set('open'), stop: async () => set('stopped'), listGroups: async () => [], failedCount: () => 0, droppedCount: () => 0,
