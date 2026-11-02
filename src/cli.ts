@@ -1,10 +1,11 @@
 import { Command } from 'commander';
 import { addReportCommands, defaultDeps, googleAccountCommand, googleAuthCommand, linkCommand, listGroupsCommand, statusCommand } from './cli/commands.ts';
 import { loadEnv } from './config/env.ts';
-import { masterKeyPath, trackerDbPath } from './config/paths.ts';
+import { masterKeyPath } from './config/paths.ts';
 import { DpapiKeyProvider } from './crypto/keyProvider.ts';
 import { systemClock } from './util/clock.ts';
-import { openDb, type Db } from './store/db.ts';
+import type { Db } from './store/db.ts';
+import { openStore } from './store/open.ts';
 import {
   closeTask, editTask, reopenTask, reprocess, requestRebuild, setClientPhase, setPersonRole, unlockClientPhase, unlockTask, type EditOptions,
 } from './cli/corrections.ts';
@@ -12,6 +13,8 @@ import {
   assignMeetingToClient, defaultMeetingDeps, meetingBackfillCommand, meetingCheckCommand, meetingListLines, retryLine, retryMeetingById, skipMeetingById,
 } from './cli/meetings.ts';
 import { transcribeVoiceCommand } from './cli/transcribeVoice.ts';
+import { dbBootstrapCommand, dbMigrateCommand, defaultDbDeps } from './cli/db.ts';
+import { exportToSqliteCommand, migrateToPostgresCommand } from './cli/migrate.ts';
 
 // Without these Node prints the raw error (Boom data, gaxios request config), bypassing any redaction.
 function fatal(err: unknown): void {
@@ -52,26 +55,26 @@ program
 addReportCommands(program, deps);
 
 // No single-instance lock: the service and the CLI share the DB through WAL with a busy timeout.
-function withDb<T>(fn: (db: Db) => T): T {
-  const db = openDb(trackerDbPath(loadEnv().DATA_DIR));
+async function withDb<T>(fn: (db: Db) => T | Promise<T>): Promise<T> {
+  const db = await openStore(loadEnv());
   try {
-    return fn(db);
+    return await fn(db);
   } finally {
-    db.close();
+    await db.close();
   }
 }
 
 const task = program.command('task').description('Fix a task');
-task.command('close <code>').description('Mark a task done').action((code: string) => {
-  const t = withDb((db) => closeTask(db, code, new Date()));
+task.command('close <code>').description('Mark a task done').action(async (code: string) => {
+  const t = await withDb((db) => closeTask(db, code, new Date()));
   console.log(`${t.code} closed.`);
 });
-task.command('reopen <code>').description('Reopen a task').action((code: string) => {
-  const t = withDb((db) => reopenTask(db, code, new Date()));
+task.command('reopen <code>').description('Reopen a task').action(async (code: string) => {
+  const t = await withDb((db) => reopenTask(db, code, new Date()));
   console.log(`${t.code} reopened.`);
 });
-task.command('unlock <code>').description('Let the AI change this task again (clears your locks)').action((code: string) => {
-  const t = withDb((db) => unlockTask(db, code, new Date()));
+task.command('unlock <code>').description('Let the AI change this task again (clears your locks)').action(async (code: string) => {
+  const t = await withDb((db) => unlockTask(db, code, new Date()));
   console.log(`${t.code} unlocked.`);
 });
 task
@@ -85,8 +88,8 @@ task
   .option('--asked-by <name>')
   .option('--deadline <YYYY-MM-DD|none>')
   .option('--latest-progress <text>')
-  .action((code: string, opts: EditOptions) => {
-    const t = withDb((db) => editTask(db, code, opts, new Date()));
+  .action(async (code: string, opts: EditOptions) => {
+    const t = await withDb((db) => editTask(db, code, opts, new Date()));
     console.log(`${t.code} updated.`);
   });
 
@@ -96,8 +99,8 @@ program
   .command('set <number> <role>')
   .description('Mark someone as team or client (number with country code, or a WhatsApp id)')
   .option('--client <code>', 'only in this client group')
-  .action((number: string, role: string, opts: { client?: string }) => {
-    const n = withDb((db) => setPersonRole(db, number, role, opts.client, new Date()));
+  .action(async (number: string, role: string, opts: { client?: string }) => {
+    const n = await withDb((db) => setPersonRole(db, number, role, opts.client, new Date()));
     console.log(`Updated ${n} group membership(s).`);
   });
 
@@ -105,17 +108,17 @@ const phase = program.command('phase').description('Fix client phases');
 phase
   .command('set <client> <phase>')
   .description("Set a client's current phase")
-  .action((client: string, name: string) => {
-    withDb((db) => setClientPhase(db, client, name, new Date()));
+  .action(async (client: string, name: string) => {
+    await withDb((db) => setClientPhase(db, client, name, new Date()));
     console.log('Phase updated.');
   });
-phase.command('unlock <client>').description("Let the AI change a client's phase again").action((client: string) => {
-  withDb((db) => unlockClientPhase(db, client, new Date()));
+phase.command('unlock <client>').description("Let the AI change a client's phase again").action(async (client: string) => {
+  await withDb((db) => unlockClientPhase(db, client, new Date()));
   console.log('Phase unlocked.');
 });
 
-program.command('rebuild').description('Rebuild and republish the workbook now').action(() => {
-  withDb((db) => requestRebuild(db, new Date()));
+program.command('rebuild').description('Rebuild and republish the workbook now').action(async () => {
+  await withDb((db) => requestRebuild(db, new Date()));
   console.log('Rebuild requested; the service publishes within about a minute.');
 });
 
@@ -125,8 +128,8 @@ program
   .requiredOption('--since <YYYY-MM-DD>')
   .option('--until <YYYY-MM-DD>', 'last day to include')
   .option('--yes', 'confirm a large job (more than 200 messages)')
-  .action((client: string, opts: { since: string; until?: string; yes?: boolean }) => {
-    const r = withDb((db) => reprocess(db, client, opts.since, opts.until, opts.yes === true, new Date()));
+  .action(async (client: string, opts: { since: string; until?: string; yes?: boolean }) => {
+    const r = await withDb((db) => reprocess(db, client, opts.since, opts.until, opts.yes === true, new Date()));
     if (r.count === 0) {
       console.log('No processed messages in that range; nothing changed.');
     } else if (r.needsConfirm) {
@@ -154,18 +157,18 @@ meeting
   .command('list')
   .description('Meetings that need you (titles are shown on this screen only)')
   .option('--all', 'every meeting, done and skipped included')
-  .action((opts: { all?: boolean }) => {
-    for (const l of withDb((db) => meetingListLines(db, opts.all === true))) console.log(l);
+  .action(async (opts: { all?: boolean }) => {
+    for (const l of await withDb((db) => meetingListLines(db, opts.all === true))) console.log(l);
   });
-meeting.command('assign <id> <client>').description('Give an unassigned, internal or client-less no-access meeting to a client; it is then processed').action((id: string, client: string) => {
-  const r = withDb((db) => assignMeetingToClient(db, id, client, new Date()));
+meeting.command('assign <id> <client>').description('Give an unassigned, internal or client-less no-access meeting to a client; it is then processed').action(async (id: string, client: string) => {
+  const r = await withDb((db) => assignMeetingToClient(db, id, client, new Date()));
   console.log(`Meeting ${r.id} assigned to ${r.code}; the service processes it next (this costs money).`);
 });
-meeting.command('skip <id>').description('Do not process an unassigned meeting').action((id: string) => {
-  console.log(`Meeting ${withDb((db) => skipMeetingById(db, id, new Date()))} skipped.`);
+meeting.command('skip <id>').description('Do not process an unassigned meeting').action(async (id: string) => {
+  console.log(`Meeting ${await withDb((db) => skipMeetingById(db, id, new Date()))} skipped.`);
 });
-meeting.command('retry <id>').description('Try a failed or no-access meeting again (one without a client goes back to unassigned)').action((id: string) => {
-  console.log(retryLine(withDb((db) => retryMeetingById(db, id, new Date()))));
+meeting.command('retry <id>').description('Try a failed or no-access meeting again (one without a client goes back to unassigned)').action(async (id: string) => {
+  console.log(retryLine(await withDb((db) => retryMeetingById(db, id, new Date()))));
 });
 const meetingDeps = () => {
   const env = loadEnv();
@@ -181,6 +184,33 @@ meeting
   .command('check')
   .description("Read-only: the last 7 days' recordings, their client match and whether each file opens")
   .action(async () => meetingCheckCommand(meetingDeps()));
+
+program
+  .command('db-bootstrap')
+  .description('Postgres, once: create the agent roles and the database (asks for the superuser and wa_backup passwords)')
+  .option('--superuser <name>', 'the Postgres superuser', 'postgres')
+  .action(async (opts: { superuser: string }) => dbBootstrapCommand(loadEnv(), opts, defaultDbDeps()));
+program
+  .command('db-migrate')
+  .description('Postgres: apply the schema changes this version needs, as wa_owner')
+  .action(async () => dbMigrateCommand(loadEnv(), defaultDbDeps()));
+program
+  .command('migrate-to-postgres')
+  .description('Copy the SQLite data into Postgres as customer #1: a dry run that writes nothing, unless --apply')
+  .option('--apply', 'write for real, after a checked backup (needs --backup-dir)')
+  .option('--backup-dir <dir>', 'a folder that does not exist yet, for the checked backup')
+  .option('--data-dir <dir>', 'another data folder (the rehearsal copy); default DATA_DIR')
+  .action(async (o: { apply?: boolean; backupDir?: string; dataDir?: string }) => {
+    process.exitCode = await migrateToPostgresCommand(loadEnv(), o);
+  });
+program
+  .command('export-to-sqlite')
+  .description("Write customer #1's Postgres rows into new SQLite files (rollback B); data/ is not touched")
+  .requiredOption('--out <dir>', 'a folder that does not exist yet')
+  .option('--data-dir <dir>', 'the data folder whose agent must be stopped; default DATA_DIR')
+  .action(async (o: { out: string; dataDir?: string }) => {
+    process.exitCode = await exportToSqliteCommand(loadEnv(), o);
+  });
 
 program.parseAsync(process.argv).catch((e: unknown) => {
   console.error(e instanceof Error ? e.message : 'Command failed');

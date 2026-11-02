@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -9,9 +10,15 @@ import { createLogger } from '../../src/util/logger.ts';
 import { createGuard, RateLimiter } from '../../src/web/guard.ts';
 import type { Router } from '../../src/web/router.ts';
 import { createWebServer, type WebServer } from '../../src/web/server.ts';
+import { auditedWrite, type AuditedWrite } from '../../src/web/routes/auth.ts';
 import { SessionStore } from '../../src/web/sessions.ts';
+import { onSqlite } from './db.ts';
 
-export const OWNER = 'owner@example.com';
+/**
+ * The signed-in owner. On Postgres every test file shares one platform Db, so each file gets an owner of its own: one
+ * file's "sign out everywhere" then never counts or ends another file's sessions.
+ */
+export const OWNER = onSqlite ? 'owner@example.com' : `owner-${randomUUID().slice(0, 8)}@example.com`;
 
 export interface Reply {
   status: number;
@@ -23,7 +30,7 @@ export interface Reply {
 export async function bootDashboard(o: {
   db: Db;
   clock: ManualClock;
-  mount: (router: Router, x: { guard: ReturnType<typeof createGuard>; actions: RateLimiter; sessions: SessionStore }) => void;
+  mount: (router: Router, x: { guard: ReturnType<typeof createGuard>; actions: RateLimiter; sessions: SessionStore; audited: AuditedWrite }) => void;
   actionCapacity?: number;
 }) {
   const lines: string[] = [];
@@ -31,13 +38,20 @@ export async function bootDashboard(o: {
   const root = mkdtempSync(join(tmpdir(), 'wa-dash-'));
   writeFileSync(join(root, 'index.html'), '<!doctype html>');
   let port = 0;
-  const sessions = new SessionStore(o.db, o.clock);
+  // The dashboard's sessions live with the platform tables (decision D1): the tracker itself on SQLite, the platform Db
+  // (wa_platform) on Postgres, where a customer's Db cannot reach web_sessions.
+  const sessionDb = onSqlite ? o.db : (await import('./pg.ts')).openTestPlatformDb();
+  const sessions = new SessionStore(sessionDb, o.clock);
   const guard = createGuard({ sessions, ownerEmails: [OWNER], port: () => port });
   const actions = new RateLimiter({ capacity: o.actionCapacity ?? 1000, refillPerSec: 1, clock: o.clock });
   const server: WebServer = createWebServer({ control: {}, env: { DASHBOARD_PORT: 0 }, log, clock: o.clock, publicDir: root });
-  o.mount(server.router, { guard, actions, sessions });
+  // A session change with its audit row, as the dashboard mounts it: the audit row in this Db, then the session's Db.
+  o.mount(server.router, { guard, actions, sessions, audited: auditedWrite(o.db, sessionDb) });
   port = (await server.start()).port;
-  const { id, csrf } = sessions.create(OWNER);
+  // Each test starts with only its own session, as with SQLite's fresh Db: on Postgres this file's earlier tests left
+  // theirs on the shared platform Db (this file's owner only: OWNER is unique per file there).
+  if (!onSqlite) await sessionDb.run('DELETE FROM web_sessions WHERE email = ?', [OWNER]);
+  const { id, csrf } = await sessions.create(OWNER);
   const origin = `http://127.0.0.1:${port}`;
 
   function send(method: string, path: string, x: { body?: unknown; raw?: string; cookie?: string | null; csrf?: string | null; origin?: string | null } = {}): Promise<Reply> {

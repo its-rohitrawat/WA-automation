@@ -2,7 +2,7 @@ import { sanitizeInline } from '../brain/prompt.ts';
 import { isDomain } from '../config/domains.ts';
 import type { ClientConfig } from '../config/groups.ts';
 import { getClientByGroupId } from '../store/clients.ts';
-import { tx, type Db } from '../store/db.ts';
+import type { Sql } from '../store/db.ts';
 import { getKv, setKv } from '../store/kv.ts';
 import { insertFound, knownRecordings, type MeetingAttendee, type MeetingStatus, type NewMeeting } from '../store/meetings.ts';
 import type { Clock } from '../util/clock.ts';
@@ -28,7 +28,7 @@ export interface WatcherSettings {
 }
 
 export interface MeetingWatcherDeps {
-  db: Db;
+  db: Sql;
   api: MeetingsGoogleApi;
   clock: Clock;
   log: Logger;
@@ -142,12 +142,12 @@ const SINCE_KEY = 'meetings_since';
  * MEETINGS_SINCE when it is set; otherwise the day (IST) meetings were first seen switched on, stored in kv
  * 'meetings_since' the first time this runs, so a restart does not move it (M3).
  */
-export function meetingsSince(db: Db, configured: string | undefined, now: Date): string {
+export async function meetingsSince(db: Sql, configured: string | undefined, now: Date): Promise<string> {
   if (configured !== undefined) return configured;
-  const stored = getKv(db, SINCE_KEY);
+  const stored = await getKv(db, SINCE_KEY);
   if (stored) return stored;
   const today = istDate(now);
-  setKv(db, SINCE_KEY, today);
+  await setKv(db, SINCE_KEY, today);
   return today;
 }
 
@@ -211,7 +211,7 @@ const isConferenceError = (e: unknown): e is GoogleTransientError | GoogleNoAcce
   e instanceof GoogleTransientError || e instanceof GoogleNoAccessError;
 
 export class MeetingWatcher {
-  #db: Db;
+  #db: Sql;
   #api: MeetingsGoogleApi;
   #clock: Clock;
   #log: Logger;
@@ -270,7 +270,7 @@ export class MeetingWatcher {
   async #pass(fromIso: string, toIso: string, signal: AbortSignal, dryRun: boolean): Promise<BackfillResult> {
     const nowMs = this.#clock.now().getTime();
     const createdAt = new Date(nowMs).toISOString();
-    const clients = this.#activeClients();
+    const clients = await this.#activeClients();
     const conferences = await this.#api.listConferences(fromIso, toIso, signal);
     const pending: NewMeeting[] = [];
     const matches: MatchResult['kind'][] = [];
@@ -278,7 +278,7 @@ export class MeetingWatcher {
     let errors = 0;
     for (const c of conferences) {
       signal.throwIfAborted();
-      const known = knownRecordings(this.#db, c.name);
+      const known = await knownRecordings(this.#db, c.name);
       // A conference with no row (no recording yet, or none at all) is listed again every pass while it is inside the
       // 72-hour window: accepted, as it costs one listRecordings call per pass. A conference with a row is settled 24 h
       // after it ended, so a second recording whose file appears later than that is not found: accepted (rare).
@@ -309,9 +309,9 @@ export class MeetingWatcher {
     if (dryRun) return { added: pending.length, skipped, errors, ids: [], found };
     const ids: number[] = [];
     const stored: FoundMeeting[] = [];
-    tx(this.#db, () => {
+    await this.#db.tx(async (q) => {
       for (const [i, m] of pending.entries()) {
-        const id = insertFound(this.#db, m);
+        const id = await insertFound(q, m);
         if (id === null) skipped++;
         else {
           ids.push(id);
@@ -323,10 +323,10 @@ export class MeetingWatcher {
   }
 
   /** Active clients with their tracker ids. A config whose row is missing or inactive never matches. */
-  #activeClients(): MatchableClient[] {
+  async #activeClients(): Promise<MatchableClient[]> {
     const out: MatchableClient[] = [];
     for (const c of this.#clients) {
-      const row = getClientByGroupId(this.#db, c.groupId);
+      const row = await getClientByGroupId(this.#db, c.groupId);
       if (row?.active) out.push({ clientId: row.id, name: c.name, emailDomains: c.emailDomains, meetingKeywords: c.meetingKeywords });
     }
     return out;

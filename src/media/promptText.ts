@@ -190,16 +190,16 @@ export function mediaPromptTexts(
  * longer of perContextMessage and perContextVoice for context messages (one database read loads every kind). The full length
  * is in textChars.
  */
-export function mediaForPrompt(
+export async function mediaForPrompt(
   db: Db,
   batch: Pick<MessageRow, 'id'>[],
   recent: Pick<MessageRow, 'id'>[],
   limits: MediaPromptLimits = MEDIA_PROMPT_LIMITS,
-): Map<number, MediaRow> {
+): Promise<Map<number, MediaRow>> {
   const context = Math.max(limits.perContextMessage, limits.perContextVoice ?? MEDIA_PROMPT_LIMITS.perContextVoice);
-  const out = mediaForMessages(db, recent.map((m) => m.id), context + 1);
+  const out = await mediaForMessages(db, recent.map((m) => m.id), context + 1);
   // Set after the context rows, so a message in both lists gets the longer text.
-  for (const [id, row] of mediaForMessages(db, batch.map((m) => m.id), limits.perMessage + 1)) out.set(id, row);
+  for (const [id, row] of await mediaForMessages(db, batch.map((m) => m.id), limits.perMessage + 1)) out.set(id, row);
   return out;
 }
 

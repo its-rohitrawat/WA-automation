@@ -1,9 +1,9 @@
 import { createHmac } from 'node:crypto';
-import { readFileSync } from 'node:fs';
 import { z } from 'zod';
 import { DomainSchema } from '../../config/domains.ts';
-import { parseGroupsFile, type ClientConfig } from '../../config/groups.ts';
-import { applyGroupChanges, GroupChangeError, type GroupChangeResult, type GroupChanges } from '../../config/groupsWriter.ts';
+import type { ClientConfig } from '../../config/groups.ts';
+import type { GroupsStore } from '../../config/groupsStore.ts';
+import { GroupChangeError, type GroupChangeResult, type GroupChanges } from '../../config/groupsWriter.ts';
 import { groupsOverview, type GroupDirectory, type GroupFilter, type GroupRow, type GroupsOverview } from '../../control/groups.ts';
 import { getClientByGroupId, listClients } from '../../store/clients.ts';
 import type { Db } from '../../store/db.ts';
@@ -21,8 +21,11 @@ import { fail, ok, type ApiError, type ApiResult, type AuditFn, type OwnerContex
 export interface GroupsDeps {
   db: Db;
   directory: GroupDirectory;
-  /** config/allowed-groups.json */
-  groupsFile: string;
+  /**
+   * Where the allow-list is kept (Phase B): the founder's config/allowed-groups.json (fileGroupsStore), or a customer's
+   * own database (dbGroupsStore). Every change goes through it, under the same rules.
+   */
+  store: GroupsStore;
   /** The current parsed allow-list. */
   configs: () => ClientConfig[];
   /** The opaque key the browser gets for a group id (makeGroupKey with a server secret). */
@@ -67,23 +70,25 @@ function keyed(deps: GroupsDeps, o: GroupsOverview): GroupsView {
   return { ...o, rows: o.rows.map(({ groupId, ...row }) => ({ key: deps.groupKey(groupId), ...row })) };
 }
 
-/** Which groups the owner ignored: one read of the kv rows, then a check by key. */
-function ignoredCheck(deps: GroupsDeps): (groupId: string) => boolean {
-  const keys = new Set(
-    (deps.db.prepare('SELECT k FROM kv WHERE k GLOB ?').all(`${IGNORED}*`) as { k: string }[]).map((r) => r.k.slice(IGNORED.length)),
-  );
+/**
+ * Which groups the owner ignored: one read of the kv rows, then a check by key. The prefix is matched with substr, which
+ * both engines run (GLOB is SQLite's only).
+ */
+async function ignoredCheck(deps: GroupsDeps): Promise<(groupId: string) => boolean> {
+  const rows = await deps.db.all<{ k: string }>(`SELECT k FROM kv WHERE substr(k, 1, ${IGNORED.length}) = ?`, [IGNORED]);
+  const keys = new Set(rows.map((r) => r.k.slice(IGNORED.length)));
   return (groupId) => keys.size > 0 && keys.has(deps.groupKey(groupId));
 }
 
 /** The list from the cached listing (never waiting on WhatsApp) with these configs. */
-function cachedView(deps: GroupsDeps, configs: ClientConfig[]): GroupsView {
-  return keyed(deps, groupsOverview({ db: deps.db, listing: deps.directory.cachedListing(), configs, ignored: ignoredCheck(deps) }));
+async function cachedView(deps: GroupsDeps, configs: ClientConfig[]): Promise<GroupsView> {
+  return keyed(deps, await groupsOverview({ db: deps.db, listing: deps.directory.cachedListing(), configs, ignored: await ignoredCheck(deps) }));
 }
 
 /** One audit line; a failing write is logged (by error type only) and the caller carries on. */
-function auditLine(deps: GroupsDeps, ctx: OwnerContext, event: string): void {
+async function auditLine(deps: GroupsDeps, ctx: OwnerContext, event: string): Promise<void> {
   try {
-    deps.audit({ actor: ctx.actor, event, kind: 'config', requestId: ctx.requestId });
+    await deps.audit({ actor: ctx.actor, event, kind: 'config', requestId: ctx.requestId });
   } catch (e) {
     deps.log.warn({ code: (e as Error | null)?.name ?? 'Error', requestId: ctx.requestId }, 'audit line for a group change could not be written');
   }
@@ -101,7 +106,7 @@ export async function groupsListHandler(deps: GroupsDeps, _ctx: OwnerContext, se
     refresh = fetchedAt === null || deps.clock.now().getTime() - Date.parse(fetchedAt) >= REFRESH_MIN_MS;
   }
   const listing = await deps.directory.list({ refresh });
-  return ok(keyed(deps, groupsOverview({ db: deps.db, listing, configs: deps.configs(), q, filter: filter as GroupFilter, ignored: ignoredCheck(deps) })));
+  return ok(keyed(deps, await groupsOverview({ db: deps.db, listing, configs: deps.configs(), q, filter: filter as GroupFilter, ignored: await ignoredCheck(deps) })));
 }
 
 // The rules of ClientSchema (config/groups.ts), plus the matchable-keyword rule parseGroupsFile applies. The code is only
@@ -178,7 +183,7 @@ export async function groupsApplyHandler(deps: GroupsDeps, ctx: OwnerContext, bo
 
   let result: GroupChangeResult;
   try {
-    result = await applyGroupChanges(deps.groupsFile, changes, { db: deps.db });
+    result = await deps.store.apply(changes);
   } catch (e) {
     if (e instanceof GroupChangeError) {
       return fail(422, 'group_change', withoutIds(e.message), { field: e.field, key: e.groupId === null ? null : deps.groupKey(e.groupId) });
@@ -193,12 +198,12 @@ export async function groupsApplyHandler(deps: GroupsDeps, ctx: OwnerContext, bo
     ['Client edited', result.edited],
   ];
   for (const [what, groups] of lines) {
-    for (const g of groups) auditLine(deps, ctx, `${what} · ${g.name} (${g.code})`);
+    for (const g of groups) await auditLine(deps, ctx, `${what} · ${g.name} (${g.code})`);
   }
   // A group approved is no longer set aside.
-  for (const g of result.approved) deleteKv(deps.db, IGNORED + deps.groupKey(g.groupId));
+  for (const g of result.approved) await deleteKv(deps.db, IGNORED + deps.groupKey(g.groupId));
   // From the cached list: the answer never waits on WhatsApp.
-  return ok(cachedView(deps, result.configs));
+  return ok(await cachedView(deps, result.configs));
 }
 
 const BulkBody = z.strictObject({
@@ -223,15 +228,16 @@ export function clientPart(name: string): string {
   return (name.split(/\s+[x×–-]\s+/i)[0]?.trim() || name.trim()).slice(0, NAME_MAX).trim();
 }
 
-/** The first code for this name not used in the allow-list file nor by any client row, or null. */
-function freeCode(deps: GroupsDeps, name: string): string | null {
-  const used = new Set([...fileCodes(deps.groupsFile), ...listClients(deps.db, false).map((c) => c.code)]);
+/** The first code for this name not used in the allow-list (a list that cannot be read gives none) nor by any client row, or null. */
+async function freeCode(deps: GroupsDeps, name: string): Promise<string | null> {
+  const listed = await deps.store.list().catch(() => [] as ClientConfig[]);
+  const used = new Set([...listed.map((c) => c.code), ...(await listClients(deps.db, false)).map((c) => c.code)]);
   return codeCandidates(name).find((c) => !used.has(c)) ?? null;
 }
 
 /**
  * POST /dashboard/api/groups/bulk with { action: 'approve' | 'ignore' | 'unignore', keys }: up to 50 groups, each on its
- * own. An approve is the single approve's own write (applyGroupChanges, one group at a time, in order), with the name and
+ * own. An approve is the single approve's own write (the store's apply, one group at a time, in order), with the name and
  * code the approve form would suggest (a former client keeps its name and code); one group failing does not stop the
  * others, and each result says why. Ignore sets an untracked group aside; unignore brings it back.
  */
@@ -249,19 +255,19 @@ export async function groupsBulkHandler(deps: GroupsDeps, ctx: OwnerContext, bod
   if (action !== 'approve') {
     const tracked = new Set(configs.map((c) => c.groupId));
     const at = deps.clock.now().toISOString();
-    deps.db.transaction(() => {
+    await deps.db.tx(async (q) => {
       for (const key of keys) {
         if (tracked.has(index.get(key)!)) failed(key, 'It is tracked. Remove it from the agent first.');
         else {
-          if (action === 'ignore') setKv(deps.db, IGNORED + key, at);
-          else deleteKv(deps.db, IGNORED + key);
+          if (action === 'ignore') await setKv(q, IGNORED + key, at);
+          else await deleteKv(q, IGNORED + key);
           done(key);
         }
       }
-    })();
+    });
     // No name: an untracked group's name never reaches disk.
-    for (const r of results) if (r.ok) auditLine(deps, ctx, action === 'ignore' ? 'Group ignored' : 'Group shown again');
-    return ok({ ...cachedView(deps, configs), results });
+    for (const r of results) if (r.ok) await auditLine(deps, ctx, action === 'ignore' ? 'Group ignored' : 'Group shown again');
+    return ok({ ...await cachedView(deps, configs), results });
   }
 
   const subjects = new Map((deps.directory.cachedGroups() ?? []).map((g) => [g.id, g.subject]));
@@ -272,22 +278,22 @@ export async function groupsBulkHandler(deps: GroupsDeps, ctx: OwnerContext, bod
       continue;
     }
     // A group removed earlier keeps its client row: it comes back with that name and code, as in the approve form.
-    const former = getClientByGroupId(deps.db, groupId);
+    const former = await getClientByGroupId(deps.db, groupId);
     const name = former ? former.name.slice(0, NAME_MAX).trim() : clientPart(subjects.get(groupId) ?? '');
     if (!name) {
       failed(key, 'The group has no name. Approve it on its own to give the client one.');
       continue;
     }
-    const code = former?.code ?? freeCode(deps, name);
+    const code = former?.code ?? (await freeCode(deps, name));
     if (!code) {
       failed(key, 'No code could be made from its name. Approve it on its own to choose one.');
       continue;
     }
     try {
-      const result = await applyGroupChanges(deps.groupsFile, { approve: [{ groupId, name, code }] }, { db: deps.db });
+      const result = await deps.store.apply({ approve: [{ groupId, name, code }] });
       configs = result.configs;
-      deleteKv(deps.db, IGNORED + key);
-      for (const g of result.approved) auditLine(deps, ctx, `Group approved · ${g.name} (${g.code})`);
+      await deleteKv(deps.db, IGNORED + key);
+      for (const g of result.approved) await auditLine(deps, ctx, `Group approved · ${g.name} (${g.code})`);
       done(key);
     } catch (e) {
       if (e instanceof GroupChangeError) failed(key, withoutIds(e.message));
@@ -297,7 +303,7 @@ export async function groupsBulkHandler(deps: GroupsDeps, ctx: OwnerContext, bod
       }
     }
   }
-  return ok({ ...cachedView(deps, configs), results });
+  return ok({ ...await cachedView(deps, configs), results });
 }
 
 /** Upper-case Latin letters of each word, accents removed; anything else (digits, other scripts) is dropped. */
@@ -328,18 +334,9 @@ export function codeCandidates(name: string): string[] {
   return out;
 }
 
-/** The codes in the allow-list file as it is on disk now; a missing or bad file gives none. */
-function fileCodes(path: string): string[] {
-  try {
-    return parseGroupsFile(readFileSync(path, 'utf8').replace(/^﻿/, '')).map((c) => c.code);
-  } catch {
-    return [];
-  }
-}
-
 /** GET /dashboard/api/groups/suggest-code?name= : the first code not used in the allow-list file nor by any client row. */
-export function suggestCodeHandler(deps: GroupsDeps, _ctx: OwnerContext, name: string): ApiResult<{ code: string | null } | ApiError> {
+export async function suggestCodeHandler(deps: GroupsDeps, _ctx: OwnerContext, name: string): Promise<ApiResult<{ code: string | null } | ApiError>> {
   const trimmed = typeof name === 'string' ? name.trim() : '';
   if (trimmed.length < 1 || trimmed.length > NAME_MAX) return fail(400, 'invalid', `Enter a client name (1 to ${NAME_MAX} characters).`);
-  return ok({ code: freeCode(deps, trimmed) });
+  return ok({ code: await freeCode(deps, trimmed) });
 }

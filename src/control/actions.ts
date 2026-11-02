@@ -184,7 +184,7 @@ export async function actionHandler(name: string, deps: ActionDeps, ctx: OwnerCo
   }
   const result: ActionResult =
     name === 'upload-tracker' ? await uploadTrackerNow(deps) : name === 'test-claude' ? await testClaude(deps) : await sendTestBeat(deps);
-  deps.audit({
+  await deps.audit({
     actor: ctx.actor,
     requestId: ctx.requestId,
     kind: 'ops',

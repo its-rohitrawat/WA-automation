@@ -59,7 +59,7 @@ class FakeRes implements SseSink {
 
 function setup() {
   const c = controlled();
-  const sessions = new LinkSessions({ drivers: { founder: c.driver, spare: c.driver }, log: silentLogger(), audit: () => {} });
+  const sessions = new LinkSessions({ drivers: { founder: c.driver, spare: c.driver }, log: silentLogger(), audit: async () => {} });
   const routes = new WhatsAppLinkRoutes({ sessions, heartbeatMs: 20 });
   return { c, sessions, routes };
 }

@@ -6,8 +6,8 @@ import type { MeetingStats } from '../../src/store/meetings.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { seededDb } from '../helpers/db.ts';
 
-function setup(freeBytes: () => number | null = () => 200e9) {
-  const db = seededDb();
+async function setup(freeBytes: () => number | null = () => 200e9) {
+  const db = await seededDb();
   const clock = manualClock('2026-10-19T08:00:00Z');
   const spend = new SpendGuard({ db, clock, capUsd: 1 });
   const h = new Health({ db, clock, spend, freeBytes });
@@ -29,16 +29,16 @@ const STT_REFUSED = '⚠️ Meetings waiting: the speech-to-text key was refused
 const GREEN = '✅ Connected · waiting for new messages';
 
 describe('Health and meetings', () => {
-  it('shows no meeting line while meetings are off (null), whatever the counts were', () => {
-    const { h } = setup();
+  it('shows no meeting line while meetings are off (null), whatever the counts were', async () => {
+    const { h } = await setup();
     h.setMeetings(meetings({ paused: 'google_scopes' }));
     h.setMeetings(null);
     expect(h.line()).toEqual({ ok: true, text: GREEN });
     expect(h.snapshot().meetings).toBeUndefined();
   });
 
-  it('is green when meetings are on and nothing is wrong', () => {
-    const { h } = setup();
+  it('is green when meetings are on and nothing is wrong', async () => {
+    const { h } = await setup();
     h.setMeetings(meetings({}, { done: 4, waiting: 1, unassigned: 2 }));
     expect(h.line()).toEqual({ ok: true, text: GREEN });
   });
@@ -47,15 +47,15 @@ describe('Health and meetings', () => {
     ['google_scopes', SCOPES],
     ['google_auth', SCOPES],
     ['no_ffmpeg', FFMPEG],
-  ] as const)('paused %s has its own line', (paused, text) => {
-    const { h } = setup();
+  ] as const)('paused %s has its own line', async (paused, text) => {
+    const { h } = await setup();
     h.setMeetings(meetings({ paused }));
     expect(h.line()).toEqual({ ok: false, text });
     expect(h.workbookLine()).toEqual({ ok: false, text });
   });
 
-  it('names extra Google accounts whose sign-in was refused, below the pauses and above failed meetings', () => {
-    const { h } = setup();
+  it('names extra Google accounts whose sign-in was refused, below the pauses and above failed meetings', async () => {
+    const { h } = await setup();
     h.setMeetings(meetings({ lostAccounts: ['company2', 'company3'] }, { failed: 1 }));
     expect(h.line()).toEqual({
       ok: false,
@@ -67,16 +67,16 @@ describe('Health and meetings', () => {
     expect(h.line().text).toBe(GREEN);
   });
 
-  it('counts meetings that could not be processed', () => {
-    const { h } = setup();
+  it('counts meetings that could not be processed', async () => {
+    const { h } = await setup();
     h.setMeetings(meetings({}, { failed: 1 }));
     expect(h.line()).toEqual({ ok: false, text: '⚠️ 1 meeting could not be processed' });
     h.setMeetings(meetings({}, { failed: 3 }));
     expect(h.line().text).toBe('⚠️ 3 meetings could not be processed');
   });
 
-  it('says speech-to-text is not set up only while meetings wait', () => {
-    const { h } = setup();
+  it('says speech-to-text is not set up only while meetings wait', async () => {
+    const { h } = await setup();
     h.setMeetings(meetings({ sttProvider: 'none' }));
     expect(h.line().text).toBe(GREEN);
     h.setMeetings(meetings({ sttProvider: 'none' }, { waiting: 2 }));
@@ -85,8 +85,8 @@ describe('Health and meetings', () => {
     expect(h.line().text).toBe(GREEN);
   });
 
-  it('STT_PROVIDER=local (Task 3): working, the provider is local and no line shows, whatever waits', () => {
-    const { h } = setup();
+  it('STT_PROVIDER=local (Task 3): working, the provider is local and no line shows, whatever waits', async () => {
+    const { h } = await setup();
     h.setMeetings(meetings({ sttProvider: 'local' }, { waiting: 3 }));
     expect(h.line()).toEqual({ ok: true, text: GREEN });
   });
@@ -94,8 +94,8 @@ describe('Health and meetings', () => {
   it.each([
     ['local_not_set_up_bin', '⚠️ Meetings waiting: the local speech engine is not set up (STT_LOCAL_BIN)'],
     ['local_not_set_up_model', '⚠️ Meetings waiting: the local speech engine is not set up (STT_LOCAL_MODEL)'],
-  ] as const)('the local engine not set up (%s): its own line, naming the setting as the voice-note line does', (problem, text) => {
-    const { h } = setup();
+  ] as const)('the local engine not set up (%s): its own line, naming the setting as the voice-note line does', async (problem, text) => {
+    const { h } = await setup();
     expect(MEETING_STT_PROBLEM_LINES[problem]).toBe(text);
     // The same problem, worded as the voice notes' line.
     expect(text.replace('Meetings waiting', '')).toBe(VOICE_PROBLEM_LINES[problem].replace('Voice notes are not being transcribed', ''));
@@ -109,32 +109,32 @@ describe('Health and meetings', () => {
     expect(h.line().text).toBe(text);
   });
 
-  it('keeps sttProvider local and the problem in the snapshot, and drops only the meetings for an unknown problem', () => {
-    const { db, h } = setup();
+  it('keeps sttProvider local and the problem in the snapshot, and drops only the meetings for an unknown problem', async () => {
+    const { db, h } = await setup();
     const m = meetings({ sttProvider: 'local', sttProblem: 'local_not_set_up_bin' }, { waiting: 1, deferred: { stt_none: 1 } });
     h.setMeetings(m);
-    h.persist();
-    expect(readHealthSnapshot(db)!.meetings).toEqual(m);
+    await h.persist();
+    expect((await readHealthSnapshot(db))!.meetings).toEqual(m);
     h.setMeetings(meetings({ sttProvider: 'local' }));
-    h.persist();
-    expect(readHealthSnapshot(db)!.meetings).toEqual(meetings({ sttProvider: 'local' }));
+    await h.persist();
+    expect((await readHealthSnapshot(db))!.meetings).toEqual(meetings({ sttProvider: 'local' }));
     const snap = JSON.parse(JSON.stringify(h.snapshot())) as Record<string, unknown>;
-    setKv(db, 'health', JSON.stringify({ ...snap, meetings: { ...meetings({ sttProvider: 'local' }), sttProblem: 'local_broken' } }));
-    const read = readHealthSnapshot(db);
+    await setKv(db, 'health', JSON.stringify({ ...snap, meetings: { ...meetings({ sttProvider: 'local' }), sttProblem: 'local_broken' } }));
+    const read = await readHealthSnapshot(db);
     expect(read).toBeDefined();
     expect('meetings' in read!).toBe(false);
   });
 
-  it('says the speech-to-text key was refused when meetings are deferred stt_unavailable', () => {
-    const { h } = setup();
+  it('says the speech-to-text key was refused when meetings are deferred stt_unavailable', async () => {
+    const { h } = await setup();
     h.setMeetings(meetings({}, { waiting: 1, deferred: { spend_cap: 1 } }));
     expect(h.line().text).toBe(GREEN);
     h.setMeetings(meetings({}, { waiting: 1, deferred: { stt_unavailable: 1 } }));
     expect(h.line()).toEqual({ ok: false, text: STT_REFUSED });
   });
 
-  it('orders the meeting lines: paused (scopes, then ffmpeg), failed, speech not set up, key refused', () => {
-    const { h } = setup();
+  it('orders the meeting lines: paused (scopes, then ffmpeg), failed, speech not set up, key refused', async () => {
+    const { h } = await setup();
     const all = { failed: 1, waiting: 1, deferred: { stt_unavailable: 1 } };
     h.setMeetings(meetings({ paused: 'google_auth', sttProvider: 'none' }, all));
     expect(h.line().text).toBe(SCOPES);
@@ -148,8 +148,8 @@ describe('Health and meetings', () => {
     expect(h.line().text).toBe(STT_REFUSED);
   });
 
-  it('comes after every older warning, media lines included, and before low disk', () => {
-    const { h } = setup(() => 5e9);
+  it('comes after every older warning, media lines included, and before low disk', async () => {
+    const { h } = await setup(() => 5e9);
     h.setMeetings(meetings({ paused: 'google_scopes' }));
     expect(h.line().text).toBe(SCOPES); // outranks low disk
     h.setMedia(media({ spendCap: 1 }));
@@ -172,8 +172,8 @@ describe('Health and meetings', () => {
     expect(h.line().text).toBe('⚠️ Low disk: 5.0 GB free');
   });
 
-  it('with the morning report (Phase 2c): after the media lines, its warning first, then the meeting lines, then low disk', () => {
-    const { db, h } = setup(() => 5e9);
+  it('with the morning report (Phase 2c): after the media lines, its warning first, then the meeting lines, then low disk', async () => {
+    const { db, h } = await setup(() => 5e9);
     const report = { text: 'Morning report: unknown, check WhatsApp', warning: '⚠️ Morning report: unknown, check WhatsApp.' };
     h.setMeetings(meetings({ paused: 'google_scopes' }));
     h.setReport(report);
@@ -188,35 +188,35 @@ describe('Health and meetings', () => {
     // Both live side by side in the snapshot; a meeting state this version does not know drops only the meetings.
     h.setMeetings(meetings({ paused: 'google_scopes' }));
     h.setReport(report);
-    h.persist();
-    const read = readHealthSnapshot(db)!;
+    await h.persist();
+    const read = (await readHealthSnapshot(db))!;
     expect(read.meetings).toEqual(meetings({ paused: 'google_scopes' }));
     expect(read.report).toEqual(report);
-    setKv(db, 'health', JSON.stringify({ ...read, meetings: { ...meetings(), paused: 'some_new_reason' } }));
-    const again = readHealthSnapshot(db)!;
+    await setKv(db, 'health', JSON.stringify({ ...read, meetings: { ...meetings(), paused: 'some_new_reason' } }));
+    const again = (await readHealthSnapshot(db))!;
     expect(again.meetings).toBeUndefined();
     expect(again.report).toEqual(report);
   });
 
-  it('keeps the meetings in the snapshot and reads them back', () => {
-    const { db, h } = setup();
+  it('keeps the meetings in the snapshot and reads them back', async () => {
+    const { db, h } = await setup();
     const m = meetings({ paused: 'no_ffmpeg', sttProvider: 'none' }, { done: 4, waiting: 1, unassigned: 2, deferred: { stt_none: 1 } });
     h.setMeetings(m);
-    h.persist();
-    expect(readHealthSnapshot(db)!.meetings).toEqual(m);
+    await h.persist();
+    expect((await readHealthSnapshot(db))!.meetings).toEqual(m);
     // A later change to the object given does not change what Health stored.
     m.stats.deferred.stt_none = 9;
     expect(h.snapshot().meetings!.stats.deferred).toEqual({ stt_none: 1 });
   });
 
-  it('still reads an older snapshot without meetings, and refuses a malformed one', () => {
-    const { db, h } = setup();
+  it('still reads an older snapshot without meetings, and refuses a malformed one', async () => {
+    const { db, h } = await setup();
     h.setMeetings(meetings());
     const snap = JSON.parse(JSON.stringify(h.snapshot())) as Record<string, unknown>;
     const { meetings: _m, ...old } = snap;
-    setKv(db, 'health', JSON.stringify(old));
-    expect(readHealthSnapshot(db)).toBeDefined();
-    expect(readHealthSnapshot(db)!.meetings).toBeUndefined();
+    await setKv(db, 'health', JSON.stringify(old));
+    expect(await readHealthSnapshot(db)).toBeDefined();
+    expect((await readHealthSnapshot(db))!.meetings).toBeUndefined();
     const bad: unknown[] = [
       null,
       { ...meetings(), stats: { ...stats(), done: '1' } },
@@ -225,18 +225,18 @@ describe('Health and meetings', () => {
       { paused: null, sttProvider: 'none' },
     ];
     for (const m of bad) {
-      setKv(db, 'health', JSON.stringify({ ...old, meetings: m }));
-      expect(readHealthSnapshot(db)).toBeUndefined();
+      await setKv(db, 'health', JSON.stringify({ ...old, meetings: m }));
+      expect(await readHealthSnapshot(db)).toBeUndefined();
     }
   });
 
-  it('drops only the meetings when their pause reason or provider is unknown', () => {
-    const { db, h } = setup();
+  it('drops only the meetings when their pause reason or provider is unknown', async () => {
+    const { db, h } = await setup();
     h.setMeetings(meetings());
     const snap = JSON.parse(JSON.stringify(h.snapshot())) as Record<string, unknown>;
     for (const m of [{ ...meetings(), paused: 'other' }, { ...meetings(), sttProvider: 'whisper' }]) {
-      setKv(db, 'health', JSON.stringify({ ...snap, meetings: m }));
-      const read = readHealthSnapshot(db);
+      await setKv(db, 'health', JSON.stringify({ ...snap, meetings: m }));
+      const read = await readHealthSnapshot(db);
       expect(read).toBeDefined();
       expect(read!.meetings).toBeUndefined();
       expect('meetings' in read!).toBe(false);
@@ -244,18 +244,18 @@ describe('Health and meetings', () => {
     }
   });
 
-  it('splits spend today into AI and speech in the snapshot', () => {
-    const { db, h, spend } = setup();
+  it('splits spend today into AI and speech in the snapshot', async () => {
+    const { db, h, spend } = await setup();
     spend.record('ai', 0.25, 'test');
     spend.record('stt', 0.1, 'test');
     spend.record('ai', 0.05, 'test');
     expect(h.snapshot().spendByKind).toEqual({ ai: 0.3, stt: 0.1 });
-    h.persist();
-    expect(readHealthSnapshot(db)!.spendByKind).toEqual({ ai: 0.3, stt: 0.1 });
+    await h.persist();
+    expect((await readHealthSnapshot(db))!.spendByKind).toEqual({ ai: 0.3, stt: 0.1 });
     const { spendByKind: _s, ...old } = JSON.parse(JSON.stringify(h.snapshot())) as Record<string, unknown>;
-    setKv(db, 'health', JSON.stringify(old));
-    expect(readHealthSnapshot(db)!.spendByKind).toBeUndefined();
-    setKv(db, 'health', JSON.stringify({ ...old, spendByKind: { ai: 1 } }));
-    expect(readHealthSnapshot(db)).toBeUndefined();
+    await setKv(db, 'health', JSON.stringify(old));
+    expect((await readHealthSnapshot(db))!.spendByKind).toBeUndefined();
+    await setKv(db, 'health', JSON.stringify({ ...old, spendByKind: { ai: 1 } }));
+    expect(await readHealthSnapshot(db)).toBeUndefined();
   });
 });

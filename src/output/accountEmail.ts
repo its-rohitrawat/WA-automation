@@ -16,7 +16,7 @@ export const driveAboutEmail: EmailLookup = async (client) => {
 
 /** The Drive scopes about.get answers with (the main account's drive.file among them); meeting-only accounts have none. */
 const ABOUT_SCOPES = ['drive.file', 'drive', 'drive.readonly', 'drive.metadata.readonly'].map((s) => `https://www.googleapis.com/auth/${s}`);
-const hasDriveScope = (db: Db, label: string) => grantedScopes(db, label).some((s) => ABOUT_SCOPES.includes(s));
+const hasDriveScope = async (db: Db, label: string) => (await grantedScopes(db, label)).some((s) => ABOUT_SCOPES.includes(s));
 
 /**
  * Fills the email of accounts connected before the dashboard asked for one (google-auth): once per account, at startup
@@ -28,14 +28,14 @@ export async function fillAccountEmails(o: { db: Db; hub: GoogleAuthHub; log: Lo
   const lookup = o.lookup ?? driveAboutEmail;
   let filled = 0;
   for (const label of o.labels ?? o.hub.labels()) {
-    if (accountEmail(o.db, label) !== null || !hasDriveScope(o.db, label)) continue;
+    if ((await accountEmail(o.db, label)) !== null || !(await hasDriveScope(o.db, label))) continue;
     const client = o.hub.client(label);
     if (!client) continue;
     try {
       const email = await lookup(client);
       // A reconnect while Google answered brings its own email: keep that, never this older answer.
-      if (o.hub.client(label) !== client || accountEmail(o.db, label) !== null) continue;
-      if (email !== null && saveAccountEmail(o.db, label, email)) filled++;
+      if (o.hub.client(label) !== client || (await accountEmail(o.db, label)) !== null) continue;
+      if (email !== null && (await saveAccountEmail(o.db, label, email))) filled++;
     } catch (err) {
       o.log.warn({ account: label, code: (err as Error | null)?.name ?? 'Error' }, 'Google account email could not be read; the dashboard shows it after a reconnect');
     }

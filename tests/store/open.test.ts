@@ -1,0 +1,174 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+import { FOUNDER_TENANT_ID as ENV_FOUNDER, parseEnv } from '../../src/config/env.ts';
+import { trackerDbPath } from '../../src/config/paths.ts';
+import { FOUNDER_TENANT_ID } from '../../src/platform/store.ts';
+import { PgPlatformDb, PgTenantDb, type PgClient, type PgPool } from '../../src/store/engine/pg.ts';
+import { SqliteDb } from '../../src/store/engine/sqlite.ts';
+import { customerDbsOf, databaseLine, openPlatformStore, openStore, runtimeDb } from '../../src/store/open.ts';
+import { openDb } from '../../src/store/db.ts';
+import { accessRefused, type CatalogRow } from '../../src/store/pg/accessRules.ts';
+import { COLLATION_REFUSED } from '../../src/store/pg/collation.ts';
+import { healthyCatalog, isAccessQuery } from './pg/catalogFake.ts';
+import { PG_LATEST } from '../../src/store/pg/migrations.ts';
+
+// The engine switch (S2.6) with no server: Postgres is a fake pool answering wa_schema_version(), the collation and the
+// access check's catalog.
+const LOCAL = 'postgres://wa_app:placeholder@127.0.0.1:5432/wa_agent';
+const PLATFORM = 'postgres://wa_platform:placeholder@127.0.0.1:5432/wa_agent';
+
+function fakePool(version: number | null, collation = 'C', catalog: CatalogRow[] = healthyCatalog()): PgPool & { ended: boolean; sql: string[] } {
+  const pool = {
+    ended: false,
+    sql: [] as string[],
+    async connect(): Promise<PgClient> {
+      return {
+        query: async (text: string) => {
+          pool.sql.push(text);
+          if (/pg_database/.test(text)) return { rows: [{ collate: collation, ctype: collation }], rowCount: 1 };
+          if (isAccessQuery(text)) return { rows: catalog as unknown as Record<string, unknown>[], rowCount: catalog.length };
+          return { rows: /wa_schema_version/.test(text) ? [{ v: version }] : [], rowCount: 0 };
+        },
+        release: () => {},
+      };
+    },
+    async end() {
+      pool.ended = true;
+    },
+  };
+  return pool;
+}
+
+let dir: string | undefined;
+afterEach(() => {
+  if (dir) rmSync(dir, { recursive: true, force: true });
+  dir = undefined;
+});
+
+describe('openStore: DB_ENGINE', () => {
+  it('sqlite (the default) opens data/tracker.db as before', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'wa-open-'));
+    const db = await openStore(parseEnv({ DATA_DIR: dir }));
+    try {
+      expect(db).toBeInstanceOf(SqliteDb);
+      expect(db.engine).toBe('sqlite');
+      expect(openPlatformStore(parseEnv({ DATA_DIR: dir }), db)).toBe(db); // the platform tables live in tracker.db
+    } finally {
+      await db.close();
+    }
+  });
+
+  it('postgres: customer #1 by default, once the schema is at the version this code needs', async () => {
+    const pool = fakePool(PG_LATEST);
+    const env = parseEnv({ DB_ENGINE: 'postgres', DATABASE_URL: LOCAL, DATABASE_PLATFORM_URL: PLATFORM });
+    const db = await openStore(env, { pool });
+    expect(db).toBeInstanceOf(PgTenantDb);
+    expect((db as PgTenantDb).tenantId).toBe(FOUNDER_TENANT_ID);
+    expect(pool.sql).toContain('SELECT wa_schema_version() AS v');
+    expect(pool.ended).toBe(false);
+    expect(openPlatformStore(env, db, { pool: fakePool(PG_LATEST) })).toBeInstanceOf(PgPlatformDb);
+  });
+
+  it('only an explicit postgres leaves SQLite', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'wa-open-'));
+    const db = await openStore({ DATA_DIR: dir } as Parameters<typeof openStore>[0]);
+    try {
+      expect(db).toBeInstanceOf(SqliteDb);
+    } finally {
+      await db.close();
+    }
+  });
+
+  it('postgres at another schema version is refused, naming db-migrate, and its pool is closed', async () => {
+    for (const v of [null, PG_LATEST - 1, PG_LATEST + 1]) {
+      const pool = fakePool(v);
+      const env = parseEnv({ DB_ENGINE: 'postgres', DATABASE_URL: LOCAL, DATABASE_PLATFORM_URL: PLATFORM });
+      await expect(openStore(env, { pool }), String(v)).rejects.toThrow(/db-migrate/);
+      expect(pool.ended, String(v)).toBe(true);
+    }
+  });
+
+  it('postgres whose text order is not byte order (C) is refused in plain words, and its pool is closed', async () => {
+    for (const collation of ['en_US.utf8', 'en_US.UTF-8']) {
+      const pool = fakePool(PG_LATEST, collation);
+      const env = parseEnv({ DB_ENGINE: 'postgres', DATABASE_URL: LOCAL, DATABASE_PLATFORM_URL: PLATFORM });
+      await expect(openStore(env, { pool }), collation).rejects.toThrow(COLLATION_REFUSED);
+      expect(pool.ended, collation).toBe(true);
+    }
+    expect(COLLATION_REFUSED).toBe('This database must be created by db-bootstrap (byte-order collation C). Nothing was changed.');
+  });
+
+  it('postgres whose live access rules are broken is refused, naming each problem, and its pool is closed (review S1, S2)', async () => {
+    const catalog = [
+      ...healthyCatalog().map((r) => (r.name === 'messages' ? { ...r, rls: false } : r.name === 'tenant_keys' ? { ...r, app: true } : r)),
+      { name: 'notes', kind: 'r', rls: false, forced: false, owner: 'wa_owner', app: true, policies: 0, tenant_policies: 0 },
+      { name: 'tasks_id_seq', kind: 'S', rls: false, forced: false, owner: 'wa_owner', app: true, policies: 0, tenant_policies: 0 },
+    ];
+    const pool = fakePool(PG_LATEST, 'C', catalog);
+    const env = parseEnv({ DB_ENGINE: 'postgres', DATABASE_URL: LOCAL, DATABASE_PLATFORM_URL: PLATFORM });
+    const problems = [
+      'table messages has row security off',
+      'wa_app can reach platform table tenant_keys',
+      'table notes has no row security and wa_app can reach it',
+      'wa_app can read sequence tasks_id_seq',
+    ];
+    await expect(openStore(env, { pool })).rejects.toThrow(accessRefused(problems));
+    expect(pool.ended).toBe(true);
+    expect(accessRefused(['table spend has row security not forced'])).toBe(
+      "This database's access rules are not as db-migrate sets them: table spend has row security not forced. The agent did not start, and nothing was changed: contact the developer.",
+    );
+  });
+});
+
+describe('databaseLine (npm run cli -- status)', () => {
+  it("names the SQLite file, or Postgres's host, port, database and role, never the password", () => {
+    expect(databaseLine(parseEnv({ DATA_DIR: 'data' }))).toBe(`Database: SQLite (${trackerDbPath('data')})`); // data/tracker.db on the Mac
+    const pg = parseEnv({ DB_ENGINE: 'postgres', DATABASE_URL: 'postgres://wa_app:s3cret-placeholder@127.0.0.1:5432/wa_agent', DATABASE_PLATFORM_URL: PLATFORM });
+    expect(databaseLine(pg)).toBe('Database: Postgres (127.0.0.1:5432/wa_agent as wa_app)');
+    expect(databaseLine({ ...pg, DATABASE_URL: 'postgresql://wa_app:x@localhost/wa_agent' })).toBe('Database: Postgres (localhost:5432/wa_agent as wa_app)');
+    expect(databaseLine(pg)).not.toContain('s3cret');
+  });
+});
+
+describe('the database settings', () => {
+  it('DB_ENGINE defaults to sqlite; postgres needs both agent URLs; TENANT_ID defaults to customer #1', () => {
+    expect(parseEnv({}).DB_ENGINE).toBe('sqlite');
+    expect(parseEnv({}).TENANT_ID).toBe(FOUNDER_TENANT_ID);
+    expect(ENV_FOUNDER).toBe(FOUNDER_TENANT_ID);
+    expect(() => parseEnv({ DB_ENGINE: 'postgres' })).toThrow(/DATABASE_URL is required when DB_ENGINE is postgres/);
+    expect(() => parseEnv({ DB_ENGINE: 'postgres', DATABASE_URL: LOCAL })).toThrow(/DATABASE_PLATFORM_URL is required/);
+    expect(() => parseEnv({ TENANT_ID: 'founder' })).toThrow(/TENANT_ID/);
+    expect(() => parseEnv({ DB_ENGINE: 'mysql' })).toThrow(/DB_ENGINE/);
+  });
+
+  it('a URL must stay on this machine, and its password is never echoed', () => {
+    for (const name of ['DATABASE_URL', 'DATABASE_PLATFORM_URL', 'DATABASE_OWNER_URL']) {
+      let message = '';
+      try {
+        parseEnv({ [name]: 'postgres://wa_app:s3cret-Value@db.example.com:5432/wa_agent' });
+      } catch (e) {
+        message = String(e);
+      }
+      expect(message, name).toMatch(new RegExp(`${name} must be a postgres:// URL to 127\\.0\\.0\\.1 or localhost`));
+      expect(message, name).not.toContain('s3cret');
+      expect(message, name).not.toContain('example.com');
+    }
+    expect(() => parseEnv({ DATABASE_URL: 'mysql://u:p@127.0.0.1/x' })).toThrow(/DATABASE_URL must be a postgres/);
+    for (const host of ['127.0.0.1', 'localhost', '[::1]']) {
+      expect(parseEnv({ DATABASE_URL: `postgresql://wa_app:placeholder@${host}:5432/wa_agent` }).DATABASE_URL, host).toBeDefined();
+    }
+  });
+});
+
+describe('a runtime’s Db cannot switch customer (isolation review F5)', () => {
+  it('customerDbsOf and runtimeDb give the Db interface only: no forTenant', async () => {
+    const founder = new PgTenantDb(fakePool(PG_LATEST), FOUNDER_TENANT_ID);
+    const customer = customerDbsOf(founder)!('00000000-0000-4000-8000-0000000000c2');
+    expect('forTenant' in customer).toBe(false);
+    expect('forTenant' in runtimeDb(founder)).toBe(false);
+    expect(customer.engine).toBe('postgres');
+    expect(customerDbsOf(openDb(':memory:'))).toBeUndefined(); // SQLite: no customer Db at all
+  });
+});

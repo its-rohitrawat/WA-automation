@@ -14,8 +14,11 @@ export const STARTED = '2026-11-01T10:00:00.000Z';
 export const ZERO_USAGE = { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 };
 
 let seq = 0;
-/** A queued Sharma meeting (client 1) at stage found, as discovery stores it. */
-export const queuedMeeting = (o: Partial<NewMeeting> = {}): NewMeeting => ({
+/**
+ * A queued Sharma meeting at stage found, as discovery stores it. The client id is the caller's (idOf, or seeded()'s
+ * ids): no default, since on Postgres Sharma is not 1.
+ */
+export const queuedMeeting = (o: Partial<NewMeeting> & Pick<NewMeeting, 'clientId'>): NewMeeting => ({
   recording: `conferenceRecords/c1/recordings/r${++seq}`,
   conference: 'conferenceRecords/c1',
   driveFileId: FILE_ID,
@@ -25,7 +28,6 @@ export const queuedMeeting = (o: Partial<NewMeeting> = {}): NewMeeting => ({
   endedAt: null,
   attendees: [{ email: 'asha@sharma.example', name: 'Asha Verma', team: false }],
   participants: [],
-  clientId: 1,
   matchKind: 'title',
   status: 'queued',
   driveSeconds: 2700,

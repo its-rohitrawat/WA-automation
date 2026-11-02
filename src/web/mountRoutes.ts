@@ -12,7 +12,8 @@ import type { Db } from '../store/db.ts';
 import type { Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
 import type { AuditLog } from './audit.ts';
-import type { OwnerSession } from './guard.ts';
+import { FOUNDER_TENANT_ID } from '../config/env.ts';
+import type { Guard, OwnerSession } from './guard.ts';
 import { HttpError, sendJson } from './http.ts';
 import { registerReadApi } from './routes/api.ts';
 import { chatReadHandler, chatSendHandler, type ChatDeps } from './routes/chat.ts';
@@ -21,6 +22,7 @@ import type { ApiResult, AuditFn, OwnerContext } from './routes/context.ts';
 import { registerControlApi } from './routes/controlScreens.ts';
 import { CALLBACK_PATH, GoogleConnectRoutes, type GoogleConnectDeps } from './routes/google.ts';
 import { groupsApplyHandler, groupsBulkHandler, groupsListHandler, suggestCodeHandler, type GroupsDeps } from './routes/groups.ts';
+import { mountPlatformRoutes, mountSignupRoutes, type PlatformRouteDeps, type SignupDeps } from './routes/platform.ts';
 import { actionSession, readBody } from './routes/respond.ts';
 import { WhatsAppLinkRoutes } from './routes/whatsapp.ts';
 import { registerWorkApi } from './routes/work.ts';
@@ -39,6 +41,11 @@ import { registerAssistantApi } from './routes/assistant.ts';
 // plain functions (src/web/routes/context.ts): they get the owner's context here and their ApiResult is sent as JSON.
 
 export interface AgentRoutesDeps {
+  /**
+   * The customer whose runtime these deps are (Phase B 4): only a session of that customer reaches them; any other is
+   * answered 503. Default: the founder.
+   */
+  tenantId?: string;
   db: Db;
   clock: Clock;
   log: Logger;
@@ -64,10 +71,25 @@ export interface AgentRoutesDeps {
   links: LinkSessions;
   /** The AI assistant (DASHBOARD_ASSISTANT): its Claude client, the agent's spend guard and the prices. None: no assistant. */
   assistant?: { ai: AssistantAi; paid: App['paidCalls']; prices: Prices };
+  /** The platform screens (SaaS S5): invites, customers, onboarding. Absent: no platform routes. */
+  platform?: Omit<PlatformRouteDeps, 'isFounder'>;
+  /** The public sign-up (/signup, SaaS S5H.6): no owner session, rate-limited per address. Absent: no sign-up routes. */
+  signup?: SignupDeps;
 }
 
 /** The owner's context for a D2/D3 handler. sessionId is the session's hash, never the cookie value. */
-const ownerOf = (ctx: RequestContext, s: OwnerSession): OwnerContext => ({ actor: s.email, sessionId: hashToken(s.id), requestId: ctx.requestId });
+const ownerOf = (ctx: RequestContext, s: OwnerSession): OwnerContext => ({
+  actor: s.email, sessionId: hashToken(s.id), requestId: ctx.requestId, tenantId: s.tenantId, role: s.role,
+});
+
+/**
+ * These routes serve one runtime's customer (Phase B 4): a session of any other customer is answered 503
+ * workspace_starting, never this customer's data. The dashboard sends each session to its own customer's routes; this is
+ * the check behind that.
+ */
+function inScope(s: OwnerSession, tenantId: string): void {
+  if (s.tenantId !== tenantId) throw new HttpError(503, 'workspace_starting', 'Your workspace is starting. Try again in a minute.');
+}
 
 function send(res: ServerResponse, r: ApiResult): void {
   const retry = (r.body as { error?: { retryAfterSec?: unknown } } | null)?.error?.retryAfterSec;
@@ -83,7 +105,17 @@ function redirect(res: ServerResponse, location: string): void {
 }
 
 export function mountAgentRoutes(m: DashboardMount, d: AgentRoutesDeps): void {
-  const { router, guard } = m;
+  const { router, guard: memberGuard } = m;
+  const tenant = d.tenantId ?? FOUNDER_TENANT_ID;
+  // Every agent route goes through this guard: a session of this runtime's customer, the founder's for the founder's runtime.
+  const guard: Guard = {
+    ...memberGuard,
+    requireOwner: async (req) => {
+      const s = await memberGuard.requireSession(req);
+      inScope(s, tenant);
+      return s;
+    },
+  };
   const owners = new Set(d.ownerEmails);
   const audit: AuditFn = (e) => m.audit.record({ ...e, detail: e.detail ?? '' });
   const action = { guard, actions: m.actions };
@@ -95,18 +127,40 @@ export function mountAgentRoutes(m: DashboardMount, d: AgentRoutesDeps): void {
   registerControlApi(router, {
     ...action, db: d.db, clock: d.clock, audit: m.audit, spend: d.spend, voiceLocal: d.voiceLocal, uptime: d.uptime,
     isOwner: (email) => owners.has(email.trim().toLowerCase()), settings: d.settings, priority: d.priority, sessions: m.sessions, secureFor: m.secureFor,
+    tenantId: tenant, audited: m.audited,
   });
 
-  // An owner read: the guard first, then the handler.
+  // A change by any signed-in member: the session, Origin and CSRF (bound to that session), then the action limit.
+  const memberAction = async (ctx: RequestContext): Promise<OwnerSession> => {
+    const s = await guard.requireSession(ctx.req);
+    guard.requireCsrf(ctx.req, s);
+    m.actions.hit(ctx.req, ctx.res);
+    return s;
+  };
+  // A read: the session, its scope (this runtime's customer), then the handler.
   const read = (path: string, answer: (ctx: RequestContext, o: OwnerContext) => ApiResult | Promise<ApiResult>) =>
     router.get(path, async (ctx) => {
-      const s = guard.requireOwner(ctx.req);
+      const s = await guard.requireSession(ctx.req);
+      inScope(s, tenant);
       send(ctx.res, await answer(ctx, ownerOf(ctx, s)));
     });
-  // An owner change: guard, Origin and CSRF, the action limit, then the JSON body.
+  // A change: the session, Origin and CSRF, the action limit, its scope, then the JSON body.
   const change = (path: string, answer: (ctx: RequestContext, o: OwnerContext, body: unknown) => ApiResult | Promise<ApiResult>) =>
     router.post(path, async (ctx) => {
-      const s = actionSession(ctx, action);
+      const s = await memberAction(ctx);
+      inScope(s, tenant);
+      send(ctx.res, await answer(ctx, ownerOf(ctx, s), await readBody(ctx)));
+    });
+  // The platform's routes: any member (a customer reaches Getting started and its own key), no runtime scope; each
+  // founder-only route checks the role itself (isFounder).
+  const memberRead = (path: string, answer: (ctx: RequestContext, o: OwnerContext) => ApiResult | Promise<ApiResult>) =>
+    router.get(path, async (ctx) => {
+      const s = await guard.requireSession(ctx.req);
+      send(ctx.res, await answer(ctx, ownerOf(ctx, s)));
+    });
+  const memberChange = (path: string, answer: (ctx: RequestContext, o: OwnerContext, body: unknown) => ApiResult | Promise<ApiResult>) =>
+    router.post(path, async (ctx) => {
+      const s = await memberAction(ctx);
       send(ctx.res, await answer(ctx, ownerOf(ctx, s), await readBody(ctx)));
     });
 
@@ -117,12 +171,16 @@ export function mountAgentRoutes(m: DashboardMount, d: AgentRoutesDeps): void {
   change('/dashboard/api/groups/apply', (_ctx, o, body) => groupsApplyHandler(groups, o, body));
   change('/dashboard/api/groups/bulk', (_ctx, o, body) => groupsBulkHandler(groups, o, body));
   read('/dashboard/api/groups/suggest-code', ({ url }, o) => suggestCodeHandler(groups, o, url.searchParams.get('name') ?? ''));
-  read('/dashboard/api/clients', (_ctx, o) => clientsListHandler(d.clients, o));
-  read('/dashboard/api/clients/:code', ({ params }, o) => clientDetailHandler(d.clients, o, params.code!));
+  read('/dashboard/api/clients', async (_ctx, o) => await clientsListHandler(d.clients, o));
+  read('/dashboard/api/clients/:code', async ({ params }, o) => await clientDetailHandler(d.clients, o, params.code!));
+  // The platform (SaaS S5). Its owner is the founder: the session's role, which the guard gives only to an owner-list
+  // email in the founder's workspace (S4.8). A hand-made context without a role is never the founder.
+  if (d.platform) mountPlatformRoutes({ read: memberRead, change: memberChange }, { ...d.platform, isFounder: (o) => o.role === 'founder' });
+  if (d.signup) mountSignupRoutes(router, d.signup);
   if (d.chat) {
     const chat: ChatDeps = { ...d.chat, audit };
-    read('/dashboard/api/clients/:code/chat', ({ params, url }, o) =>
-      chatReadHandler(chat, o, params.code!, { before: url.searchParams.get('before'), limit: url.searchParams.get('limit') }));
+    read('/dashboard/api/clients/:code/chat', async ({ params, url }, o) =>
+      await chatReadHandler(chat, o, params.code!, { before: url.searchParams.get('before'), limit: url.searchParams.get('limit') }));
     change('/dashboard/api/clients/:code/chat/send', ({ params }, o, body) => chatSendHandler(chat, o, params.code!, body));
   }
 
@@ -133,7 +191,7 @@ export function mountAgentRoutes(m: DashboardMount, d: AgentRoutesDeps): void {
   router.get(CALLBACK_PATH, async (ctx) => {
     let s: OwnerSession;
     try {
-      s = guard.requireOwner(ctx.req);
+      s = await guard.requireOwner(ctx.req);
     } catch (err) {
       if (err instanceof HttpError) return redirect(ctx.res, '/dashboard');
       throw err;
@@ -152,7 +210,7 @@ export function mountAgentRoutes(m: DashboardMount, d: AgentRoutesDeps): void {
   // Quick actions (D3): upload the tracker now, test Claude, send a test heartbeat. Each has its own limit as well.
   const actions: ActionDeps = { ...d.actions, audit };
   router.post('/dashboard/api/actions/:name', async (ctx) => {
-    const s = actionSession(ctx, action);
+    const s = await actionSession(ctx, action);
     send(ctx.res, await actionHandler(ctx.params.name!, actions, ownerOf(ctx, s)));
   });
 
@@ -173,7 +231,7 @@ export function mountAgentRoutes(m: DashboardMount, d: AgentRoutesDeps): void {
   change('/dashboard/api/whatsapp/link/start', (_ctx, o, body) => links.start(o, body));
   change('/dashboard/api/whatsapp/link/cancel', (_ctx, o, body) => links.cancel(o, body));
   router.get('/dashboard/api/whatsapp/link/stream', async (ctx) => {
-    const s = guard.requireOwner(ctx.req);
+    const s = await guard.requireOwner(ctx.req);
     const r = links.stream(ownerOf(ctx, s), ctx.url.searchParams.get('id') ?? '', ctx.res);
     if (r instanceof Promise) await r;
     else send(ctx.res, r);

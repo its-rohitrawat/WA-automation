@@ -1,6 +1,6 @@
 import type { PriorityKeywords } from '../brain/priorityKeywords.ts';
 import { ControlError, type Audit } from '../control/errors.ts';
-import { tx, type Db } from '../store/db.ts';
+import type { Db, Sql } from '../store/db.ts';
 import { setKv } from '../store/kv.ts';
 import { PRIORITIES, type Priority } from '../store/tasks.ts';
 import type { Clock } from '../util/clock.ts';
@@ -101,20 +101,45 @@ function storedKeywords(v: unknown): PriorityKeywords | undefined {
 
 const counts = (k: PriorityKeywords): string => PRIORITIES.map((l) => `${LEVEL_WORDS[l]} ${k[l].length}`).join(', ');
 
+const ROWS = `SELECT k, v FROM settings WHERE k IN (${PRIORITY_SETTING_KEYS.map(() => '?').join(', ')})`;
+const PUT =
+  'INSERT INTO settings (k, v, updated_at, updated_by) VALUES (?, ?, ?, ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v, updated_at = excluded.updated_at, updated_by = excluded.updated_by';
+
 export class PrioritySettings {
   readonly #db: Db;
   readonly #clock: Clock;
+  /** Its rows (k to v), kept in memory: only set() writes them, and it updates this after its commit. */
+  readonly #rows = new Map<string, string>();
+  /** Saves run one at a time, so each one compares against the value the one before it saved. */
+  #saving: Promise<unknown> = Promise.resolve();
 
+  /** Starts with no rows: `PrioritySettings.open` makes one and loads them. */
   constructor(o: { db: Db; clock: Clock }) {
     this.#db = o.db;
     this.#clock = o.clock;
   }
 
+  static async open(o: { db: Db; clock: Clock }): Promise<PrioritySettings> {
+    const store = new PrioritySettings(o);
+    await store.load();
+    return store;
+  }
+
+  /** Reads its rows (open() does; a test that writes them directly calls it again). */
+  async load(): Promise<void> {
+    this.#fill(await this.#db.all<{ k: string; v: string }>(ROWS, [...PRIORITY_SETTING_KEYS]));
+  }
+
+  #fill(rows: { k: string; v: string }[]): void {
+    this.#rows.clear();
+    for (const r of rows) this.#rows.set(r.k, r.v);
+  }
+
   #stored(key: PrioritySettingKey): unknown {
-    const r = this.#db.prepare('SELECT v FROM settings WHERE k = ?').get(key) as { v: string } | undefined;
-    if (!r) return undefined;
+    const v = this.#rows.get(key);
+    if (v === undefined) return undefined;
     try {
-      return JSON.parse(r.v) as unknown;
+      return JSON.parse(v) as unknown;
     } catch {
       return undefined;
     }
@@ -130,7 +155,7 @@ export class PrioritySettings {
     };
   }
 
-  /** What each AI read uses: read fresh every time, so a change applies to the next batch. */
+  /** What each AI read uses: from memory, which every save updates, so a change applies to the next batch. */
   get(): PriorityConfig {
     return this.#read().config;
   }
@@ -144,7 +169,13 @@ export class PrioritySettings {
    * Checks and saves one value and audits it in the same transaction. A value already in force changes nothing.
    * Throws ControlError 422 for an unknown key or a bad value.
    */
-  set(rawKey: string, raw: unknown, actor: string, audit: Audit): PrioritySettingsView {
+  set(rawKey: string, raw: unknown, actor: string, audit: Audit): Promise<PrioritySettingsView> {
+    const run = this.#saving.then(() => this.#set(rawKey, raw, actor, audit));
+    this.#saving = run.catch(() => undefined);
+    return run;
+  }
+
+  async #set(rawKey: string, raw: unknown, actor: string, audit: Audit): Promise<PrioritySettingsView> {
     if (!(PRIORITY_SETTING_KEYS as readonly string[]).includes(rawKey)) throw new ControlError(422, 'That setting cannot be changed here', 'key');
     const key = rawKey as PrioritySettingKey;
     let value: PriorityKeywords | boolean;
@@ -160,23 +191,23 @@ export class PrioritySettings {
     const current = this.get();
     const same = key === 'sentimentEnabled' ? current.sentimentEnabled === value : JSON.stringify(current.keywords) === JSON.stringify(value);
     if (same && this.#read().source[key] === 'dashboard') return this.view();
-    tx(this.#db, () => {
-      this.#db
-        .prepare('INSERT INTO settings (k, v, updated_at, updated_by) VALUES (?, ?, ?, ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v, updated_at = excluded.updated_at, updated_by = excluded.updated_by')
-        .run(key, JSON.stringify(value), this.#clock.now().toISOString(), actor);
-      audit({ actor, event: `settings.${key}`, kind: 'config', detail });
+    await this.#db.tx(async (q) => {
+      await q.run(PUT, [key, JSON.stringify(value), this.#clock.now().toISOString(), actor]);
+      await audit(q, { actor, event: `settings.${key}`, kind: 'config', detail }); // commits or rolls back with the row
       // The tracker's Sentiment column fills or empties with the switch: rebuild it at the next tick, as a task edit does.
-      if (key === 'sentimentEnabled') setKv(this.#db, 'rebuild_requested', this.#clock.now().toISOString());
+      if (key === 'sentimentEnabled') await setKv(q, 'rebuild_requested', this.#clock.now().toISOString());
     });
+    this.#rows.set(key, JSON.stringify(value)); // committed: memory follows
     return this.view();
   }
 }
 
 /**
  * Whether sentiment is switched on, for the screens and the tracker that only show it then. Read straight from the
- * settings table, like PrioritySettings.get().
+ * settings table (not PrioritySettings' memory: the readers here have only the database). `db` may be a transaction
+ * handle.
  */
-export function readSentimentEnabled(db: Db): boolean {
-  const r = db.prepare("SELECT v FROM settings WHERE k = 'sentimentEnabled'").get() as { v: string } | undefined;
+export async function readSentimentEnabled(db: Sql): Promise<boolean> {
+  const r = await db.get<{ v: string }>("SELECT v FROM settings WHERE k = 'sentimentEnabled'");
   return r?.v === 'true';
 }

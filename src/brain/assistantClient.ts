@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { ASSISTANT_MAX_TOKENS, type AssistantAi, type AssistantMessage, type AssistantTurn } from '../assistant/assistant.ts';
 import type { Prices } from '../spend/pricing.ts';
+import { isolatedClientOptions } from './anthropicIsolated.ts';
 import { billOf, keepConnectTimeoutCode, type Effort } from './claudeClient.ts';
 
 /** One retry: a question is interactive, and each attempt of a lost connection is booked at the estimate. */
@@ -21,10 +22,14 @@ export class ClaudeAssistantClient implements AssistantAi {
   readonly #prices: Prices;
   readonly attempts = ASSISTANT_SDK_MAX_RETRIES + 1;
 
-  constructor(opts: { apiKey: string; model: string; effort?: Effort; prices: Prices; client?: Anthropic }) {
+  /** `isolated`: a customer's client, which no founder environment setting reaches (anthropicIsolated.ts). */
+  constructor(opts: { apiKey: string; model: string; effort?: Effort; prices: Prices; client?: Anthropic; isolated?: boolean }) {
     this.#client =
       opts.client ??
-      new Anthropic({ apiKey: opts.apiKey, maxRetries: ASSISTANT_SDK_MAX_RETRIES, timeout: ASSISTANT_TIMEOUT_MS, fetch: keepConnectTimeoutCode });
+      new Anthropic({
+        apiKey: opts.apiKey, maxRetries: ASSISTANT_SDK_MAX_RETRIES, timeout: ASSISTANT_TIMEOUT_MS, fetch: keepConnectTimeoutCode,
+        ...(opts.isolated ? isolatedClientOptions(opts.apiKey, keepConnectTimeoutCode) : {}),
+      });
     this.#model = opts.model;
     this.#effort = opts.effort ?? 'medium';
     this.#prices = opts.prices;

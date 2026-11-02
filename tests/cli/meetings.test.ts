@@ -20,6 +20,7 @@ import { getMeeting, insertFound, type MeetingStatus, type NewMeeting } from '..
 import { manualClock } from '../../src/util/clock.ts';
 import { acquireLock } from '../../src/util/lock.ts';
 import { FakeMeetingsApi } from '../helpers/fakeMeetings.ts';
+import { idOf, onSqlite, testDb } from '../helpers/db.ts';
 
 const KEY = Buffer.alloc(32, 7);
 const NOW = '2026-10-23T06:00:00.000Z';
@@ -35,9 +36,17 @@ let groupsFile: string;
 let lines: string[];
 let api: FakeMeetingsApi;
 let db: Db;
+/** Sharma's and Mehta's real ids (on Postgres they are not 1 and 2). */
+let SHA = 0;
+let MEH = 0;
+/**
+ * Where the commands find the tracker. SQLite: data/tracker.db in DATA_DIR (nothing to add). Postgres: the test's own
+ * customer on the test server, so a command reads and writes the same rows as the test.
+ */
+let storeEnv: Record<string, string> = {};
 
 function env(over: Record<string, string> = {}) {
-  return parseEnv({ DATA_DIR: dataDir, GROUPS_FILE: groupsFile, MEETINGS_ENABLED: 'true', TEAM_EMAIL_DOMAINS: 'studio.example', ...over });
+  return parseEnv({ DATA_DIR: dataDir, GROUPS_FILE: groupsFile, MEETINGS_ENABLED: 'true', TEAM_EMAIL_DOMAINS: 'studio.example', ...storeEnv, ...over });
 }
 
 function deps(over: Partial<MeetingCliDeps> = {}): MeetingCliDeps {
@@ -53,15 +62,15 @@ function deps(over: Partial<MeetingCliDeps> = {}): MeetingCliDeps {
 }
 
 let seq = 0;
-function meeting(status: MeetingStatus, o: Partial<NewMeeting> = {}): number {
+async function meeting(status: MeetingStatus, o: Partial<NewMeeting> = {}): Promise<number> {
   seq++;
   // An internal row keeps ids, the start and the status only (the table's CHECK).
   const internal: Partial<NewMeeting> = status === 'internal' ? { title: '', clientId: null, matchKind: null } : {};
-  return insertFound(db, {
+  return (await insertFound(db, {
     recording: `conferenceRecords/x${seq}/recordings/r1`, conference: `conferenceRecords/x${seq}`, driveFileId: `file${seq}`, meetingCode: null,
-    title: `Sharma weekly ${seq}`, startedAt: ago(48 - seq), endedAt: null, attendees: [], participants: [], clientId: 1, matchKind: 'title',
+    title: `Sharma weekly ${seq}`, startedAt: ago(48 - seq), endedAt: null, attendees: [], participants: [], clientId: SHA, matchKind: 'title',
     status, driveSeconds: 2700, createdAt: NOW, ...o, ...internal,
-  })!;
+  }))!;
 }
 
 /** One conference with an invite (null: none) and one recording whose file exists unless fileMissing. */
@@ -84,15 +93,30 @@ function conference(id: string, o: { start: string; attendees?: string[] | null;
   }
 }
 
-/** Every table's rows, to prove a command wrote nothing. */
-function dump(d: Db): string {
-  const tables = (d.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all() as { name: string }[]).map((t) => t.name);
-  return JSON.stringify(tables.map((t) => [t, d.prepare(`SELECT * FROM "${t}"`).all()]));
+/**
+ * Every table's rows, to prove a command wrote nothing. SQLite lists its tables in sqlite_master; Postgres in
+ * information_schema, the customer's tables being those this role may read (row-level security shows only this
+ * customer's rows).
+ */
+async function dump(d: Db): Promise<string> {
+  const list = d.engine === 'sqlite'
+    ? "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name"
+    // Each name qualified: Postgres may check the privilege on every row of information_schema.tables before the schema
+    // filter, and a bare name of another schema's view does not resolve.
+    : "SELECT table_name AS name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE' AND has_table_privilege(format('%I.%I', table_schema, table_name), 'SELECT') ORDER BY table_name";
+  const tables = (await d.all<{ name: string }>(list)).map((x) => x.name);
+  const out: [string, unknown[]][] = [];
+  for (const name of tables) out.push([name, await d.all(`SELECT * FROM "${name}" ORDER BY 1`)]);
+  return JSON.stringify(out);
 }
 
-const rows = () => (db.prepare('SELECT id FROM meetings ORDER BY id').all() as { id: number }[]).map((r) => getMeeting(db, r.id)!);
+const rows = async () => {
+  const out = [];
+  for (const r of await db.all<{ id: number }>('SELECT id FROM meetings ORDER BY id')) out.push((await getMeeting(db, r.id))!);
+  return out;
+};
 
-beforeEach(() => {
+beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), 'wa-meet-cli-'));
   dataDir = join(dir, 'data');
   mkdirSync(dataDir);
@@ -100,29 +124,39 @@ beforeEach(() => {
   writeFileSync(groupsFile, JSON.stringify({ clients: [SHARMA, MEHTA] }));
   lines = [];
   api = new FakeMeetingsApi();
-  db = openDb(trackerDbPath(dataDir));
-  syncClients(db, [{ ...SHARMA, phases: PHASES, meetingKeywords: [] }, { ...MEHTA, phases: PHASES, meetingKeywords: [] }]);
-  saveGrantedScopes(db, [...DRIVE_SCOPES, ...MEETING_SCOPES].join(' '));
+  if (onSqlite) {
+    db = openDb(trackerDbPath(dataDir));
+    storeEnv = {};
+  } else {
+    db = await testDb();
+    const { testPg } = await import('../helpers/pg.ts');
+    const pg = testPg()!;
+    storeEnv = { DB_ENGINE: 'postgres', DATABASE_URL: pg.appUrl, DATABASE_PLATFORM_URL: pg.platformUrl, TENANT_ID: (db as Db & { tenantId: string }).tenantId };
+  }
+  await syncClients(db, [{ ...SHARMA, phases: PHASES, meetingKeywords: [] }, { ...MEHTA, phases: PHASES, meetingKeywords: [] }]);
+  await saveGrantedScopes(db, [...DRIVE_SCOPES, ...MEETING_SCOPES].join(' '));
+  SHA = await idOf(db, 'SHA');
+  MEH = await idOf(db, 'MEH');
   seq = 0;
 });
 
-afterEach(() => {
-  db.close();
+afterEach(async () => {
+  await db.close();
   rmSync(dir, { recursive: true, force: true });
 });
 
 const now = new Date(NOW);
-const events = () => db.prepare("SELECT client_id AS clientId, op, detail FROM task_events WHERE op = 'assign_meeting'").all();
+const events = () => db.all("SELECT client_id AS clientId, op, detail FROM task_events WHERE op = 'assign_meeting'");
 
 describe('meeting list', () => {
-  it('shows the meetings that need the owner by default, newest first, with date, client, status and title', () => {
-    const q = meeting('queued');
-    const u = meeting('unassigned', { clientId: null, matchKind: null });
-    meeting('done');
-    meeting('skipped', { clientId: null, matchKind: null });
-    const i = meeting('internal', { clientId: null, matchKind: null, title: '' });
-    const n = meeting('no_access', { errorCode: 'http_404' });
-    const out = meetingListLines(db, false);
+  it('shows the meetings that need the owner by default, newest first, with date, client, status and title', async () => {
+    const q = await meeting('queued');
+    const u = await meeting('unassigned', { clientId: null, matchKind: null });
+    await meeting('done');
+    await meeting('skipped', { clientId: null, matchKind: null });
+    const i = await meeting('internal', { clientId: null, matchKind: null, title: '' });
+    const n = await meeting('no_access', { errorCode: 'http_404' });
+    const out = await meetingListLines(db, false);
     expect(out).toHaveLength(3);
     expect(out[0]).toMatch(new RegExp(`^\\s+${n}  2026-10-21 \\d\\d:\\d\\d  SHA\\s+no access \\(http_404\\)\\s+Sharma weekly 6$`));
     expect(out[1]).toMatch(new RegExp(`^\\s+${u}  .*unassigned\\s+unassigned\\s+Sharma weekly 2$`));
@@ -130,12 +164,12 @@ describe('meeting list', () => {
     expect(out.join('\n')).not.toContain(`${i} `);
   });
 
-  it('--all adds done, skipped, too long and internal; internal shows no title', () => {
-    meeting('done');
-    meeting('skipped', { clientId: null, matchKind: null });
-    meeting('too_long');
-    const i = meeting('internal');
-    const out = meetingListLines(db, true);
+  it('--all adds done, skipped, too long and internal; internal shows no title', async () => {
+    await meeting('done');
+    await meeting('skipped', { clientId: null, matchKind: null });
+    await meeting('too_long');
+    const i = await meeting('internal');
+    const out = await meetingListLines(db, true);
     expect(out).toHaveLength(4);
     const internal = out.find((l) => l.trimStart().startsWith(`${i} `))!;
     expect(internal).toMatch(/internal\s+internal$/);
@@ -143,121 +177,121 @@ describe('meeting list', () => {
     expect(out.join('\n')).toContain('too long');
   });
 
-  it('labels a no-access meeting by how it was found: internal (no title) or unassigned', () => {
-    const i = meeting('no_access', { clientId: null, matchKind: null, title: '', errorCode: 'http_404', foundInternal: true });
-    const u = meeting('no_access', { clientId: null, matchKind: null, errorCode: 'http_403' });
-    const out = meetingListLines(db, false);
+  it('labels a no-access meeting by how it was found: internal (no title) or unassigned', async () => {
+    const i = await meeting('no_access', { clientId: null, matchKind: null, title: '', errorCode: 'http_404', foundInternal: true });
+    const u = await meeting('no_access', { clientId: null, matchKind: null, errorCode: 'http_403' });
+    const out = await meetingListLines(db, false);
     expect(out.find((l) => l.trimStart().startsWith(`${i} `))).toMatch(/internal\s+no access \(http_404\)$/);
     expect(out.find((l) => l.trimStart().startsWith(`${u} `))).toMatch(/unassigned\s+no access \(http_403\)\s+Sharma weekly 2$/);
   });
 
-  it('says when nothing needs the owner', () => {
-    expect(meetingListLines(db, false)).toEqual(['No meetings need you. (npm run cli -- meeting list --all shows every meeting.)']);
-    expect(meetingListLines(db, true)).toEqual(['No meetings yet.']);
+  it('says when nothing needs the owner', async () => {
+    expect(await meetingListLines(db, false)).toEqual(['No meetings need you. (npm run cli -- meeting list --all shows every meeting.)']);
+    expect(await meetingListLines(db, true)).toEqual(['No meetings yet.']);
   });
 });
 
 describe('meeting assign', () => {
-  it('queues an unassigned meeting for the client, match kind human, and requests a rebuild', () => {
-    const id = meeting('unassigned', { clientId: null, matchKind: null });
-    expect(assignMeetingToClient(db, String(id), 'meh', now)).toEqual({ id, code: 'MEH' });
-    expect(getMeeting(db, id)).toMatchObject({ status: 'queued', clientId: 2, matchKind: 'human' });
-    expect(getKv(db, 'rebuild_requested')).toBe(NOW);
-    expect(events()).toEqual([{ clientId: 2, op: 'assign_meeting', detail: JSON.stringify({ meetingId: id }) }]);
+  it('queues an unassigned meeting for the client, match kind human, and requests a rebuild', async () => {
+    const id = await meeting('unassigned', { clientId: null, matchKind: null });
+    expect(await assignMeetingToClient(db, String(id), 'meh', now)).toEqual({ id, code: 'MEH' });
+    expect(await getMeeting(db, id)).toMatchObject({ status: 'queued', clientId: MEH, matchKind: 'human' });
+    expect(await getKv(db, 'rebuild_requested')).toBe(NOW);
+    expect(await events()).toEqual([{ clientId: MEH, op: 'assign_meeting', detail: JSON.stringify({ meetingId: id }) }]);
   });
 
-  it('queues an internal meeting too', () => {
-    const id = meeting('internal', { clientId: null, matchKind: null, title: '' });
-    assignMeetingToClient(db, String(id), 'SHA', now);
-    expect(getMeeting(db, id)).toMatchObject({ status: 'queued', clientId: 1, matchKind: 'human' });
+  it('queues an internal meeting too', async () => {
+    const id = await meeting('internal', { clientId: null, matchKind: null, title: '' });
+    await assignMeetingToClient(db, String(id), 'SHA', now);
+    expect(await getMeeting(db, id)).toMatchObject({ status: 'queued', clientId: SHA, matchKind: 'human' });
   });
 
-  it('queues a no-access meeting without a client (found as internal or unassigned), with fresh attempts', () => {
-    const i = meeting('no_access', { clientId: null, matchKind: null, title: '', errorCode: 'http_404', foundInternal: true });
-    const u = meeting('no_access', { clientId: null, matchKind: null, errorCode: 'http_403' });
-    db.prepare('UPDATE meetings SET attempts = 2 WHERE id = ?').run(u);
-    expect(assignMeetingToClient(db, String(i), 'SHA', now)).toEqual({ id: i, code: 'SHA' });
-    expect(assignMeetingToClient(db, String(u), 'MEH', now)).toEqual({ id: u, code: 'MEH' });
-    expect(getMeeting(db, i)).toMatchObject({ status: 'queued', clientId: 1, matchKind: 'human', errorCode: null, attempts: 0, note: null });
-    expect(getMeeting(db, u)).toMatchObject({ status: 'queued', clientId: 2, matchKind: 'human', errorCode: null, attempts: 0 });
+  it('queues a no-access meeting without a client (found as internal or unassigned), with fresh attempts', async () => {
+    const i = await meeting('no_access', { clientId: null, matchKind: null, title: '', errorCode: 'http_404', foundInternal: true });
+    const u = await meeting('no_access', { clientId: null, matchKind: null, errorCode: 'http_403' });
+    await db.run('UPDATE meetings SET attempts = 2 WHERE id = ?', [u]);
+    expect(await assignMeetingToClient(db, String(i), 'SHA', now)).toEqual({ id: i, code: 'SHA' });
+    expect(await assignMeetingToClient(db, String(u), 'MEH', now)).toEqual({ id: u, code: 'MEH' });
+    expect(await getMeeting(db, i)).toMatchObject({ status: 'queued', clientId: SHA, matchKind: 'human', errorCode: null, attempts: 0, note: null });
+    expect(await getMeeting(db, u)).toMatchObject({ status: 'queued', clientId: MEH, matchKind: 'human', errorCode: null, attempts: 0 });
   });
 
-  it.each(['queued', 'done', 'skipped', 'too_long', 'no_access', 'failed'] as const)('refuses a %s meeting and changes nothing', (status) => {
-    const id = meeting(status);
-    const before = dump(db);
-    expect(() => assignMeetingToClient(db, String(id), 'MEH', now)).toThrow(/only unassigned or internal meetings can be assigned/);
-    expect(dump(db)).toBe(before);
+  it.each(['queued', 'done', 'skipped', 'too_long', 'no_access', 'failed'] as const)('refuses a %s meeting and changes nothing', async (status) => {
+    const id = await meeting(status);
+    const before = await dump(db);
+    await expect(assignMeetingToClient(db, String(id), 'MEH', now)).rejects.toThrow(/only unassigned or internal meetings can be assigned/);
+    expect(await dump(db)).toBe(before);
   });
 
-  it('refuses an unknown client code, an inactive client, an unknown id and a bad id', () => {
-    const id = meeting('unassigned', { clientId: null, matchKind: null });
-    const before = dump(db);
-    expect(() => assignMeetingToClient(db, String(id), 'XYZ', now)).toThrow('No client with code XYZ');
-    syncClients(db, [{ ...SHARMA, phases: PHASES, meetingKeywords: [] }]);
-    const synced = dump(db);
-    expect(() => assignMeetingToClient(db, String(id), 'MEH', now)).toThrow('Client MEH is not in the allow-list');
-    expect(() => assignMeetingToClient(db, '999', 'SHA', now)).toThrow('No meeting 999');
-    expect(() => assignMeetingToClient(db, '1x', 'SHA', now)).toThrow(CorrectionError);
-    expect(() => assignMeetingToClient(db, '0', 'SHA', now)).toThrow(/meeting id is a number/);
-    expect(dump(db)).toBe(synced);
+  it('refuses an unknown client code, an inactive client, an unknown id and a bad id', async () => {
+    const id = await meeting('unassigned', { clientId: null, matchKind: null });
+    const before = await dump(db);
+    await expect(assignMeetingToClient(db, String(id), 'XYZ', now)).rejects.toThrow('No client with code XYZ');
+    await syncClients(db, [{ ...SHARMA, phases: PHASES, meetingKeywords: [] }]);
+    const synced = await dump(db);
+    await expect(assignMeetingToClient(db, String(id), 'MEH', now)).rejects.toThrow('Client MEH is not in the allow-list');
+    await expect(assignMeetingToClient(db, '999', 'SHA', now)).rejects.toThrow('No meeting 999');
+    await expect(assignMeetingToClient(db, '1x', 'SHA', now)).rejects.toThrow(CorrectionError);
+    await expect(assignMeetingToClient(db, '0', 'SHA', now)).rejects.toThrow(/meeting id is a number/);
+    expect(await dump(db)).toBe(synced);
     expect(before).not.toBe(synced); // only the sync above changed anything
   });
 });
 
 describe('meeting skip and retry', () => {
-  it('skips an unassigned meeting and refuses every other status', () => {
-    const id = meeting('unassigned', { clientId: null, matchKind: null });
-    expect(skipMeetingById(db, String(id), now)).toBe(id);
-    expect(getMeeting(db, id)!.status).toBe('skipped');
-    expect(getKv(db, 'rebuild_requested')).toBe(NOW);
+  it('skips an unassigned meeting and refuses every other status', async () => {
+    const id = await meeting('unassigned', { clientId: null, matchKind: null });
+    expect(await skipMeetingById(db, String(id), now)).toBe(id);
+    expect((await getMeeting(db, id))!.status).toBe('skipped');
+    expect(await getKv(db, 'rebuild_requested')).toBe(NOW);
     for (const s of ['internal', 'queued', 'done', 'skipped', 'too_long', 'no_access', 'failed'] as const) {
-      const other = meeting(s);
-      expect(() => skipMeetingById(db, String(other), now)).toThrow(/only unassigned meetings can be skipped/);
-      expect(getMeeting(db, other)!.status).toBe(s);
+      const other = await meeting(s);
+      await expect(skipMeetingById(db, String(other), now)).rejects.toThrow(/only unassigned meetings can be skipped/);
+      expect((await getMeeting(db, other))!.status).toBe(s);
     }
-    expect(() => skipMeetingById(db, '42', now)).toThrow('No meeting 42');
+    await expect(skipMeetingById(db, '42', now)).rejects.toThrow('No meeting 42');
   });
 
-  it('retries a failed or no-access meeting and refuses every other status', () => {
-    const f = meeting('failed', { errorCode: 'x' });
-    const n = meeting('no_access', { errorCode: 'http_404' });
-    expect(retryMeetingById(db, String(f), now)).toEqual({ id: f, status: 'queued' });
-    expect(retryMeetingById(db, String(n), now)).toEqual({ id: n, status: 'queued' });
+  it('retries a failed or no-access meeting and refuses every other status', async () => {
+    const f = await meeting('failed', { errorCode: 'x' });
+    const n = await meeting('no_access', { errorCode: 'http_404' });
+    expect(await retryMeetingById(db, String(f), now)).toEqual({ id: f, status: 'queued' });
+    expect(await retryMeetingById(db, String(n), now)).toEqual({ id: n, status: 'queued' });
     expect(retryLine({ id: f, status: 'queued' })).toBe(`Meeting ${f} queued again.`);
-    expect(getMeeting(db, f)).toMatchObject({ status: 'queued', attempts: 0, errorCode: null });
-    expect(getMeeting(db, n)!.status).toBe('queued');
+    expect(await getMeeting(db, f)).toMatchObject({ status: 'queued', attempts: 0, errorCode: null });
+    expect((await getMeeting(db, n))!.status).toBe('queued');
     // The workbook lists only unassigned and done meetings, so a retry asks for no rebuild.
-    expect(getKv(db, 'rebuild_requested')).toBeUndefined();
+    expect(await getKv(db, 'rebuild_requested')).toBeUndefined();
     for (const s of ['unassigned', 'internal', 'queued', 'done', 'skipped', 'too_long'] as const) {
-      const other = meeting(s);
-      expect(() => retryMeetingById(db, String(other), now)).toThrow(/only failed or no-access meetings can be retried/);
-      expect(getMeeting(db, other)!.status).toBe(s);
+      const other = await meeting(s);
+      await expect(retryMeetingById(db, String(other), now)).rejects.toThrow(/only failed or no-access meetings can be retried/);
+      expect((await getMeeting(db, other))!.status).toBe(s);
     }
   });
 });
 
 describe('meeting retry of a meeting without a client', () => {
-  it('puts a no-access meeting found as internal or unassigned back to unassigned, asks for a rebuild and says to assign it', () => {
-    const i = meeting('no_access', { clientId: null, matchKind: null, title: '', errorCode: 'http_404', foundInternal: true });
-    const u = meeting('no_access', { clientId: null, matchKind: null, errorCode: 'http_403' });
-    const r = retryMeetingById(db, String(i), now);
+  it('puts a no-access meeting found as internal or unassigned back to unassigned, asks for a rebuild and says to assign it', async () => {
+    const i = await meeting('no_access', { clientId: null, matchKind: null, title: '', errorCode: 'http_404', foundInternal: true });
+    const u = await meeting('no_access', { clientId: null, matchKind: null, errorCode: 'http_403' });
+    const r = await retryMeetingById(db, String(i), now);
     expect(r).toEqual({ id: i, status: 'unassigned' });
-    expect(retryMeetingById(db, String(u), now)).toEqual({ id: u, status: 'unassigned' });
-    expect(getMeeting(db, i)).toMatchObject({ status: 'unassigned', clientId: null, errorCode: null, attempts: 0, note: null, title: '' });
-    expect(getMeeting(db, u)).toMatchObject({ status: 'unassigned', clientId: null, errorCode: null });
-    expect(getKv(db, 'rebuild_requested')).toBe(NOW); // the workbook lists unassigned meetings
+    expect(await retryMeetingById(db, String(u), now)).toEqual({ id: u, status: 'unassigned' });
+    expect(await getMeeting(db, i)).toMatchObject({ status: 'unassigned', clientId: null, errorCode: null, attempts: 0, note: null, title: '' });
+    expect(await getMeeting(db, u)).toMatchObject({ status: 'unassigned', clientId: null, errorCode: null });
+    expect(await getKv(db, 'rebuild_requested')).toBe(NOW); // the workbook lists unassigned meetings
     expect(retryLine(r)).toBe(
       `Meeting ${i} has no client, so it cannot be processed; it is unassigned again. Assign it to a client with: npm run cli -- meeting assign ${i} <CODE>`,
     );
     // Then it can be assigned, and is processed for that client.
-    assignMeetingToClient(db, String(i), 'SHA', now);
-    expect(getMeeting(db, i)).toMatchObject({ status: 'queued', clientId: 1 });
+    await assignMeetingToClient(db, String(i), 'SHA', now);
+    expect(await getMeeting(db, i)).toMatchObject({ status: 'queued', clientId: SHA });
   });
 
-  it('a failed meeting without a client goes back to unassigned too, never to queued', () => {
-    const f = meeting('failed', { clientId: null, matchKind: null, errorCode: 'no_client' });
-    expect(retryMeetingById(db, String(f), now)).toEqual({ id: f, status: 'unassigned' });
-    expect(getMeeting(db, f)).toMatchObject({ status: 'unassigned', errorCode: null });
+  it('a failed meeting without a client goes back to unassigned too, never to queued', async () => {
+    const f = await meeting('failed', { clientId: null, matchKind: null, errorCode: 'no_client' });
+    expect(await retryMeetingById(db, String(f), now)).toEqual({ id: f, status: 'unassigned' });
+    expect(await getMeeting(db, f)).toMatchObject({ status: 'unassigned', errorCode: null });
   });
 });
 
@@ -270,11 +304,14 @@ describe('meeting backfill', () => {
   });
 
   it('without --yes prints the count, hours and cost ceiling and changes nothing', async () => {
-    db.close();
-    db = openDb(trackerDbPath(dataDir));
-    const before = dump(db);
+    if (onSqlite) {
+      // A fresh handle on the file, as the command opens it.
+      await db.close();
+      db = openDb(trackerDbPath(dataDir));
+    }
+    const before = await dump(db);
     await meetingBackfillCommand({ since: '2026-10-01', yes: false }, deps());
-    expect(dump(db)).toBe(before);
+    expect(await dump(db)).toBe(before);
     expect(api.callsOf('download')).toEqual([]);
     expect(api.callsOf('listConferences')).toEqual([['2026-09-30T18:30:00.000Z', NOW]]);
     const ai = meetingAiCeilingUsd(3600, { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.2 }) +
@@ -297,8 +334,8 @@ describe('meeting backfill', () => {
 
   it('with --yes stores the rows and requests a rebuild', async () => {
     await meetingBackfillCommand({ since: '2026-10-01', yes: true }, deps());
-    expect(rows().map((r) => [r.status, r.clientId])).toEqual([['queued', 1], ['internal', null], ['unassigned', null], ['queued', 2]]);
-    expect(getKv(db, 'rebuild_requested')).toBe(NOW);
+    expect((await rows()).map((r) => [r.status, r.clientId])).toEqual([['queued', SHA], ['internal', null], ['unassigned', null], ['queued', MEH]]);
+    expect(await getKv(db, 'rebuild_requested')).toBe(NOW);
     expect(api.callsOf('download')).toEqual([]);
     expect(lines[0]).toBe('Stored 4 recordings from 2026-10-01 (IST) not stored before.');
     lines = [];
@@ -312,11 +349,11 @@ describe('meeting backfill', () => {
     );
     await expect(meetingBackfillCommand({ since: '2026-13-01', yes: true }, deps())).rejects.toThrow('--since must be YYYY-MM-DD');
     await expect(meetingBackfillCommand({ since: '2026-10-24', yes: true }, deps())).rejects.toThrow('--since must be in the past');
-    saveGrantedScopes(db, DRIVE_SCOPES.join(' '));
+    await saveGrantedScopes(db, DRIVE_SCOPES.join(' '));
     await expect(meetingBackfillCommand({ since: '2026-10-01', yes: true }, deps())).rejects.toThrow(
       'Google sign-in needs meeting access. Run: npm run cli -- google-auth',
     );
-    saveGrantedScopes(db, [...DRIVE_SCOPES, ...MEETING_SCOPES].join(' '));
+    await saveGrantedScopes(db, [...DRIVE_SCOPES, ...MEETING_SCOPES].join(' '));
     const lock = await acquireLock(dataDir);
     try {
       await expect(meetingBackfillCommand({ since: '2026-10-01', yes: true }, deps())).rejects.toThrow(/Another WA Agent process/);
@@ -324,22 +361,22 @@ describe('meeting backfill', () => {
       await lock.release();
     }
     expect(api.calls).toEqual([]);
-    expect(rows()).toEqual([]);
+    expect(await rows()).toEqual([]);
   });
 
   it('matches a client newly added to the groups file in the preview and in --yes; the preview stores nothing', async () => {
     const GUPTA = { groupId: '120363000000000013@g.us', name: 'Gupta Traders', code: 'GUP', emailDomains: ['gupta.example'] };
     writeFileSync(groupsFile, JSON.stringify({ clients: [SHARMA, MEHTA, GUPTA] }));
     conference('e', { start: '2026-10-09T05:00:00.000Z', attendees: ['x@gupta.example'] });
-    const before = dump(db);
+    const before = await dump(db);
     await meetingBackfillCommand({ since: '2026-10-01', yes: false }, deps());
-    expect(dump(db)).toBe(before);
+    expect(await dump(db)).toBe(before);
     expect(lines[1]).toBe('  3 for a client, 1 unassigned, 1 internal, 0 no access, 0 too long');
     lines = [];
     await meetingBackfillCommand({ since: '2026-10-01', yes: true }, deps());
     expect(lines[1]).toBe('  3 for a client, 1 unassigned, 1 internal, 0 no access, 0 too long');
-    const gupta = db.prepare("SELECT id FROM clients WHERE code = 'GUP'").get() as { id: number };
-    expect(rows().at(-1)).toMatchObject({ status: 'queued', clientId: gupta.id, matchKind: 'domain' });
+    const gupta = (await db.get<{ id: number }>("SELECT id FROM clients WHERE code = 'GUP'"))!;
+    expect((await rows()).at(-1)).toMatchObject({ status: 'queued', clientId: gupta.id, matchKind: 'domain' });
   });
 
   it('works with STT_PROVIDER set, using its list price and no provider', async () => {
@@ -353,7 +390,7 @@ describe('meeting backfill', () => {
   it('passes a Google sign-in failure on and stores nothing', async () => {
     api.failWith.set('listConferences', new GoogleAccessError('invalid_grant'));
     await expect(meetingBackfillCommand({ since: '2026-10-01', yes: true }, deps())).rejects.toThrow(/Run: npm run cli -- google-auth/);
-    expect(rows()).toEqual([]);
+    expect(await rows()).toEqual([]);
   });
 });
 
@@ -363,9 +400,9 @@ describe('meeting check', () => {
     conference('b', { start: ago(26), attendees: ['dev@studio.example'], fileMissing: true });
     conference('c', { start: ago(20), attendees: null, durationMs: 200 * 60_000 });
     conference('old', { start: ago(8 * 24), attendees: ['ravi@sharma.example'] });
-    const before = dump(db);
+    const before = await dump(db);
     await meetingCheckCommand(deps());
-    expect(dump(db)).toBe(before);
+    expect(await dump(db)).toBe(before);
     expect(api.callsOf('download')).toEqual([]);
     expect(api.callsOf('listConferences')).toEqual([[ago(7 * 24), NOW]]);
     expect(lines).toEqual([
@@ -381,9 +418,9 @@ describe('meeting check', () => {
     const GUPTA = { groupId: '120363000000000013@g.us', name: 'Gupta Traders', code: 'GUP', emailDomains: ['gupta.example'] };
     writeFileSync(groupsFile, JSON.stringify({ clients: [SHARMA, MEHTA, GUPTA] }));
     conference('e', { start: ago(10), attendees: ['x@gupta.example'] });
-    const before = dump(db);
+    const before = await dump(db);
     await meetingCheckCommand(deps());
-    expect(dump(db)).toBe(before);
+    expect(await dump(db)).toBe(before);
     expect(lines[0]).toBe('1 client in the groups file is not stored yet; their meetings show as unassigned until the service restarts.');
     expect(lines[2]).toMatch(/unassigned file opens/);
   });
@@ -405,18 +442,18 @@ describe('meeting check', () => {
 
   it('needs meetings on and the meeting scopes, and asks Google nothing otherwise', async () => {
     await expect(meetingCheckCommand(deps({ env: env({ MEETINGS_ENABLED: 'false' }) }))).rejects.toThrow(/Meetings are switched off/);
-    saveGrantedScopes(db, DRIVE_SCOPES.join(' '));
+    await saveGrantedScopes(db, DRIVE_SCOPES.join(' '));
     await expect(meetingCheckCommand(deps())).rejects.toThrow('Google sign-in needs meeting access');
     expect(api.calls).toEqual([]);
   });
 });
 
 describe('storedGoogleApi', () => {
-  it('needs a stored sign-in, and builds a client without calling Google', () => {
+  it('needs a stored sign-in, and builds a client without calling Google', async () => {
     const e = env({ GOOGLE_OAUTH_CLIENT_ID: 'test-id', GOOGLE_OAUTH_CLIENT_SECRET: 'test-secret' });
-    expect(() => storedGoogleApi(e)(db, KEY)).toThrow('Google is not connected. Run: npm run cli -- google-auth');
-    new TokenStore(db, KEY).save('rt-test');
-    const client = storedGoogleApi(e)(db, KEY);
+    await expect(storedGoogleApi(e)(db, KEY)).rejects.toThrow('Google is not connected. Run: npm run cli -- google-auth');
+    await new TokenStore(db, KEY).save('rt-test');
+    const client = await storedGoogleApi(e)(db, KEY);
     expect(typeof client.listConferences).toBe('function');
   });
 });

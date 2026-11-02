@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { SpendGuard } from '../spend/spendGuard.ts';
 import { estimateCostUsd, type Prices, type TokenUsage } from '../spend/pricing.ts';
+import { isolatedClientOptions } from './anthropicIsolated.ts';
 import { AiInvalidOutputError, AiRefusalError, billOf, keepConnectTimeoutCode, type Effort } from './claudeClient.ts';
 import { buildMeetingPrompt, type MeetingPromptInput } from './meetingPrompt.ts';
 import { MEETING_SUMMARY_JSON_SCHEMA, validateSummary, type MeetingSummary } from './meetingSchema.ts';
@@ -37,10 +38,14 @@ export class ClaudeMeetingClient implements MeetingAi {
   readonly #effort: Effort;
   readonly #prices: Prices;
 
-  constructor(opts: { apiKey: string; model: string; effort?: Effort; prices: Prices; client?: Anthropic }) {
+  /** `isolated`: a customer's client, which no founder environment setting reaches (anthropicIsolated.ts). */
+  constructor(opts: { apiKey: string; model: string; effort?: Effort; prices: Prices; client?: Anthropic; isolated?: boolean }) {
     this.#client =
       opts.client ??
-      new Anthropic({ apiKey: opts.apiKey, maxRetries: MEETING_SDK_MAX_RETRIES, timeout: MEETING_TIMEOUT_MS, fetch: keepConnectTimeoutCode });
+      new Anthropic({
+        apiKey: opts.apiKey, maxRetries: MEETING_SDK_MAX_RETRIES, timeout: MEETING_TIMEOUT_MS, fetch: keepConnectTimeoutCode,
+        ...(opts.isolated ? isolatedClientOptions(opts.apiKey, keepConnectTimeoutCode) : {}),
+      });
     this.#model = opts.model;
     this.#effort = opts.effort ?? 'medium';
     this.#prices = opts.prices;

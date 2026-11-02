@@ -84,7 +84,7 @@ export class SarvamProvider implements SttProvider {
     let jobId = opts.resumeJobId;
     if (!jobId) {
       jobId = await this.#submit(audio, model, opts.diarize);
-      opts.onJobId?.(jobId);
+      await opts.onJobId?.(jobId);
     }
     const outputName = await this.#waitForOutput(jobId);
     let raw: unknown;

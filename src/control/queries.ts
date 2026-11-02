@@ -29,20 +29,21 @@ function minusDays(date: string, n: number): string {
 }
 
 /** The Overview. health: the live snapshot, for the tracker card's line and last upload. */
-export function overview(db: Db, now: Date, health?: Pick<HealthSnapshot, 'line' | 'lastPublishedAt' | 'publishFailingSince'>): Overview {
+export async function overview(db: Db, now: Date, health?: Pick<HealthSnapshot, 'line' | 'lastPublishedAt' | 'publishFailingSince'>): Promise<Overview> {
   const today = istDate(now);
-  const rows = db
-    .prepare(`SELECT c.code, c.name,
-        COALESCE(SUM(t.status <> 'done' AND t.deadline IS NOT NULL AND t.deadline < @today), 0) AS overdue,
-        COALESCE(SUM(t.status = 'open' AND NOT (t.deadline IS NOT NULL AND t.deadline < @today)), 0) AS open,
-        COALESCE(SUM(t.status = 'maybe_done' AND NOT (t.deadline IS NOT NULL AND t.deadline < @today)), 0) AS review,
-        COALESCE(SUM(t.status = 'done' AND t.closed_on BETWEEN @weekStart AND @today), 0) AS done
+  const rows = await db.all<{ code: string; name: string; overdue: number; open: number; review: number; done: number }>(
+    `SELECT c.code, c.name,
+        COALESCE(SUM(CASE WHEN t.status <> 'done' AND t.deadline IS NOT NULL AND t.deadline < @today THEN 1 ELSE 0 END), 0) AS overdue,
+        COALESCE(SUM(CASE WHEN t.status = 'open' AND NOT (t.deadline IS NOT NULL AND t.deadline < @today) THEN 1 ELSE 0 END), 0) AS open,
+        COALESCE(SUM(CASE WHEN t.status = 'maybe_done' AND NOT (t.deadline IS NOT NULL AND t.deadline < @today) THEN 1 ELSE 0 END), 0) AS review,
+        COALESCE(SUM(CASE WHEN t.status = 'done' AND t.closed_on BETWEEN @weekStart AND @today THEN 1 ELSE 0 END), 0) AS done
       FROM clients c LEFT JOIN tasks t ON t.client_id = c.id
       WHERE c.active = 1
-      GROUP BY c.id ORDER BY lower(c.name), c.id`)
-    .all({ today, weekStart: minusDays(today, 6) }) as { code: string; name: string; overdue: number; open: number; review: number; done: number }[];
+      GROUP BY c.id ORDER BY lower(c.name), c.id`,
+    { today, weekStart: minusDays(today, 6) },
+  );
   const sum = (k: 'overdue' | 'open' | 'review' | 'done') => rows.reduce((a, r) => a + r[k], 0);
-  const meetings = listDashboardMeetings(db, { view: 'all', limit: 4, offset: 0 }, now).rows.map((m) => ({
+  const meetings = (await listDashboardMeetings(db, { view: 'all', limit: 4, offset: 0 }, now)).rows.map((m) => ({
     id: m.id, title: m.title, status: m.status, stageLabel: m.stageLabel, when: m.when, minutes: m.minutes,
   }));
   return {
@@ -50,7 +51,7 @@ export function overview(db: Db, now: Date, health?: Pick<HealthSnapshot, 'line'
     tasks: { open: sum('open'), overdue: sum('overdue'), review: sum('review'), doneThisWeek: sum('done') },
     byClient: rows.map((r) => ({ client: { code: r.code, name: r.name }, segments: SEGMENT_ORDER.map((key) => ({ key, count: r[key] })) })),
     meetings,
-    activity: listActivity(db, { kind: 'work', limit: 5 }).items,
-    tracker: { lastPublishedAt: lastTrackerUpload(db, health?.lastPublishedAt), health: health ? { ok: health.line.ok, text: health.line.text } : null },
+    activity: (await listActivity(db, { kind: 'work', limit: 5 })).items,
+    tracker: { lastPublishedAt: await lastTrackerUpload(db, health?.lastPublishedAt), health: health ? { ok: health.line.ok, text: health.line.text } : null },
   };
 }

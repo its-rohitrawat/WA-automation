@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { formatStatus } from '../../src/cli/status.ts';
 import type { HealthSnapshot } from '../../src/health/health.ts';
 import { listClients } from '../../src/store/clients.ts';
-import { seededDb } from '../helpers/db.ts';
+import { seeded } from '../helpers/db.ts';
 
 const snapshot: HealthSnapshot = {
   at: '2026-10-19T07:58:00.000Z',
@@ -16,12 +16,13 @@ const now = new Date('2026-10-19T08:00:00Z');
 const base = { clients: [], batches: [], unprocessed: new Map<number, number>(), now };
 
 describe('formatStatus', () => {
-  it('summarises health, spend, disk and each client', () => {
+  it('summarises health, spend, disk and each client', async () => {
+    const { db, ids } = await seeded(); // Mehta by its real id: on Postgres it is not 2
     const out = formatStatus({
       snapshot,
-      clients: listClients(seededDb(), false),
-      batches: [{ clientId: 2, status: 'failed', errorCode: 'network', finishedAt: '2026-10-19T07:50:00.000Z' }],
-      unprocessed: new Map([[2, 3]]),
+      clients: await listClients(db, false),
+      batches: [{ clientId: ids.mehta, status: 'failed', errorCode: 'network', finishedAt: '2026-10-19T07:50:00.000Z' }],
+      unprocessed: new Map([[ids.mehta, 3]]),
       now,
     });
     expect(out).toContain('Health:      ✅ Connected · last update 19 Oct 13:25 (reported 2 min ago)');

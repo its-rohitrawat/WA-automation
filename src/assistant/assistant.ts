@@ -176,7 +176,7 @@ export class Assistant {
         messages.push({ role: 'assistant', content: turn.content });
         const results: Anthropic.Beta.BetaToolResultBlockParam[] = [];
         for (const use of uses) {
-          const r = this.#runTool(owner, use, emit, () => proposals++ < MAX_PROPOSALS);
+          const r = await this.#runTool(owner, use, emit, () => proposals++ < MAX_PROPOSALS);
           results.push({ type: 'tool_result', tool_use_id: use.id, content: r.content, ...(r.error ? { is_error: true } : {}) });
         }
         messages.push({ role: 'user', content: results });
@@ -215,7 +215,7 @@ export class Assistant {
   }
 
   /** Runs one tool call. Its result is always data (asData) or a short fixed note; a bad input is an error result. */
-  #runTool(owner: { key: string; email: string }, use: Anthropic.Beta.BetaToolUseBlock, emit: (e: AssistantEvent) => void, mayPropose: () => boolean): { content: string; error?: true } {
+  async #runTool(owner: { key: string; email: string }, use: Anthropic.Beta.BetaToolUseBlock, emit: (e: AssistantEvent) => void, mayPropose: () => boolean): Promise<{ content: string; error?: true }> {
     const d = this.#d;
     if (!Object.hasOwn(INPUTS, use.name)) return { content: `There is no tool called ${use.name.slice(0, 40)}.`, error: true };
     const name = use.name as ToolName;
@@ -228,12 +228,12 @@ export class Assistant {
       }
       if ((PROPOSE_TOOLS as readonly string[]).includes(name)) {
         if (!mayPropose()) return { content: 'No more drafts for this question.', error: true };
-        const draft = draftProposal(name as (typeof PROPOSE_TOOLS)[number], use.input, d);
+        const draft = await draftProposal(name as (typeof PROPOSE_TOOLS)[number], use.input, d);
         const card = d.pending.add(owner, draft);
         emit({ type: 'proposal', card });
         return { content: 'A card with this change is now in front of the owner, with Confirm and Cancel. Nothing has changed: it changes only if the owner presses Confirm.' };
       }
-      return { content: asData(name, runReadTool(name as Parameters<typeof runReadTool>[0], use.input, d)) };
+      return { content: asData(name, await runReadTool(name as Parameters<typeof runReadTool>[0], use.input, d)) };
     } catch (e) {
       if (e instanceof ControlError) return { content: e.message, error: true };
       if (e instanceof ZodError) return { content: `The input did not fit the tool: ${e.issues.map((x) => `${x.path.join('.') || 'input'} ${x.message}`).join('; ').slice(0, 300)}`, error: true };

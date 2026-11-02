@@ -39,14 +39,18 @@ const NOTE_PATH = '/data/media/acme/2026-10/wa1-7.ogg';
 /** A Buffer that owns its whole memory, as files read from disk do, so a transfer really moves it. */
 const owned = (b: Uint8Array): Buffer => Buffer.from(new Uint8Array(b).buffer);
 
-function setup(
+/** Each test database's spend guard, so a spend read first waits for the guard's bookings written behind the call. */
+const guards = new WeakMap<Db, SpendGuard>();
+
+async function setup(
   o: {
     parse?: ParseResult; capUsd?: number; ai?: FakeMediaAi; realParse?: boolean; realImage?: boolean; voice?: VoiceTranscriber | null; maxVoiceSeconds?: number;
     signal?: AbortSignal;
   } = {},
 ) {
-  const db = seededDb();
+  const db = await seededDb();
   const spend = new SpendGuard({ db, clock: manualClock('2026-10-19T08:00:00Z'), capUsd: o.capUsd ?? 15 });
+  guards.set(db, spend);
   const ai = o.ai ?? new FakeMediaAi();
   // Behaves like parseFile: with transfer, bytes that own their memory are moved away and the caller's view is
   // emptied. Bytes that share memory (a pooled Buffer) are copied instead, so they stay intact.
@@ -68,27 +72,32 @@ function setup(
   const reserve = vi.spyOn(spend, 'reserve');
   return { db, spend, ai, parse, prepareImage, extract, input, reserve };
 }
-const spendRows = (db: Db) => db.prepare('SELECT usd, detail FROM spend').all() as { usd: number; detail: string }[];
+// A booking made without a transaction handle is written behind the call: wait for it (on Postgres's pool a read can
+// otherwise run first).
+const spendRows = async (db: Db) => {
+  await guards.get(db)?.flushed();
+  return db.all<{ usd: number; detail: string }>('SELECT usd, detail FROM spend');
+};
 
 describe('createExtractor', () => {
   it('describes an image through Claude and books the actual cost', async () => {
-    const { db, ai, prepareImage, extract, input, reserve } = setup();
+    const { db, ai, prepareImage, extract, input, reserve } = await setup();
     expect(await extract(input())).toEqual({ textKind: 'description', text: 'A screenshot of a payment receipt. Visible text: Paid ₹42,000', pageCount: null, note: null });
     expect(prepareImage).toHaveBeenCalledWith(Buffer.from('img'));
     expect(ai.calls).toEqual([{ kind: 'image', bytes: Buffer.from('img-small') }]);
-    expect(spendRows(db)).toEqual([{ usd: 0.01, detail: 'media 7' }]);
+    expect(await spendRows(db)).toEqual([{ usd: 0.01, detail: 'media 7' }]);
     expect(reserve).toHaveBeenCalledExactlyOnceWith(imageEstimateUsd({ width: 1000, height: 750 }, P));
   });
 
   it.each(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'IMAGE/JPEG; charset=x'])('describes an image that was sent as a document (%s)', async (mimeType) => {
-    const { ai, parse, extract, input } = setup();
+    const { ai, parse, extract, input } = await setup();
     expect((await extract(input({ kind: 'document', mimeType, fileName: 'homepage-v3' }))).textKind).toBe('description');
     expect(ai.calls).toHaveLength(1);
     expect(parse).not.toHaveBeenCalled();
   });
 
   it('reads a PDF with a text layer locally, without Claude', async () => {
-    const { ai, parse, extract, input } = setup({ parse: { text: 'Quotation 17\nTotal 1,20,000 for the full website build', pageCount: 2 } });
+    const { ai, parse, extract, input } = await setup({ parse: { text: 'Quotation 17\nTotal 1,20,000 for the full website build', pageCount: 2 } });
     expect(await extract(input({ kind: 'document', mimeType: 'application/pdf', fileName: 'quote.pdf', bytes: PDF }))).toEqual({
       textKind: 'extract', text: 'Quotation 17\nTotal 1,20,000 for the full website build', pageCount: 2, note: null,
     });
@@ -98,11 +107,11 @@ describe('createExtractor', () => {
 
   it('counts a PDF with 16 visible characters per page read as text, and one with 15 as a scan', async () => {
     const pdf = { kind: 'document', mimeType: 'application/pdf', bytes: PDF } as const;
-    const text = setup({ parse: { text: ' abcd efgh\nijkl mnop ', pageCount: 1 } }); // 16 visible, whitespace not counted
+    const text = await setup({ parse: { text: ' abcd efgh\nijkl mnop ', pageCount: 1 } }); // 16 visible, whitespace not counted
     expect(await text.extract(text.input(pdf))).toEqual({ textKind: 'extract', text: ' abcd efgh\nijkl mnop ', pageCount: 1, note: null });
     expect(text.ai.calls).toHaveLength(0);
 
-    const scan = setup({ parse: { text: ' abcd efgh\nijkl mno ', pageCount: 1 } }); // 15 visible
+    const scan = await setup({ parse: { text: ' abcd efgh\nijkl mno ', pageCount: 1 } }); // 15 visible
     expect(await scan.extract(scan.input(pdf))).toEqual({ textKind: 'extract', text: 'Quotation No. 17. Total ₹1,20,000', pageCount: 1, note: 'scan_read_by_ai' });
     expect(scan.ai.calls).toEqual([{ kind: 'pdf', bytes: PDF }]);
   });
@@ -110,17 +119,17 @@ describe('createExtractor', () => {
   it('marks a PDF that was read only up to the page cap', async () => {
     // 3,500 characters is enough for the 200 pages read (16 x 200) but not for the 250 the file states (16 x 250):
     // the scan check counts only the pages that were read.
-    const { extract, input } = setup({ parse: { text: 'x'.repeat(3_500), pageCount: 250 } });
+    const { extract, input } = await setup({ parse: { text: 'x'.repeat(3_500), pageCount: 250 } });
     expect(await extract(input({ kind: 'document', mimeType: 'application/pdf', bytes: PDF }))).toMatchObject({ textKind: 'extract', pageCount: 250, note: 'first_pages_only' });
   });
 
   it('finds a PDF by its bytes, not by the MIME type the sender gave', async () => {
-    const real = setup({ parse: { text: 'Quotation 17\nTotal 1,20,000 for the full website build', pageCount: 2 } });
+    const real = await setup({ parse: { text: 'Quotation 17\nTotal 1,20,000 for the full website build', pageCount: 2 } });
     expect(await real.extract(real.input({ kind: 'document', mimeType: 'application/octet-stream', fileName: 'quote', bytes: PDF }))).toMatchObject({ textKind: 'extract', pageCount: 2 });
     expect(real.parse).toHaveBeenCalledTimes(1);
     expect(real.parse.mock.calls[0]![0]).toMatchObject({ kind: 'pdf' });
 
-    const fake = setup();
+    const fake = await setup();
     expect(await fake.extract(fake.input({ kind: 'document', mimeType: 'application/pdf', fileName: 'quote.pdf', bytes: Buffer.from('not a pdf') }))).toEqual(NONE);
     expect(fake.parse).not.toHaveBeenCalled();
     expect(fake.reserve).not.toHaveBeenCalled();
@@ -128,30 +137,30 @@ describe('createExtractor', () => {
   });
 
   it('sends a short scan to Claude, reserving the scanned-PDF ceiling', async () => {
-    const { db, ai, extract, input, reserve } = setup({ parse: { text: '  ', pageCount: 3 } });
+    const { db, ai, extract, input, reserve } = await setup({ parse: { text: '  ', pageCount: 3 } });
     expect(await extract(input({ kind: 'document', mimeType: 'application/pdf', bytes: PDF }))).toEqual({
       textKind: 'extract', text: 'Quotation No. 17. Total ₹1,20,000', pageCount: 3, note: 'scan_read_by_ai',
     });
     expect(ai.calls).toEqual([{ kind: 'pdf', bytes: PDF }]);
-    expect(spendRows(db)).toEqual([{ usd: 0.01, detail: 'media 7' }]);
+    expect(await spendRows(db)).toEqual([{ usd: 0.01, detail: 'media 7' }]);
     expect(reserve).toHaveBeenCalledExactlyOnceWith(scannedPdfCeilingUsd(P));
   });
 
   it('lists a long scan with its page count only', async () => {
-    const { ai, extract, input } = setup({ parse: { text: '', pageCount: 30 } });
+    const { ai, extract, input } = await setup({ parse: { text: '', pageCount: 30 } });
     expect(await extract(input({ kind: 'document', mimeType: 'application/pdf', bytes: PDF }))).toEqual({ textKind: null, text: null, pageCount: 30, note: 'scan_too_long' });
     expect(ai.calls).toHaveLength(0);
   });
 
   it('reads DOCX text in the parser, by MIME type or by the .docx name', async () => {
-    const { parse, extract, input } = setup({ parse: { text: 'Scope of work', pageCount: null } });
+    const { parse, extract, input } = await setup({ parse: { text: 'Scope of work', pageCount: null } });
     expect(await extract(input({ kind: 'document', mimeType: DOCX_MIME, bytes: ZIP }))).toEqual({ textKind: 'extract', text: 'Scope of work', pageCount: null, note: null });
     expect(await extract(input({ kind: 'document', mimeType: 'application/octet-stream', fileName: 'Scope.DOCX', bytes: ZIP }))).toMatchObject({ text: 'Scope of work' });
     expect(parse.mock.calls[0]![0]).toMatchObject({ kind: 'docx', maxXmlBytes: 20 * 1024 * 1024, maxEntries: 2_000, maxTextChars: 1_000_000 });
   });
 
   it('keeps other files as originals only, and reads nothing for voice notes without a transcriber', async () => {
-    const { ai, parse, extract, input } = setup();
+    const { ai, parse, extract, input } = await setup();
     expect(await extract(input({ kind: 'document', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', fileName: 'budget.xlsx', bytes: ZIP }))).toEqual(NONE);
     expect(await extract(input({ kind: 'document', mimeType: 'text/plain', bytes: Buffer.from('hello') }))).toEqual(NONE);
     // A DOCX name or MIME type is not enough: the bytes must be a ZIP.
@@ -171,13 +180,13 @@ describe('createExtractor', () => {
       { path: 'a scan read by Claude', parse: { text: '', pageCount: 3 }, claude: 'a'.repeat(MAX + 10), file: pdf },
       { path: 'an image description', claude: 'a'.repeat(MAX + 10), file: {} },
     ])('caps $path at maxStoredTextChars', async ({ parse, claude, file }) => {
-      const { extract, input } = setup({ parse, ai: new FakeMediaAi(claude === undefined ? [] : [{ text: claude }]) });
+      const { extract, input } = await setup({ parse, ai: new FakeMediaAi(claude === undefined ? [] : [{ text: claude }]) });
       expect((await extract(input(file))).text).toHaveLength(MAX);
     });
 
     it('cuts a huge text layer without stalling the service', async () => {
       // A tiny hostile PDF can make the parser return tens of millions of characters (review of Task 9).
-      const { extract, input } = setup({ parse: { text: 'क'.repeat(5_000_000), pageCount: 1 } });
+      const { extract, input } = await setup({ parse: { text: 'क'.repeat(5_000_000), pageCount: 1 } });
       const started = performance.now();
       const { text } = await extract(input(pdf));
       expect(performance.now() - started).toBeLessThan(250);
@@ -185,15 +194,15 @@ describe('createExtractor', () => {
     });
 
     it('never ends the stored text with half of a character', async () => {
-      const halfway = setup({ parse: { text: `${'a'.repeat(MAX - 1)}${'😀'.repeat(5)}`, pageCount: 1 } });
+      const halfway = await setup({ parse: { text: `${'a'.repeat(MAX - 1)}${'😀'.repeat(5)}`, pageCount: 1 } });
       expect((await halfway.extract(halfway.input(pdf))).text).toBe('a'.repeat(MAX - 1));
-      const whole = setup({ parse: { text: `${'a'.repeat(MAX - 2)}${'😀'.repeat(5)}`, pageCount: 1 } });
+      const whole = await setup({ parse: { text: `${'a'.repeat(MAX - 2)}${'😀'.repeat(5)}`, pageCount: 1 } });
       expect((await whole.extract(whole.input(pdf))).text).toBe(`${'a'.repeat(MAX - 2)}😀`);
     });
   });
 
   it('decodes an image with the full pixel cap when no image preparer is given', async () => {
-    const { ai, extract, input } = setup({ realImage: true });
+    const { ai, extract, input } = await setup({ realImage: true });
     const side = Math.ceil(Math.sqrt(MEDIA_LIMITS.maxImagePixels)); // 7072 x 7072 is just over the cap
     // Grey, one byte per pixel, so the images stay under the decoded-size budget and only the pixel cap decides.
     const image = (s: number) => sharp({ create: { width: s, height: s, channels: 3, background: { r: 30, g: 90, b: 200 } } }).toColourspace('b-w');
@@ -216,33 +225,33 @@ describe('createExtractor', () => {
   // Amendments 9a and 9b.
   describe('the daily cap', () => {
     it('lists a file whose ceiling is above the whole daily cap as too costly, without trying or deferring it', async () => {
-      const image = setup({ capUsd: 0.001 });
+      const image = await setup({ capUsd: 0.001 });
       expect(await image.extract(image.input())).toEqual({ ...NONE, note: 'too_costly' });
       expect(image.prepareImage).not.toHaveBeenCalled();
       expect(image.reserve).not.toHaveBeenCalled();
       expect(image.ai.calls).toHaveLength(0);
 
-      const scan = setup({ capUsd: 4, parse: { text: '', pageCount: 3 } });
+      const scan = await setup({ capUsd: 4, parse: { text: '', pageCount: 3 } });
       expect(scannedPdfCeilingUsd(P)).toBeGreaterThan(4);
       expect(await scan.extract(scan.input({ kind: 'document', mimeType: 'application/pdf', bytes: PDF }))).toEqual({ ...NONE, pageCount: 3, note: 'too_costly' });
       expect(scan.reserve).not.toHaveBeenCalled();
       expect(scan.ai.calls).toHaveLength(0);
-      expect(spendRows(scan.db)).toEqual([]);
+      expect(await spendRows(scan.db)).toEqual([]);
     });
 
     it('still tries an image or a scan when the daily cap equals its ceiling', async () => {
-      const image = setup({ capUsd: imageCeilingUsd(P) });
+      const image = await setup({ capUsd: imageCeilingUsd(P) });
       expect(await image.extract(image.input())).toMatchObject({ textKind: 'description', note: null });
       expect(image.ai.calls).toHaveLength(1);
 
-      const scan = setup({ capUsd: scannedPdfCeilingUsd(P), parse: { text: '', pageCount: 3 } });
+      const scan = await setup({ capUsd: scannedPdfCeilingUsd(P), parse: { text: '', pageCount: 3 } });
       expect(await scan.extract(scan.input({ kind: 'document', mimeType: 'application/pdf', bytes: PDF }))).toMatchObject({ textKind: 'extract', note: 'scan_read_by_ai' });
       expect(scan.reserve).toHaveBeenCalledExactlyOnceWith(scannedPdfCeilingUsd(P));
       expect(scan.ai.calls).toHaveLength(1);
     });
 
     it('does not decode an image when the budget left today cannot hold its ceiling', async () => {
-      const { spend, ai, prepareImage, extract, input } = setup();
+      const { spend, ai, prepareImage, extract, input } = await setup();
       spend.record('ai', 14.95, 'batch 1');
       expect(spend.canSpend(imageCeilingUsd(P))).toBe(false);
       await expect(extract(input())).rejects.toBeInstanceOf(SpendCapReachedError);
@@ -253,7 +262,7 @@ describe('createExtractor', () => {
     it('checks the ceiling before decoding, even when what is left would hold this image', async () => {
       // What is left today holds the estimate for the 1000 x 750 image the fake returns, but not the ceiling for any
       // image. The check must use the ceiling, or the image is decoded and then deferred on every retry (amendment 9b).
-      const { spend, ai, prepareImage, extract, input } = setup();
+      const { spend, ai, prepareImage, extract, input } = await setup();
       spend.record('ai', 15 - (imageCeilingUsd(P) - 0.001), 'batch 1');
       expect(spend.canSpend(imageCeilingUsd(P))).toBe(false);
       expect(spend.canSpend(imageEstimateUsd({ width: 1000, height: 750 }, P))).toBe(true);
@@ -266,7 +275,7 @@ describe('createExtractor', () => {
     // waits as spend_busy and Health does not say it waits for midnight.
     it('says whether only paid calls in flight, not the cap, keep an image or a scan from its budget', async () => {
       const busy = async (run: Promise<unknown>) => (await run.then(() => null, (e: unknown) => e)) as SpendCapReachedError;
-      const image = setup();
+      const image = await setup();
       image.spend.record('ai', 10.8, 'batch 1');
       const hold = image.spend.reserve(scannedPdfCeilingUsd(P))!; // a scan being read holds about $4.16
       let e = await busy(image.extract(image.input()));
@@ -278,7 +287,7 @@ describe('createExtractor', () => {
       expect(e.busy).toBe(false);
       expect(image.prepareImage).not.toHaveBeenCalled();
 
-      const scan = setup({ parse: { text: '', pageCount: 3 } });
+      const scan = await setup({ parse: { text: '', pageCount: 3 } });
       scan.spend.record('ai', 8, 'batch 1');
       const scanHold = scan.spend.reserve(scannedPdfCeilingUsd(P))!;
       e = await busy(scan.extract(scan.input({ kind: 'document', mimeType: 'application/pdf', bytes: PDF })));
@@ -291,38 +300,38 @@ describe('createExtractor', () => {
     });
 
     it('does not call Claude for a scan when the ceiling does not fit under what is left today', async () => {
-      const { db, spend, ai, extract, input } = setup({ parse: { text: '', pageCount: 3 } });
+      const { db, spend, ai, extract, input } = await setup({ parse: { text: '', pageCount: 3 } });
       spend.record('ai', 11, 'batch 1');
       await expect(extract(input({ kind: 'document', mimeType: 'application/pdf', bytes: PDF }))).rejects.toBeInstanceOf(SpendCapReachedError);
       expect(ai.calls).toHaveLength(0);
-      expect(spendRows(db)).toEqual([{ usd: 11, detail: 'batch 1' }]);
+      expect(await spendRows(db)).toEqual([{ usd: 11, detail: 'batch 1' }]);
     });
   });
 
   // Final review FR3a: a file deleted for everyone during its download or decode is never sent to Claude.
   describe('a file deleted for everyone before the paid call', () => {
     it('an image is decoded but not described, and nothing is reserved or booked', async () => {
-      const { db, ai, prepareImage, extract, input, reserve } = setup();
-      const revoked = vi.fn(() => true);
+      const { db, ai, prepareImage, extract, input, reserve } = await setup();
+      const revoked = vi.fn(async () => true);
       expect(await extract(input({ revoked }))).toEqual({ ...NONE, note: 'revoked' });
       expect(prepareImage).toHaveBeenCalledTimes(1);
       expect(revoked).toHaveBeenCalledTimes(1);
       expect(reserve).not.toHaveBeenCalled();
       expect(ai.calls).toHaveLength(0);
-      expect(spendRows(db)).toEqual([]);
+      expect(await spendRows(db)).toEqual([]);
     });
 
     it('a scanned PDF is not read', async () => {
-      const { db, ai, extract, input, reserve } = setup({ parse: { text: '', pageCount: 3 } });
-      expect(await extract(input({ kind: 'document', mimeType: 'application/pdf', bytes: PDF, revoked: () => true }))).toEqual({ ...NONE, note: 'revoked' });
+      const { db, ai, extract, input, reserve } = await setup({ parse: { text: '', pageCount: 3 } });
+      expect(await extract(input({ kind: 'document', mimeType: 'application/pdf', bytes: PDF, revoked: async () => true }))).toEqual({ ...NONE, note: 'revoked' });
       expect(reserve).not.toHaveBeenCalled();
       expect(ai.calls).toHaveLength(0);
-      expect(spendRows(db)).toEqual([]);
+      expect(await spendRows(db)).toEqual([]);
     });
 
     it('a file still wanted is read as usual, and a free read never asks', async () => {
-      const { ai, extract, input } = setup({ parse: { text: 'Quotation 17\nTotal 1,20,000 for the full website build', pageCount: 2 } });
-      const revoked = vi.fn(() => false);
+      const { ai, extract, input } = await setup({ parse: { text: 'Quotation 17\nTotal 1,20,000 for the full website build', pageCount: 2 } });
+      const revoked = vi.fn(async () => false);
       expect((await extract(input({ revoked }))).textKind).toBe('description');
       expect(revoked).toHaveBeenCalledTimes(1);
       expect((await extract(input({ kind: 'document', mimeType: 'application/pdf', bytes: PDF, revoked }))).textKind).toBe('extract');
@@ -334,30 +343,30 @@ describe('createExtractor', () => {
   // Owner decision D2, amendment 9e.
   describe('forwarded files', () => {
     it('never sends a forwarded image to Claude, also one sent as a document', async () => {
-      const { db, ai, prepareImage, extract, input, reserve } = setup();
+      const { db, ai, prepareImage, extract, input, reserve } = await setup();
       expect(await extract(input({ forwarded: true }))).toEqual({ ...NONE, note: 'forwarded_not_described' });
       expect(await extract(input({ forwarded: true, kind: 'document', mimeType: 'image/png', fileName: 'meme.png' }))).toEqual({ ...NONE, note: 'forwarded_not_described' });
       expect(prepareImage).not.toHaveBeenCalled();
       expect(reserve).not.toHaveBeenCalled();
       expect(ai.calls).toHaveLength(0);
-      expect(spendRows(db)).toEqual([]);
+      expect(await spendRows(db)).toEqual([]);
     });
 
     it('never sends a forwarded scan to Claude', async () => {
-      const { db, ai, extract, input, reserve } = setup({ parse: { text: '', pageCount: 3 } });
+      const { db, ai, extract, input, reserve } = await setup({ parse: { text: '', pageCount: 3 } });
       expect(await extract(input({ forwarded: true, kind: 'document', mimeType: 'application/pdf', bytes: PDF }))).toEqual({ ...NONE, pageCount: 3, note: 'forwarded_not_described' });
       expect(reserve).not.toHaveBeenCalled();
       expect(ai.calls).toHaveLength(0);
-      expect(spendRows(db)).toEqual([]);
+      expect(await spendRows(db)).toEqual([]);
     });
 
     it('settles a forwarded image before any budget check, so it is never deferred or listed as too costly', async () => {
-      const spent = setup();
+      const spent = await setup();
       spent.spend.record('ai', 14.95, 'batch 1');
       expect(spent.spend.canSpend(imageCeilingUsd(P))).toBe(false);
       expect(await spent.extract(spent.input({ forwarded: true }))).toEqual({ ...NONE, note: 'forwarded_not_described' });
 
-      const tiny = setup({ capUsd: 0.001 });
+      const tiny = await setup({ capUsd: 0.001 });
       expect(imageCeilingUsd(P)).toBeGreaterThan(0.001);
       expect(await tiny.extract(tiny.input({ forwarded: true }))).toEqual({ ...NONE, note: 'forwarded_not_described' });
 
@@ -370,11 +379,11 @@ describe('createExtractor', () => {
 
     it('settles a forwarded scan as forwarded when the daily cap is below its ceiling or used up', async () => {
       const pdf = { forwarded: true, kind: 'document', mimeType: 'application/pdf', bytes: PDF } as const;
-      const low = setup({ capUsd: 4, parse: { text: '', pageCount: 3 } });
+      const low = await setup({ capUsd: 4, parse: { text: '', pageCount: 3 } });
       expect(scannedPdfCeilingUsd(P)).toBeGreaterThan(4);
       expect(await low.extract(low.input(pdf))).toEqual({ ...NONE, pageCount: 3, note: 'forwarded_not_described' });
 
-      const spent = setup({ parse: { text: '', pageCount: 3 } });
+      const spent = await setup({ parse: { text: '', pageCount: 3 } });
       spent.spend.record('ai', 11, 'batch 1');
       expect(await spent.extract(spent.input(pdf))).toEqual({ ...NONE, pageCount: 3, note: 'forwarded_not_described' });
 
@@ -385,17 +394,17 @@ describe('createExtractor', () => {
     });
 
     it('keeps a forwarded scan that is too long to read as too long', async () => {
-      const { ai, extract, input } = setup({ parse: { text: '', pageCount: 30 } });
+      const { ai, extract, input } = await setup({ parse: { text: '', pageCount: 30 } });
       expect(await extract(input({ forwarded: true, kind: 'document', mimeType: 'application/pdf', bytes: PDF }))).toEqual({ ...NONE, pageCount: 30, note: 'scan_too_long' });
       expect(ai.calls).toHaveLength(0);
     });
 
     it('still reads the text of a forwarded PDF or DOCX locally', async () => {
-      const pdf = setup({ parse: { text: 'Quotation 17\nTotal 1,20,000 for the full website build', pageCount: 2 } });
+      const pdf = await setup({ parse: { text: 'Quotation 17\nTotal 1,20,000 for the full website build', pageCount: 2 } });
       expect(await pdf.extract(pdf.input({ forwarded: true, kind: 'document', mimeType: 'application/pdf', bytes: PDF }))).toEqual({
         textKind: 'extract', text: 'Quotation 17\nTotal 1,20,000 for the full website build', pageCount: 2, note: null,
       });
-      const docx = setup({ parse: { text: 'Scope of work', pageCount: null } });
+      const docx = await setup({ parse: { text: 'Scope of work', pageCount: null } });
       expect(await docx.extract(docx.input({ forwarded: true, kind: 'document', mimeType: DOCX_MIME, bytes: ZIP }))).toEqual({
         textKind: 'extract', text: 'Scope of work', pageCount: null, note: null,
       });
@@ -407,7 +416,7 @@ describe('createExtractor', () => {
   // Amendment 9f: parseFile moves the caller's bytes only when asked.
   describe('file bytes and the parser', () => {
     it('lets the DOCX parser take the bytes without a copy', async () => {
-      const { parse, extract, input } = setup({ parse: { text: 'Scope of work', pageCount: null } });
+      const { parse, extract, input } = await setup({ parse: { text: 'Scope of work', pageCount: null } });
       const bytes = owned(ZIP);
       expect(await extract(input({ kind: 'document', mimeType: DOCX_MIME, bytes }))).toMatchObject({ text: 'Scope of work' });
       expect(parse).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ kind: 'docx' }), { transfer: true });
@@ -416,14 +425,14 @@ describe('createExtractor', () => {
 
     it('moves a DOCX to the real parser without a copy', async () => {
       // No fake parser: the default wiring must pass { transfer: true } on to parseFile.
-      const { extract, input } = setup({ realParse: true });
+      const { extract, input } = await setup({ realParse: true });
       const bytes = owned(await tinyDocx(['Scope of work']));
       expect(await extract(input({ kind: 'document', mimeType: DOCX_MIME, bytes }))).toEqual({ textKind: 'extract', text: 'Scope of work', pageCount: null, note: null });
       expect(bytes.length).toBe(0);
     });
 
     it('keeps the bytes of a PDF, so Claude receives the whole scan', async () => {
-      const { ai, parse, extract, input } = setup({ parse: { text: '', pageCount: 3 } });
+      const { ai, parse, extract, input } = await setup({ parse: { text: '', pageCount: 3 } });
       const bytes = owned(PDF);
       await extract(input({ kind: 'document', mimeType: 'application/pdf', bytes }));
       expect(parse.mock.calls[0]![1]?.transfer).toBeUndefined();
@@ -437,12 +446,12 @@ describe('createExtractor', () => {
         b.write('%PDF-1.4', 0, 'latin1');
         return b;
       };
-      const atLimit = setup({ parse: { text: '', pageCount: 3 } });
+      const atLimit = await setup({ parse: { text: '', pageCount: 3 } });
       const full = scan(MEDIA_LIMITS.maxScannedPdfBytes);
       expect((await atLimit.extract(atLimit.input({ kind: 'document', mimeType: 'application/pdf', bytes: full }))).note).toBe('scan_read_by_ai');
       expect(atLimit.ai.calls[0]!.bytes.length).toBe(MEDIA_LIMITS.maxScannedPdfBytes);
 
-      const over = setup({ parse: { text: '', pageCount: 3 } });
+      const over = await setup({ parse: { text: '', pageCount: 3 } });
       const big = scan(MEDIA_LIMITS.maxScannedPdfBytes + 1);
       expect(await over.extract(over.input({ kind: 'document', mimeType: 'application/pdf', bytes: big }))).toEqual({ ...NONE, pageCount: 3, note: 'scan_too_long' });
       expect(over.ai.calls).toHaveLength(0);
@@ -455,7 +464,7 @@ describe('createExtractor', () => {
     const forgedScan = () => tinyPdf([[], [], []], { count: 1 });
 
     it('reserves the scanned-PDF ceiling for a 3-page scan that claims 1 page, and sends Claude every byte', async () => {
-      const { ai, extract, input, reserve } = setup({ realParse: true });
+      const { ai, extract, input, reserve } = await setup({ realParse: true });
       const bytes = forgedScan();
       expect(await extract(input({ kind: 'document', mimeType: 'application/pdf', bytes }))).toEqual({
         textKind: 'extract', text: 'Quotation No. 17. Total ₹1,20,000', pageCount: 1, note: 'scan_read_by_ai',
@@ -465,36 +474,36 @@ describe('createExtractor', () => {
     });
 
     it('lists the same scan as too costly when the daily cap is below the ceiling', async () => {
-      const { ai, extract, input, reserve } = setup({ realParse: true, capUsd: 4 });
+      const { ai, extract, input, reserve } = await setup({ realParse: true, capUsd: 4 });
       expect(await extract(input({ kind: 'document', mimeType: 'application/pdf', bytes: forgedScan() }))).toEqual({ ...NONE, pageCount: 1, note: 'too_costly' });
       expect(reserve).not.toHaveBeenCalled();
       expect(ai.calls).toHaveLength(0);
     });
 
     it('fails a text PDF that claims no pages as unreadable, without a paid call', async () => {
-      const { db, ai, extract, input } = setup({ realParse: true });
+      const { db, ai, extract, input } = await setup({ realParse: true });
       const bytes = tinyPdf([['Page 1'], ['Page 2']], { count: 0 });
       await expect(extract(input({ kind: 'document', mimeType: 'application/pdf', bytes }))).rejects.toMatchObject({ name: 'ParseError', code: 'pdf_no_pages' });
       expect(ai.calls).toHaveLength(0);
-      expect(spendRows(db)).toEqual([]);
+      expect(await spendRows(db)).toEqual([]);
     });
   });
 
   // Amendment 9h: media calls make one SDK attempt, so a lost connection is booked once.
   describe('a connection lost during a paid call', () => {
     it('books an image estimate once', async () => {
-      const { db, extract, input } = setup({ ai: new FakeMediaAi([new Anthropic.APIConnectionTimeoutError()]) });
+      const { db, extract, input } = await setup({ ai: new FakeMediaAi([new Anthropic.APIConnectionTimeoutError()]) });
       await expect(extract(input())).rejects.toBeInstanceOf(Anthropic.APIConnectionTimeoutError);
-      const rows = spendRows(db);
+      const rows = await spendRows(db);
       expect(rows).toHaveLength(1);
       expect(rows[0]!.detail).toBe('media 7 (connection lost, estimated)');
       expect(rows[0]!.usd).toBeCloseTo(imageEstimateUsd({ width: 1000, height: 750 }, P), 12);
     });
 
     it('books the scanned-PDF ceiling once', async () => {
-      const { db, extract, input } = setup({ ai: new FakeMediaAi([new Anthropic.APIConnectionTimeoutError()]), parse: { text: '', pageCount: 3 } });
+      const { db, extract, input } = await setup({ ai: new FakeMediaAi([new Anthropic.APIConnectionTimeoutError()]), parse: { text: '', pageCount: 3 } });
       await expect(extract(input({ kind: 'document', mimeType: 'application/pdf', bytes: PDF }))).rejects.toBeInstanceOf(Anthropic.APIConnectionTimeoutError);
-      const rows = spendRows(db);
+      const rows = await spendRows(db);
       expect(rows).toHaveLength(1);
       expect(rows[0]!.detail).toBe('media 7 (connection lost, estimated)');
       expect(rows[0]!.usd).toBeCloseTo(scannedPdfCeilingUsd(P), 12);
@@ -507,8 +516,11 @@ describe('voice and audio', () => {
   const OGG = 'audio/ogg; codecs=opus';
   /** 90,000 bytes: a size bound of 60 seconds. */
   const note = (i: Partial<ExtractInput> = {}): Partial<ExtractInput> => ({ kind: 'voice', mimeType: OGG, bytes: Buffer.alloc(90_000), ...i });
-  const voiceSetup = (v: VoiceTranscriber | null = new FakeVoiceTranscriber(), o: { capUsd?: number; maxVoiceSeconds?: number; signal?: AbortSignal } = {}) => setup({ voice: v, ...o });
-  const sttRows = (db: Db) => db.prepare('SELECT kind, usd, detail FROM spend').all() as { kind: string; usd: number; detail: string }[];
+  const voiceSetup = async (v: VoiceTranscriber | null = new FakeVoiceTranscriber(), o: { capUsd?: number; maxVoiceSeconds?: number; signal?: AbortSignal } = {}) => await setup({ voice: v, ...o });
+  const sttRows = async (db: Db) => {
+    await guards.get(db)?.flushed();
+    return db.all<{ kind: string; usd: number; detail: string }>('SELECT kind, usd, detail FROM spend');
+  };
   const caught = async (run: Promise<unknown>): Promise<unknown> => run.then(() => null, (e: unknown) => e);
   /** A folder of its own for the real transcriber's conversions, removed after each test. */
   const dirs: string[] = [];
@@ -522,16 +534,16 @@ describe('voice and audio', () => {
   });
 
   it('keeps a voice note as in 2a when no transcriber is set up (STT_PROVIDER none)', async () => {
-    const { db, extract, input, reserve } = voiceSetup(null);
+    const { db, extract, input, reserve } = await voiceSetup(null);
     expect(await extract(input(note()))).toEqual(NONE);
     expect(await extract(input(note({ kind: 'audio', forwarded: true, bytes: Buffer.alloc(5_000_000) })))).toEqual(NONE);
     expect(reserve).not.toHaveBeenCalled();
-    expect(spendRows(db)).toEqual([]);
+    expect(await spendRows(db)).toEqual([]);
   });
 
   it('transcribes a voice note inside one stt hold and books its cost', async () => {
     const v = new FakeVoiceTranscriber({ results: [{ text: 'payment bhej diya, ₹42,000', billedSeconds: 41 }] });
-    const { db, extract, input, reserve } = voiceSetup(v);
+    const { db, extract, input, reserve } = await voiceSetup(v);
     expect(await extract(input(note()))).toEqual({ textKind: 'extract', text: 'payment bhej diya, ₹42,000', pageCount: null, note: null, forget: null });
     // The cap, not the size bound, goes to prepare (review override).
     expect(v.prepared).toEqual([{ mediaId: 7, path: NOTE_PATH, maxSeconds: 600 }]);
@@ -540,13 +552,13 @@ describe('voice and audio', () => {
     // Held at the measured length (45 s) plus the 5 s tolerance; the size bound (60 s) is only costUsd's last fallback.
     expect(reserve.mock.calls[0]!.slice(0, 2)).toEqual([v.ceilingUsd(45 + 5), 'stt']);
     expect(v.costCalls).toEqual([{ maxSeconds: 60, billedSeconds: 41, measuredSeconds: 45 }]);
-    expect(sttRows(db)).toEqual([{ kind: 'stt', usd: v.costUsd({ maxSeconds: 60, billedSeconds: 41, measuredSeconds: 45 }), detail: 'media 7' }]);
+    expect(await sttRows(db)).toEqual([{ kind: 'stt', usd: v.costUsd({ maxSeconds: 60, billedSeconds: 41, measuredSeconds: 45 }), detail: 'media 7' }]);
     expect(v.disposals).toBe(1);
   });
 
   it('passes the measured length on to the cost', async () => {
     const v = new FakeVoiceTranscriber({ measuredSeconds: 47 });
-    const { extract, input } = voiceSetup(v);
+    const { extract, input } = await voiceSetup(v);
     await extract(input(note()));
     expect(v.costCalls).toEqual([{ maxSeconds: 60, billedSeconds: null, measuredSeconds: 47 }]);
   });
@@ -555,11 +567,11 @@ describe('voice and audio', () => {
   it('a declared length of 0 cannot book $0: a Sarvam-like answer (no billed seconds) books the measured length', async () => {
     const provider = new HearingProvider('sarvam'); // billedSeconds null, as Sarvam
     const v = voiceTranscriber(provider, { inrPerUsd: 88, ffmpeg: new MeasuringFfmpeg(30), tmpDir: workDir() });
-    const { db, extract, input } = voiceSetup(v);
+    const { db, extract, input } = await voiceSetup(v);
     // A caller that still passed the row's declared length: it is not read.
     expect(await extract({ ...input(note()), declaredSeconds: 0 } as ExtractInput)).toMatchObject({ textKind: 'extract', text: 'namaste' });
-    expect(sttRows(db)).toEqual([{ kind: 'stt', usd: voiceCeilingUsd('sarvam', 30, 88), detail: 'media 7' }]);
-    expect(sttRows(db)[0]!.usd).toBeGreaterThan(0);
+    expect(await sttRows(db)).toEqual([{ kind: 'stt', usd: voiceCeilingUsd('sarvam', 30, 88), detail: 'media 7' }]);
+    expect((await sttRows(db))[0]!.usd).toBeGreaterThan(0);
   });
 
   it('the fake prices like the real one: billed, else measured, else the bound; never a negative, NaN or infinite length', () => {
@@ -573,14 +585,14 @@ describe('voice and audio', () => {
 
   it('never sends a forwarded voice note, before any other check (V4)', async () => {
     const v = new FakeVoiceTranscriber({ canSend: () => false });
-    const { db, extract, input, reserve } = voiceSetup(v, { capUsd: 0.000_001 });
+    const { db, extract, input, reserve } = await voiceSetup(v, { capUsd: 0.000_001 });
     expect(await extract(input(note({ forwarded: true })))).toEqual({ ...NONE, note: 'forwarded_not_transcribed' });
     // Too long as well: still listed as forwarded.
     expect(await extract(input(note({ forwarded: true, bytes: Buffer.alloc(5_000_000) })))).toEqual({ ...NONE, note: 'forwarded_not_transcribed' });
     expect(v.prepared).toEqual([]);
     expect(v.transcribed).toBe(0);
     expect(reserve).not.toHaveBeenCalled();
-    expect(spendRows(db)).toEqual([]);
+    expect(await spendRows(db)).toEqual([]);
   });
 
   // Task 5 review round 2: the file's size never refuses it. too_long comes only from prepare's measured check, and the
@@ -588,7 +600,7 @@ describe('voice and audio', () => {
   describe('too long (V2, V5)', () => {
     it('a 960 KB file measured at 60 s (a 1-minute 128 kbit/s MP3) is sent, held at ceilingUsd(65)', async () => {
       const v = new FakeVoiceTranscriber({ measuredSeconds: 60 });
-      const { db, extract, input, reserve } = voiceSetup(v);
+      const { db, extract, input, reserve } = await voiceSetup(v);
       expect(sizeBoundSeconds(960_000)).toBe(640); // above the 600 s cap: once refused by its size
       expect(await extract(input(note({ bytes: Buffer.alloc(960_000) })))).toMatchObject({ textKind: 'extract', text: 'namaste', note: null });
       expect(v.prepared).toEqual([{ mediaId: 7, path: NOTE_PATH, maxSeconds: 600 }]);
@@ -596,53 +608,53 @@ describe('voice and audio', () => {
       expect(reserve.mock.calls[0]!.slice(0, 2)).toEqual([v.ceilingUsd(65), 'stt']);
       // The bound is only costUsd's last fallback; the measured length is what is booked.
       expect(v.costCalls).toEqual([{ maxSeconds: 640, billedSeconds: null, measuredSeconds: 60 }]);
-      expect(sttRows(db)).toEqual([{ kind: 'stt', usd: v.ceilingUsd(60), detail: 'media 7' }]);
+      expect(await sttRows(db)).toEqual([{ kind: 'stt', usd: v.ceilingUsd(60), detail: 'media 7' }]);
     });
 
     it('with the real transcriber: a 960 KB file measured at 60 s is sent once, held at 65 s', async () => {
       const provider = new HearingProvider('sarvam');
       const v = voiceTranscriber(provider, { inrPerUsd: 88, ffmpeg: new MeasuringFfmpeg(60), tmpDir: workDir() });
-      const { db, extract, input, reserve } = voiceSetup(v);
+      const { db, extract, input, reserve } = await voiceSetup(v);
       expect(await extract(input(note({ bytes: Buffer.alloc(960_000) })))).toMatchObject({ textKind: 'extract', note: null });
       expect(provider.calls).toHaveLength(1);
       expect(reserve.mock.calls[0]![0]).toBe(voiceCeilingUsd('sarvam', 65, 88));
-      expect(sttRows(db)).toEqual([{ kind: 'stt', usd: voiceCeilingUsd('sarvam', 60, 88), detail: 'media 7' }]);
+      expect(await sttRows(db)).toEqual([{ kind: 'stt', usd: voiceCeilingUsd('sarvam', 60, 88), detail: 'media 7' }]);
     });
 
     it('with the real transcriber: a 1 MB file measured at 700 s with cap 600 is too_long via prepare, with no hold', async () => {
       const provider = new HearingProvider('elevenlabs');
       const ffmpeg = new MeasuringFfmpeg(700);
       const v = voiceTranscriber(provider, { inrPerUsd: 88, ffmpeg, tmpDir: workDir() });
-      const { db, extract, input, reserve } = voiceSetup(v);
+      const { db, extract, input, reserve } = await voiceSetup(v);
       expect(await extract(input(note({ bytes: Buffer.alloc(1_000_000) })))).toEqual({ ...NONE, note: 'too_long' });
       // Converted (stopped at 606 s) before it was refused: prepare's measured check, not the size.
       expect(ffmpeg.limits).toEqual([606]);
       expect(provider.calls).toHaveLength(0);
       expect(reserve).not.toHaveBeenCalled();
-      expect(spendRows(db)).toEqual([]);
+      expect(await spendRows(db)).toEqual([]);
     });
 
     it('follows the cap it is given', async () => {
       const short = new FakeVoiceTranscriber({ measuredSeconds: 35 });
-      const a = voiceSetup(short, { maxVoiceSeconds: 30 });
+      const a = await voiceSetup(short, { maxVoiceSeconds: 30 });
       expect(await a.extract(a.input(note()))).toMatchObject({ textKind: 'extract' });
       expect(short.prepared.map((p) => p.maxSeconds)).toEqual([30]);
       const long = new FakeVoiceTranscriber({ measuredSeconds: 36 });
-      const b = voiceSetup(long, { maxVoiceSeconds: 30 });
+      const b = await voiceSetup(long, { maxVoiceSeconds: 30 });
       expect(await b.extract(b.input(note()))).toEqual({ ...NONE, note: 'too_long' });
       expect(b.reserve).not.toHaveBeenCalled();
     });
 
     it('a large file that cannot be sent is format_not_supported, not too_long', async () => {
       const v = new FakeVoiceTranscriber({ canSend: () => false });
-      const { extract, input } = voiceSetup(v);
+      const { extract, input } = await voiceSetup(v);
       expect(await extract(input(note({ bytes: Buffer.alloc(5_000_000) })))).toEqual({ ...NONE, note: 'format_not_supported' });
       expect(v.prepared).toEqual([]);
     });
 
     it('never lets a declared length change the cap, the hold or the booking', async () => {
       const v = new FakeVoiceTranscriber();
-      const { extract, input, reserve } = voiceSetup(v);
+      const { extract, input, reserve } = await voiceSetup(v);
       const declaring = (seconds: number, i: Partial<ExtractInput> = {}) => ({ ...input(note(i)), declaredSeconds: seconds }) as ExtractInput;
       expect(await extract(declaring(5, { bytes: Buffer.alloc(900_001) }))).toMatchObject({ textKind: 'extract' });
       expect(await extract(declaring(5_000))).toMatchObject({ textKind: 'extract' });
@@ -656,19 +668,19 @@ describe('voice and audio', () => {
 
     it('turns a note measured too long by prepare into the note too_long, with no hold and no spend', async () => {
       const v = new FakeVoiceTranscriber({ measuredSeconds: 606 });
-      const { db, extract, input, reserve } = voiceSetup(v);
+      const { db, extract, input, reserve } = await voiceSetup(v);
       expect(await extract(input(note()))).toEqual({ ...NONE, note: 'too_long' });
       expect(v.prepared).toHaveLength(1);
       expect(v.transcribed).toBe(0);
       expect(reserve).not.toHaveBeenCalled();
-      expect(spendRows(db)).toEqual([]);
+      expect(await spendRows(db)).toEqual([]);
     });
 
     // Review override: prepare is given the cap, not the size bound, so an honest note recorded below 12 kbit/s goes.
     it('gives prepare the cap, so an honest note below 12 kbit/s is sent, held at its measured length plus the tolerance', async () => {
       const provider = new HearingProvider('sarvam');
       const v = voiceTranscriber(provider, { inrPerUsd: 88, ffmpeg: new MeasuringFfmpeg(60), tmpDir: workDir() });
-      const { extract, input, reserve } = voiceSetup(v);
+      const { extract, input, reserve } = await voiceSetup(v);
       // 60,000 bytes: a bound of 40 seconds, measured at 60 (8 kbit/s).
       expect(await extract(input(note({ bytes: Buffer.alloc(60_000) })))).toMatchObject({ textKind: 'extract', text: 'namaste', note: null });
       expect(provider.calls).toHaveLength(1);
@@ -678,26 +690,26 @@ describe('voice and audio', () => {
     it('with the real transcriber: measured 700 s, bound 600, cap 900 is sent, held at 705 s and booked at 700 s', async () => {
       const provider = new HearingProvider('elevenlabs');
       const v = voiceTranscriber(provider, { inrPerUsd: 88, ffmpeg: new MeasuringFfmpeg(700), tmpDir: workDir() });
-      const { db, extract, input, reserve } = voiceSetup(v, { maxVoiceSeconds: 900 });
+      const { db, extract, input, reserve } = await voiceSetup(v, { maxVoiceSeconds: 900 });
       expect(sizeBoundSeconds(900_000)).toBe(600);
       expect(await extract(input(note({ bytes: Buffer.alloc(900_000) })))).toMatchObject({ textKind: 'extract', note: null });
       expect(provider.calls).toHaveLength(1);
       expect(reserve).toHaveBeenCalledTimes(1);
       expect(reserve.mock.calls[0]!.slice(0, 2)).toEqual([v.ceilingUsd(705), 'stt']);
       // Settled at the measured length: the fake provider reports no billed seconds.
-      expect(sttRows(db)).toEqual([{ kind: 'stt', usd: v.ceilingUsd(700), detail: 'media 7' }]);
+      expect(await sttRows(db)).toEqual([{ kind: 'stt', usd: v.ceilingUsd(700), detail: 'media 7' }]);
     });
 
     it('with the real transcriber: measured 906 s with cap 900 is too_long, with no provider call', async () => {
       const provider = new HearingProvider('elevenlabs');
       const v = voiceTranscriber(provider, { inrPerUsd: 88, ffmpeg: new MeasuringFfmpeg(906), tmpDir: workDir() });
-      const { db, extract, input, reserve } = voiceSetup(v, { maxVoiceSeconds: 900 });
+      const { db, extract, input, reserve } = await voiceSetup(v, { maxVoiceSeconds: 900 });
       expect(await extract(input(note({ bytes: Buffer.alloc(900_000) })))).toEqual({ ...NONE, note: 'too_long' });
       expect(provider.calls).toHaveLength(0);
       expect(reserve).not.toHaveBeenCalled();
-      expect(spendRows(db)).toEqual([]);
+      expect(await spendRows(db)).toEqual([]);
       // 905 s is inside the tolerance.
-      const ok = voiceSetup(voiceTranscriber(provider, { inrPerUsd: 88, ffmpeg: new MeasuringFfmpeg(905), tmpDir: workDir() }), { maxVoiceSeconds: 900 });
+      const ok = await voiceSetup(voiceTranscriber(provider, { inrPerUsd: 88, ffmpeg: new MeasuringFfmpeg(905), tmpDir: workDir() }), { maxVoiceSeconds: 900 });
       expect(await ok.extract(ok.input(note({ bytes: Buffer.alloc(900_000) })))).toMatchObject({ textKind: 'extract' });
       expect(provider.calls).toHaveLength(1);
     });
@@ -705,31 +717,31 @@ describe('voice and audio', () => {
 
   it('lists a file the transcriber cannot send as format_not_supported, without preparing it (N2)', async () => {
     const v = new FakeVoiceTranscriber({ canSend: (m) => m !== 'audio/aac' });
-    const { db, extract, input, reserve } = voiceSetup(v);
+    const { db, extract, input, reserve } = await voiceSetup(v);
     expect(await extract(input(note({ kind: 'audio', mimeType: 'audio/aac' })))).toEqual({ ...NONE, note: 'format_not_supported' });
     expect(v.prepared).toEqual([]);
     expect(reserve).not.toHaveBeenCalled();
-    expect(spendRows(db)).toEqual([]);
+    expect(await spendRows(db)).toEqual([]);
   });
 
   // Task 5 review round 1: every file is converted first, so without ffmpeg nothing is sent, not even a WhatsApp note.
   it('with the real transcriber and no ffmpeg, every voice note and audio file is format_not_supported, with no hold', async () => {
     const provider = new HearingProvider('elevenlabs');
     const v = voiceTranscriber(provider, { inrPerUsd: 88, ffmpeg: null, tmpDir: workDir() });
-    const { db, extract, input, reserve } = voiceSetup(v);
+    const { db, extract, input, reserve } = await voiceSetup(v);
     for (const i of [note(), note({ kind: 'audio', mimeType: 'audio/mpeg' }), note({ kind: 'audio', mimeType: 'audio/mp4' })]) {
       expect(await extract(input(i))).toEqual({ ...NONE, note: 'format_not_supported' });
     }
     expect(provider.calls).toEqual([]);
     expect(reserve).not.toHaveBeenCalled();
-    expect(spendRows(db)).toEqual([]);
+    expect(await spendRows(db)).toEqual([]);
   });
 
   it('with the real transcriber and ffmpeg, a WhatsApp voice note is converted, stopped past the cap, and sent as mp3', async () => {
     const provider = new HearingProvider('sarvam');
     const ffmpeg = new MeasuringFfmpeg(42);
     const v = voiceTranscriber(provider, { inrPerUsd: 88, ffmpeg, tmpDir: workDir() });
-    const { extract, input } = voiceSetup(v);
+    const { extract, input } = await voiceSetup(v);
     expect(await extract(input(note()))).toMatchObject({ textKind: 'extract', text: 'namaste' });
     expect(ffmpeg.limits).toEqual([600 + 5 + 1]);
     expect(provider.calls.map((c) => [c.format, c.seconds])).toEqual([['mp3', 42]]);
@@ -744,7 +756,7 @@ describe('voice and audio', () => {
     it('transcribes with no hold, no pricing and no spend row, passes the signal, carries no forget, and disposes', async () => {
       const v = new FakeLocalVoiceTranscriber({ results: [{ text: 'payment bhej diya' }] });
       const ac = new AbortController();
-      const { db, spend, extract, input, reserve } = voiceSetup(v, { signal: ac.signal });
+      const { db, spend, extract, input, reserve } = await voiceSetup(v, { signal: ac.signal });
       const canSpend = vi.spyOn(spend, 'canSpend');
       const x = await extract(input(note()));
       expect(x).toEqual({ ...TRANSCRIPT, text: 'payment bhej diya' });
@@ -756,13 +768,13 @@ describe('voice and audio', () => {
       expect(v.priced).toBe(0);
       expect(reserve).not.toHaveBeenCalled();
       expect(canSpend).not.toHaveBeenCalled();
-      expect(spendRows(db)).toEqual([]);
+      expect(await spendRows(db)).toEqual([]);
       expect(v.disposals).toBe(1);
     });
 
     it('without a signal set up, prepare and transcribe are given none', async () => {
       const v = new FakeLocalVoiceTranscriber();
-      const { extract, input } = voiceSetup(v);
+      const { extract, input } = await voiceSetup(v);
       await extract(input(note()));
       expect(v.signals).toEqual([undefined]);
       expect(v.prepared).toEqual([{ mediaId: 7, path: NOTE_PATH, maxSeconds: 600 }]);
@@ -770,7 +782,7 @@ describe('voice and audio', () => {
 
     it('a paid prepare is never given the signal (a paid note is never stopped)', async () => {
       const v = new FakeVoiceTranscriber();
-      const { extract, input } = voiceSetup(v, { signal: new AbortController().signal });
+      const { extract, input } = await voiceSetup(v, { signal: new AbortController().signal });
       await extract(input(note()));
       expect(v.prepared).toEqual([{ mediaId: 7, path: NOTE_PATH, maxSeconds: 600 }]);
     });
@@ -780,25 +792,25 @@ describe('voice and audio', () => {
       const aborted = new LocalEngineError('aborted');
       const v = new FakeLocalVoiceTranscriber({ prepareError: aborted });
       const ac = new AbortController();
-      const { extract, input, db } = voiceSetup(v, { signal: ac.signal });
+      const { extract, input, db } = await voiceSetup(v, { signal: ac.signal });
       await expect(extract(input(note()))).rejects.toBe(aborted);
       expect(v.transcribed).toBe(0);
-      expect(spendRows(db)).toEqual([]);
+      expect(await spendRows(db)).toEqual([]);
     });
 
     it('is never too costly, and never waits for the spend cap: a tiny cap, or a cap used up', async () => {
-      const tiny = voiceSetup(new FakeLocalVoiceTranscriber(), { capUsd: 0.000_001 });
+      const tiny = await voiceSetup(new FakeLocalVoiceTranscriber(), { capUsd: 0.000_001 });
       expect(await tiny.extract(tiny.input(note()))).toEqual(TRANSCRIPT);
-      const used = voiceSetup(new FakeLocalVoiceTranscriber(), { capUsd: 1 });
+      const used = await voiceSetup(new FakeLocalVoiceTranscriber(), { capUsd: 1 });
       used.spend.record('ai', 1, 'earlier calls');
       expect(used.spend.canSpend(0.01)).toBe(false);
       expect(await used.extract(used.input(note()))).toEqual(TRANSCRIPT);
-      expect(spendRows(used.db)).toEqual([{ usd: 1, detail: 'earlier calls' }]);
+      expect(await spendRows(used.db)).toEqual([{ usd: 1, detail: 'earlier calls' }]);
     });
 
     it('never transcribes a forwarded voice note (V4), before preparing it', async () => {
       const v = new FakeLocalVoiceTranscriber();
-      const { extract, input } = voiceSetup(v);
+      const { extract, input } = await voiceSetup(v);
       expect(await extract(input(note({ forwarded: true })))).toEqual({ ...NONE, note: 'forwarded_not_transcribed' });
       expect(v.prepared).toEqual([]);
       expect(v.transcribed).toBe(0);
@@ -806,22 +818,22 @@ describe('voice and audio', () => {
 
     it('a file it cannot send (no ffmpeg) is format_not_supported, without preparing it', async () => {
       const v = new FakeLocalVoiceTranscriber({ canSend: () => false });
-      const { extract, input } = voiceSetup(v);
+      const { extract, input } = await voiceSetup(v);
       expect(await extract(input(note()))).toEqual({ ...NONE, note: 'format_not_supported' });
       expect(v.prepared).toEqual([]);
     });
 
     it('a note measured too long is too_long, and the engine never runs', async () => {
       const v = new FakeLocalVoiceTranscriber({ measuredSeconds: 700 });
-      const { extract, input } = voiceSetup(v, { maxVoiceSeconds: 600 });
+      const { extract, input } = await voiceSetup(v, { maxVoiceSeconds: 600 });
       expect(await extract(input(note()))).toEqual({ ...NONE, note: 'too_long' });
       expect(v.transcribed).toBe(0);
     });
 
     it('a note deleted for everyone before the run is revoked, not transcribed, and disposed', async () => {
       const v = new FakeLocalVoiceTranscriber();
-      const { extract, input } = voiceSetup(v);
-      const revoked = vi.fn(() => true);
+      const { extract, input } = await voiceSetup(v);
+      const revoked = vi.fn(async () => true);
       expect(await extract(input(note({ revoked })))).toEqual({ ...NONE, note: 'revoked' });
       expect(revoked).toHaveBeenCalledTimes(1);
       expect(v.transcribed).toBe(0);
@@ -830,7 +842,7 @@ describe('voice and audio', () => {
 
     it('an empty transcript is no_speech, with no forget', async () => {
       const v = new FakeLocalVoiceTranscriber({ results: [{ text: '' }] });
-      const { extract, input } = voiceSetup(v);
+      const { extract, input } = await voiceSetup(v);
       const x = await extract(input(note()));
       expect(x).toEqual({ ...NONE, note: 'no_speech' });
       expect(Object.keys(x)).not.toContain('forget');
@@ -841,13 +853,13 @@ describe('voice and audio', () => {
       async (code) => {
         const err = new LocalEngineError(code);
         const v = new FakeLocalVoiceTranscriber({ results: [err] });
-        const { db, extract, input, reserve } = voiceSetup(v);
+        const { db, extract, input, reserve } = await voiceSetup(v);
         const e = await caught(extract(input(note())));
         expect(e).toBe(err);
         expect(isPaidVoiceError(e)).toBe(false);
         expect(voiceCopyOf(e)).toBeNull();
         expect(reserve).not.toHaveBeenCalled();
-        expect(spendRows(db)).toEqual([]);
+        expect(await spendRows(db)).toEqual([]);
         expect(v.disposals).toBe(1);
       },
     );
@@ -855,17 +867,17 @@ describe('voice and audio', () => {
     it('a prepare failure reaches the caller, with nothing run or booked', async () => {
       const err = new AudioError('convert_failed');
       const v = new FakeLocalVoiceTranscriber({ prepareError: err });
-      const { db, extract, input } = voiceSetup(v);
+      const { db, extract, input } = await voiceSetup(v);
       expect(await caught(extract(input(note())))).toBe(err);
       expect(v.transcribed).toBe(0);
-      expect(spendRows(db)).toEqual([]);
+      expect(await spendRows(db)).toEqual([]);
     });
 
     it('follows the same rules for kind audio', async () => {
       const v = new FakeLocalVoiceTranscriber({ results: [{ text: 'audio file' }] });
-      const { db, extract, input } = voiceSetup(v);
+      const { db, extract, input } = await voiceSetup(v);
       expect(await extract(input(note({ kind: 'audio', mimeType: 'audio/mpeg' })))).toEqual({ ...TRANSCRIPT, text: 'audio file' });
-      expect(spendRows(db)).toEqual([]);
+      expect(await spendRows(db)).toEqual([]);
     });
 
     describe('with the real local transcriber, over the real LocalEngine with a fake runner and a fake ffmpeg', () => {
@@ -886,23 +898,23 @@ describe('voice and audio', () => {
 
       it('converts to WAV stopped past the cap, runs the engine once on it, stores the text, and books nothing', async () => {
         const { v, runs, ffmpeg, tmp } = realLocal('Site visit kal\n');
-        const { db, extract, input, reserve } = voiceSetup(v);
+        const { db, extract, input, reserve } = await voiceSetup(v);
         expect(await extract(input(note()))).toEqual({ ...TRANSCRIPT, text: 'Site visit kal' });
         expect(ffmpeg.formats).toEqual(['wav']);
         expect(ffmpeg.limits).toEqual([600 + 5 + 1]);
         expect(runs).toHaveLength(1);
         expect(runs[0]!.at(-1)).toBe(join(tmp, 'voice', 'voice-7', 'audio.wav'));
         expect(reserve).not.toHaveBeenCalled();
-        expect(spendRows(db)).toEqual([]);
+        expect(await spendRows(db)).toEqual([]);
         expect(existsSync(join(tmp, 'voice', 'voice-7'))).toBe(false);
       });
 
       it('an empty transcript of sound is LocalEngineError empty_output, thrown to the processor; of silence, no_speech', async () => {
         const loud = realLocal('');
-        const a = voiceSetup(loud.v);
+        const a = await voiceSetup(loud.v);
         expect(await caught(a.extract(a.input(note())))).toMatchObject({ name: 'LocalEngineError', code: 'empty_output' });
         const quiet = realLocal('\n', new MeasuringFfmpeg(42, -75));
-        const b = voiceSetup(quiet.v);
+        const b = await voiceSetup(quiet.v);
         expect(await b.extract(b.input(note()))).toEqual({ ...NONE, note: 'no_speech' });
       });
 
@@ -910,7 +922,7 @@ describe('voice and audio', () => {
         const tmp = workDir();
         const run: LocalRunFile = async () => ({ code: 2, stderr: 'said something' });
         const v = createVoiceTranscriber(localEnv(tmp), { ffmpeg: new MeasuringFfmpeg(42), tmpDir: join(tmp, 'voice'), localRun: run })!;
-        const { extract, input } = voiceSetup(v);
+        const { extract, input } = await voiceSetup(v);
         const e = await caught(extract(input(note())));
         expect(e).toMatchObject({ name: 'LocalEngineError', code: 'exit_2' });
         expect((e as Error).message).not.toContain('said something');
@@ -918,7 +930,7 @@ describe('voice and audio', () => {
 
       it('a note measured too long is too_long, and the engine never runs', async () => {
         const { v, runs } = realLocal('never', new MeasuringFfmpeg(2000));
-        const { extract, input } = voiceSetup(v);
+        const { extract, input } = await voiceSetup(v);
         expect(await extract(input(note()))).toEqual({ ...NONE, note: 'too_long' });
         expect(runs).toEqual([]);
       });
@@ -932,45 +944,45 @@ describe('voice and audio', () => {
       ['a file that cannot be read', Object.assign(new Error('ENOENT: no such file'), { code: 'ENOENT' })],
     ])('%s reaches the caller with no hold and no spend row', async (_name, error) => {
       const v = new FakeVoiceTranscriber({ prepareError: error });
-      const { db, extract, input, reserve } = voiceSetup(v);
+      const { db, extract, input, reserve } = await voiceSetup(v);
       expect(await caught(extract(input(note())))).toBe(error);
       expect(v.transcribed).toBe(0);
       expect(reserve).not.toHaveBeenCalled();
-      expect(spendRows(db)).toEqual([]);
+      expect(await spendRows(db)).toEqual([]);
       expect(v.disposals).toBe(0); // nothing was prepared
     });
   });
 
   it('lists a note whose ceiling is above the whole daily cap as too costly, and disposes it', async () => {
     const v = new FakeVoiceTranscriber();
-    const { db, extract, input, reserve } = voiceSetup(v, { capUsd: 0.004 });
+    const { db, extract, input, reserve } = await voiceSetup(v, { capUsd: 0.004 });
     expect(v.ceilingUsd(50)).toBeGreaterThan(0.004);
     expect(await extract(input(note()))).toEqual({ ...NONE, note: 'too_costly' });
     expect(v.transcribed).toBe(0);
     expect(reserve).not.toHaveBeenCalled();
-    expect(spendRows(db)).toEqual([]);
+    expect(await spendRows(db)).toEqual([]);
     expect(v.disposals).toBe(1);
   });
 
   it('still sends a note whose ceiling is exactly the whole daily cap', async () => {
     const v = new FakeVoiceTranscriber();
-    const { db, extract, input, reserve } = voiceSetup(v, { capUsd: new FakeVoiceTranscriber().ceilingUsd(50) });
+    const { db, extract, input, reserve } = await voiceSetup(v, { capUsd: new FakeVoiceTranscriber().ceilingUsd(50) });
     expect(await extract(input(note()))).toMatchObject({ textKind: 'extract', note: null });
     expect(v.transcribed).toBe(1);
     expect(reserve).toHaveBeenCalledTimes(1);
-    expect(sttRows(db)).toHaveLength(1);
+    expect(await sttRows(db)).toHaveLength(1);
   });
 
   it('does not send a note deleted for everyone just before the call, and disposes it', async () => {
     const v = new FakeVoiceTranscriber();
-    const { db, extract, input, reserve } = voiceSetup(v);
-    const revoked = vi.fn(() => true);
+    const { db, extract, input, reserve } = await voiceSetup(v);
+    const revoked = vi.fn(async () => true);
     expect(await extract(input(note({ revoked })))).toEqual({ ...NONE, note: 'revoked' });
     expect(v.prepared).toHaveLength(1);
     expect(revoked).toHaveBeenCalledTimes(1);
     expect(v.transcribed).toBe(0);
     expect(reserve).not.toHaveBeenCalled();
-    expect(spendRows(db)).toEqual([]);
+    expect(await spendRows(db)).toEqual([]);
     expect(v.disposals).toBe(1);
   });
 
@@ -979,7 +991,7 @@ describe('voice and audio', () => {
     expect(VOICE_LENGTH_TOLERANCE_S).toBe(5);
     for (const [measured, bytes] of [[20, 90_000], [603, 90_000], [60, 960_000], [600, 60_000]] as const) {
       const v = new FakeVoiceTranscriber({ measuredSeconds: measured });
-      const s = voiceSetup(v);
+      const s = await voiceSetup(v);
       expect(await s.extract(s.input(note({ bytes: Buffer.alloc(bytes) })))).toMatchObject({ textKind: 'extract' });
       expect(s.reserve.mock.calls.map((c) => c[0])).toEqual([v.ceilingUsd(measured + VOICE_LENGTH_TOLERANCE_S)]);
     }
@@ -987,20 +999,20 @@ describe('voice and audio', () => {
 
   it('notes the provider copy to delete (N1)', async () => {
     const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [{ forgetRef: 'tr_1' }] });
-    const { extract, input } = voiceSetup(v);
+    const { extract, input } = await voiceSetup(v);
     expect(await extract(input(note()))).toEqual({ textKind: 'extract', text: 'namaste', pageCount: null, note: null, forget: { provider: 'elevenlabs', ref: 'tr_1' } });
   });
 
   it("names the copy's provider from the result, not from the transcriber", async () => {
     const v = new FakeVoiceTranscriber({ provider: 'sarvam', results: [{ provider: 'elevenlabs', forgetRef: 'tr_1' }] });
-    const { extract, input } = voiceSetup(v);
+    const { extract, input } = await voiceSetup(v);
     expect((await extract(input(note()))).forget).toEqual({ provider: 'elevenlabs', ref: 'tr_1' });
   });
 
   // Review round 1, fix 6: the guard kept on the paid path. media_stt_forget takes paid providers only.
   it("never makes a forget from a paid call's result that names 'local', for a transcript or no speech", async () => {
     const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [{ provider: 'local', forgetRef: 'tr_1' }, { provider: 'local', text: '', forgetRef: 'tr_2' }] });
-    const { extract, input } = voiceSetup(v);
+    const { extract, input } = await voiceSetup(v);
     expect(await extract(input(note()))).toEqual({ textKind: 'extract', text: 'namaste', pageCount: null, note: null, forget: null });
     expect((await extract(input(note()))).forget).toBeNull();
     expect(v.transcribed).toBe(2);
@@ -1011,7 +1023,7 @@ describe('voice and audio', () => {
     const TRANSCRIPT = 'payment bhej diya, ₹42,000';
     const answered = (o: { forgetError?: Error } = {}) =>
       new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [{ text: TRANSCRIPT, billedSeconds: 12, forgetRef: 'tr_1' }], ...o });
-    const lateRows = (db: Db) => sttRows(db).filter((r) => r.detail === 'media 7 (booked late)');
+    const lateRows = async (db: Db) => (await sttRows(db)).filter((r) => r.detail === 'media 7 (booked late)');
 
     it.each([
       // As the real settle does when its write throws: the hold is freed first.
@@ -1024,7 +1036,7 @@ describe('voice and audio', () => {
       })],
     ] as const)("%s throwing once: one call, booked late, the copy deleted, and the error marked paid", async (_name, breakIt) => {
       const v = answered();
-      const { db, spend, extract, input } = voiceSetup(v);
+      const { db, spend, extract, input } = await voiceSetup(v);
       breakIt(spend);
       const record = vi.spyOn(spend, 'record');
       const err = await caught(extract(input(note())));
@@ -1032,8 +1044,8 @@ describe('voice and audio', () => {
       expect((err as Error).message).toBe('database is locked');
       expect(v.transcribed).toBe(1);
       expect(record).toHaveBeenCalledWith('stt', v.costUsd({ maxSeconds: 60, billedSeconds: 12, measuredSeconds: 45 }), 'media 7 (booked late)');
-      expect(lateRows(db)).toEqual([{ kind: 'stt', usd: 12 * 0.0001, detail: 'media 7 (booked late)' }]);
-      expect(sttRows(db)).toHaveLength(1);
+      expect(await lateRows(db)).toEqual([{ kind: 'stt', usd: 12 * 0.0001, detail: 'media 7 (booked late)' }]);
+      expect(await sttRows(db)).toHaveLength(1);
       expect(v.forgotten).toEqual(['tr_1']);
       expect(isPaidVoiceError(err)).toBe(true);
       // Nothing the sender said, and no provider id, is in the error.
@@ -1046,7 +1058,7 @@ describe('voice and audio', () => {
 
     it('a late booking and a forget that fail too still throw the first error, marked paid', async () => {
       const v = answered({ forgetError: new Error('forget failed') });
-      const { db, spend, extract, input } = voiceSetup(v);
+      const { db, spend, extract, input } = await voiceSetup(v);
       vi.spyOn(spend, 'record').mockImplementation(() => {
         throw new Error('disk full');
       });
@@ -1055,12 +1067,12 @@ describe('voice and audio', () => {
       expect(isPaidVoiceError(err)).toBe(true);
       expect(v.transcribed).toBe(1);
       expect(v.forgotten).toEqual(['tr_1']);
-      expect(sttRows(db)).toEqual([]);
+      expect(await sttRows(db)).toEqual([]);
     });
 
     it('pricing that throws after the answer: withSttHold books the ceiling once, nothing late, the copy deleted, marked paid', async () => {
       const v = answered();
-      const { db, extract, input } = voiceSetup(v);
+      const { db, extract, input } = await voiceSetup(v);
       const pricing = new Error('pricing failed');
       vi.spyOn(v, 'costUsd').mockImplementationOnce(() => {
         throw pricing;
@@ -1068,13 +1080,13 @@ describe('voice and audio', () => {
       const err = await caught(extract(input(note())));
       expect(err).toBe(pricing);
       expect(isPaidVoiceError(err)).toBe(true);
-      expect(sttRows(db)).toEqual([{ kind: 'stt', usd: v.ceilingUsd(50), detail: 'media 7 (unknown, estimated)' }]);
+      expect(await sttRows(db)).toEqual([{ kind: 'stt', usd: v.ceilingUsd(50), detail: 'media 7 (unknown, estimated)' }]);
       expect(v.forgotten).toEqual(['tr_1']);
     });
 
     it('pricing and the ceiling booking both failing: the ceiling is booked late', async () => {
       const v = answered();
-      const { db, spend, extract, input } = voiceSetup(v);
+      const { db, spend, extract, input } = await voiceSetup(v);
       vi.spyOn(v, 'costUsd').mockImplementationOnce(() => {
         throw new Error('pricing failed');
       });
@@ -1084,12 +1096,12 @@ describe('voice and audio', () => {
       const err = await caught(extract(input(note())));
       expect(err).toBeInstanceOf(SttBookingError);
       expect(isPaidVoiceError(err)).toBe(true);
-      expect(sttRows(db)).toEqual([{ kind: 'stt', usd: v.ceilingUsd(50), detail: 'media 7 (booked late)' }]);
+      expect(await sttRows(db)).toEqual([{ kind: 'stt', usd: v.ceilingUsd(50), detail: 'media 7 (booked late)' }]);
     });
 
     it('with no copy to delete, nothing is forgotten', async () => {
       const v = new FakeVoiceTranscriber({ results: [{ billedSeconds: 12 }] });
-      const { spend, extract, input } = voiceSetup(v);
+      const { spend, extract, input } = await voiceSetup(v);
       vi.spyOn(spend, 'settle').mockImplementationOnce(() => {
         throw new Error('database is locked');
       });
@@ -1100,14 +1112,14 @@ describe('voice and audio', () => {
     it('a call that failed is not a paid voice error: withSttHold books it, and the processor decides', async () => {
       for (const error of [new SttHttpError(401, 'invalid_api_key'), new SttNoAnswerError('timeout')]) {
         const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [error] });
-        const { extract, input } = voiceSetup(v);
+        const { extract, input } = await voiceSetup(v);
         const err = await caught(extract(input(note())));
         expect(err).toBe(error);
         expect(isPaidVoiceError(err)).toBe(false);
         expect(v.forgotten).toEqual([]);
       }
       // Neither is a refused prepare, the spend cap, or anything that is not an error object.
-      const capped = voiceSetup(new FakeVoiceTranscriber({ usdPerSecond: 1 }), { capUsd: 100 });
+      const capped = await voiceSetup(new FakeVoiceTranscriber({ usdPerSecond: 1 }), { capUsd: 100 });
       capped.spend.record('ai', 99, 'batch 1');
       expect(isPaidVoiceError(await caught(capped.extract(capped.input(note()))))).toBe(false);
       for (const x of [null, undefined, 'x', 3, new Error('other')]) expect(isPaidVoiceError(x)).toBe(false);
@@ -1116,21 +1128,21 @@ describe('voice and audio', () => {
 
   it('lists a note with no speech as no_speech, still booking its cost and noting its copy', async () => {
     const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [{ text: '', billedSeconds: 12, forgetRef: 'tr_2' }] });
-    const { db, extract, input } = voiceSetup(v);
+    const { db, extract, input } = await voiceSetup(v);
     expect(await extract(input(note()))).toEqual({ ...NONE, note: 'no_speech', forget: { provider: 'elevenlabs', ref: 'tr_2' } });
-    expect(sttRows(db)).toEqual([{ kind: 'stt', usd: 12 * 0.0001, detail: 'media 7' }]);
+    expect(await sttRows(db)).toEqual([{ kind: 'stt', usd: 12 * 0.0001, detail: 'media 7' }]);
     expect(v.disposals).toBe(1);
   });
 
   it('cuts a long transcript at maxStoredTextChars', async () => {
     const v = new FakeVoiceTranscriber({ results: [{ text: 'a'.repeat(MEDIA_LIMITS.maxStoredTextChars + 10) }] });
-    const { extract, input } = voiceSetup(v);
+    const { extract, input } = await voiceSetup(v);
     expect((await extract(input(note()))).text).toHaveLength(MEDIA_LIMITS.maxStoredTextChars);
   });
 
   it('defers on the spend cap without a call, busy when only holds are in the way', async () => {
     const v = new FakeVoiceTranscriber({ usdPerSecond: 0.01 }); // $0.50: measured 45 s plus the 5 s tolerance
-    const { db, spend, extract, input } = voiceSetup(v, { capUsd: 1 });
+    const { db, spend, extract, input } = await voiceSetup(v, { capUsd: 1 });
     spend.record('ai', 0.2, 'batch 1');
     const hold = spend.reserve(0.5)!;
     let e = await caught(extract(input(note())));
@@ -1142,7 +1154,7 @@ describe('voice and audio', () => {
     expect((e as SpendCapReachedError).busy).toBe(false);
     expect(v.transcribed).toBe(0);
     expect(v.disposals).toBe(2);
-    expect(sttRows(db).filter((r) => r.kind === 'stt')).toEqual([]);
+    expect((await sttRows(db)).filter((r) => r.kind === 'stt')).toEqual([]);
   });
 
   // withSttHold with no hooks: each failure is booked by its outcome (Phase 3's fix of paidStt.ts).
@@ -1150,9 +1162,9 @@ describe('voice and audio', () => {
     it('frees the hold on an SttHttpError(401) and throws it', async () => {
       const error = new SttHttpError(401, 'invalid_api_key');
       const v = new FakeVoiceTranscriber({ results: [error] });
-      const { db, spend, extract, input } = voiceSetup(v);
+      const { db, spend, extract, input } = await voiceSetup(v);
       expect(await caught(extract(input(note())))).toBe(error);
-      expect(spendRows(db)).toEqual([]);
+      expect(await spendRows(db)).toEqual([]);
       expect(spend.canSpend(15)).toBe(true); // the hold is gone
       expect(v.disposals).toBe(1);
     });
@@ -1163,9 +1175,9 @@ describe('voice and audio', () => {
       ['a later part failing', new SttPartialError(1, 2, new SttHttpError(503)), 'media 7 (unknown, estimated)'],
     ])('books the ceiling as stt on %s and throws it', async (_name, error, detail) => {
       const v = new FakeVoiceTranscriber({ results: [error] });
-      const { db, extract, input } = voiceSetup(v);
+      const { db, extract, input } = await voiceSetup(v);
       expect(await caught(extract(input(note())))).toBe(error);
-      expect(sttRows(db)).toEqual([{ kind: 'stt', usd: v.ceilingUsd(50), detail }]);
+      expect(await sttRows(db)).toEqual([{ kind: 'stt', usd: v.ceilingUsd(50), detail }]);
       expect(v.disposals).toBe(1);
     });
   });
@@ -1188,19 +1200,19 @@ describe('voice and audio', () => {
       ['an unknown error', () => new Error('socket hang up')],
     ])('%s: the ceiling is booked late, once, and the error is marked paid', async (_name, error) => {
       const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [error()] });
-      const { db, spend, extract, input } = voiceSetup(v);
+      const { db, spend, extract, input } = await voiceSetup(v);
       breakSettle(spend);
       const err = await caught(extract(input(note())));
       expect(err).toBeInstanceOf(SttBookingError);
       expect(isPaidVoiceError(err)).toBe(true);
-      expect(sttRows(db)).toEqual([{ kind: 'stt', usd: v.ceilingUsd(50), detail: lateDetail }]);
+      expect(await sttRows(db)).toEqual([{ kind: 'stt', usd: v.ceilingUsd(50), detail: lateDetail }]);
       expect(v.transcribed).toBe(1);
       expect(v.disposals).toBe(1);
     });
 
     it('a late booking that fails too still throws the booking error, marked paid', async () => {
       const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [new SttNoAnswerError('timeout')] });
-      const { db, spend, extract, input } = voiceSetup(v);
+      const { db, spend, extract, input } = await voiceSetup(v);
       breakSettle(spend);
       vi.spyOn(spend, 'record').mockImplementation(() => {
         throw new Error('disk full');
@@ -1208,12 +1220,12 @@ describe('voice and audio', () => {
       const err = await caught(extract(input(note())));
       expect(err).toBeInstanceOf(SttBookingError);
       expect(isPaidVoiceError(err)).toBe(true);
-      expect(sttRows(db)).toEqual([]);
+      expect(await sttRows(db)).toEqual([]);
     });
 
     it('a refused key (SttHttpError 401) was never billed: nothing is booked late and the error is not marked paid', async () => {
       const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [new SttHttpError(401)] });
-      const { db, spend, extract, input } = voiceSetup(v);
+      const { db, spend, extract, input } = await voiceSetup(v);
       // An HTTP refusal frees the hold: here that step is what fails.
       vi.spyOn(spend, 'release').mockImplementationOnce(() => {
         throw new Error('database is locked');
@@ -1222,7 +1234,7 @@ describe('voice and audio', () => {
       expect(err).toBeInstanceOf(SttBookingError);
       expect((err as Error).cause).toBeInstanceOf(SttHttpError);
       expect(isPaidVoiceError(err)).toBe(false);
-      expect(sttRows(db)).toEqual([]);
+      expect(await sttRows(db)).toEqual([]);
     });
   });
 
@@ -1236,25 +1248,25 @@ describe('voice and audio', () => {
     it("notes the copy with this transcriber's provider and throws the same error, booked at the ceiling", async () => {
       const error = unreadable('tr_9');
       const v = new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [error] });
-      const { db, extract, input } = voiceSetup(v);
+      const { db, extract, input } = await voiceSetup(v);
       const err = await caught(extract(input(note())));
       expect(err).toBe(error);
       expect(voiceCopyOf(err)).toEqual({ provider: 'elevenlabs', ref: 'tr_9' });
       expect(isPaidVoiceError(err)).toBe(false);
-      expect(sttRows(db)).toEqual([{ kind: 'stt', usd: v.ceilingUsd(50), detail: 'media 7 (unknown, estimated)' }]);
+      expect(await sttRows(db)).toEqual([{ kind: 'stt', usd: v.ceilingUsd(50), detail: 'media 7 (unknown, estimated)' }]);
       expect(v.forgotten).toEqual([]); // noted by the processor, deleted by forgetVoiceCopies
     });
 
     it('finds it as the cause of a later part failing', async () => {
       const error = new SttPartialError(1, 2, unreadable('tr_9'));
-      const { extract, input } = voiceSetup(new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [error] }));
+      const { extract, input } = await voiceSetup(new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [error] }));
       const err = await caught(extract(input(note())));
       expect(err).toBe(error);
       expect(voiceCopyOf(err)).toEqual({ provider: 'elevenlabs', ref: 'tr_9' });
     });
 
     it('finds it as the cause of a booking that could not be written (booked late and marked paid, review round 1)', async () => {
-      const { spend, extract, input } = voiceSetup(new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [unreadable('tr_9')] }));
+      const { spend, extract, input } = await voiceSetup(new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [unreadable('tr_9')] }));
       vi.spyOn(spend, 'settle').mockImplementationOnce((id) => {
         spend.release(id);
         throw new Error('database is locked');
@@ -1266,7 +1278,7 @@ describe('voice and audio', () => {
     });
 
     it('finds it two causes deep: a booking that failed after a later part failed after an unreadable answer', async () => {
-      const { spend, extract, input } = voiceSetup(new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [new SttPartialError(1, 2, unreadable('tr_9'))] }));
+      const { spend, extract, input } = await voiceSetup(new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [new SttPartialError(1, 2, unreadable('tr_9'))] }));
       vi.spyOn(spend, 'settle').mockImplementationOnce((id) => {
         spend.release(id);
         throw new Error('database is locked');
@@ -1286,13 +1298,13 @@ describe('voice and audio', () => {
       ['an HTTP error', () => new SttHttpError(500)],
       ['a failed job', () => new SttJobError('failed')],
     ])('notes nothing for %s', async (_name, error) => {
-      const { extract, input } = voiceSetup(new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [error()] }));
+      const { extract, input } = await voiceSetup(new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [error()] }));
       expect(voiceCopyOf(await caught(extract(input(note()))))).toBeNull();
     });
 
     it('a ref of 200 characters is still an id', async () => {
       const ref = 'x'.repeat(200);
-      const { extract, input } = voiceSetup(new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [unreadable(ref)] }));
+      const { extract, input } = await voiceSetup(new FakeVoiceTranscriber({ provider: 'elevenlabs', results: [unreadable(ref)] }));
       expect(voiceCopyOf(await caught(extract(input(note()))))).toEqual({ provider: 'elevenlabs', ref });
     });
 
@@ -1303,7 +1315,7 @@ describe('voice and audio', () => {
 
   it('transcribes team and founder voice notes too: the input carries no sender to filter on', async () => {
     const v = new FakeVoiceTranscriber();
-    const { extract, input } = voiceSetup(v);
+    const { extract, input } = await voiceSetup(v);
     // The same note from the client (7), a team member (8) and the founder (9).
     for (const mediaId of [7, 8, 9]) expect(await extract(input(note({ mediaId })))).toMatchObject({ textKind: 'extract', text: 'namaste' });
     expect(v.prepared.map((p) => p.mediaId)).toEqual([7, 8, 9]);
@@ -1312,18 +1324,18 @@ describe('voice and audio', () => {
 
   it('follows the same rules for kind audio', async () => {
     const v = new FakeVoiceTranscriber({ canSend: (m) => m !== 'audio/amr' });
-    const { db, extract, input } = voiceSetup(v);
+    const { db, extract, input } = await voiceSetup(v);
     const audio = (i: Partial<ExtractInput> = {}) => input(note({ kind: 'audio', mimeType: 'audio/mpeg', ...i }));
     expect(await extract(audio({ forwarded: true }))).toEqual({ ...NONE, note: 'forwarded_not_transcribed' });
     // A large file is not refused by its size; one measured too long is.
     expect(await extract(audio({ bytes: Buffer.alloc(5_000_000) }))).toMatchObject({ textKind: 'extract' });
-    const long = voiceSetup(new FakeVoiceTranscriber({ measuredSeconds: 606 }));
+    const long = await voiceSetup(new FakeVoiceTranscriber({ measuredSeconds: 606 }));
     expect(await long.extract(long.input(note({ kind: 'audio', mimeType: 'audio/mpeg' })))).toEqual({ ...NONE, note: 'too_long' });
     expect(await extract(audio({ mimeType: 'audio/amr' }))).toEqual({ ...NONE, note: 'format_not_supported' });
     expect(await extract(audio())).toEqual({ textKind: 'extract', text: 'namaste', pageCount: null, note: null, forget: null });
     // The large file and the plain one were prepared and booked; the forwarded and amr ones never were.
     expect(v.prepared).toEqual([{ mediaId: 7, path: NOTE_PATH, maxSeconds: 600 }, { mediaId: 7, path: NOTE_PATH, maxSeconds: 600 }]);
-    expect(sttRows(db)).toEqual([
+    expect(await sttRows(db)).toEqual([
       { kind: 'stt', usd: v.ceilingUsd(45), detail: 'media 7' },
       { kind: 'stt', usd: v.ceilingUsd(45), detail: 'media 7' },
     ]);
@@ -1332,7 +1344,7 @@ describe('voice and audio', () => {
 
   it('still reads nothing for video and stickers', async () => {
     const v = new FakeVoiceTranscriber();
-    const { extract, input } = voiceSetup(v);
+    const { extract, input } = await voiceSetup(v);
     expect(await extract(input(note({ kind: 'video', mimeType: 'video/mp4' })))).toEqual(NONE);
     expect(await extract(input(note({ kind: 'sticker', mimeType: 'image/webp' })))).toEqual(NONE);
     expect(v.prepared).toEqual([]);

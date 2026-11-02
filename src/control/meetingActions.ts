@@ -1,7 +1,7 @@
 import { CorrectionError } from '../cli/corrections.ts';
 import { assignMeetingToClient, retryMeetingById, skipMeetingById } from '../cli/meetings.ts';
 import type { SpendGuard } from '../spend/spendGuard.ts';
-import { tx, type Db } from '../store/db.ts';
+import type { Db, Sql } from '../store/db.ts';
 import { getMeetingState } from '../store/meetings.ts';
 import { ControlError, type Audit } from './errors.ts';
 import { meetingDetail, parseMeetingId, type AccountOf, type DashboardMeetingDetail } from './meetingQueries.ts';
@@ -47,46 +47,40 @@ function fromCorrection(e: CorrectionError): ControlError {
  * refused while today's spend cap is reached. Throws ControlError: 400 an unknown action, 404 no such meeting, 409 the
  * meeting's status does not allow it or the cap is reached, 422 a bad client.
  */
-export function runMeetingAction(
+export async function runMeetingAction(
   db: Db,
   req: { id: string; action: string; body?: unknown },
   ctx: { actor: string; now: Date; audit: Audit; spend: Pick<SpendGuard, 'isPaused'>; accountOf?: AccountOf },
-): MeetingActionResult {
+): Promise<MeetingActionResult> {
   if (!(MEETING_ACTIONS as readonly string[]).includes(req.action)) {
     throw new ControlError(400, `action must be one of: ${MEETING_ACTIONS.join(', ')}`, 'action');
   }
   const action = req.action as MeetingAction;
   const id = parseMeetingId(req.id);
   if (id === undefined) throw new ControlError(404, 'No meeting with that id');
-  if (!getMeetingState(db, id)) throw new ControlError(404, `No meeting ${id}`);
+  if (!(await getMeetingState(db, id))) throw new ControlError(404, `No meeting ${id}`);
   const code = action === 'assign' ? clientCode(req.body) : undefined;
   if (action === 'retry' && ctx.spend.isPaused()) throw new ControlError(409, SPEND_CAP_REFUSAL);
   const { now } = ctx;
+  // The audit line is written inside the command's own transaction (inTx), so the change and the line are one write.
+  const audit = (q: Sql, line: string) => ctx.audit(q, { actor: ctx.actor, event: `meeting.${action}`, kind: 'meeting', detail: line });
   try {
-    tx(db, () => {
-      let line: string;
-      switch (action) {
-        case 'assign': {
-          const r = assignMeetingToClient(db, String(id), code!, now);
-          line = `Meeting ${id} assigned to ${r.code}`;
-          break;
-        }
-        case 'skip':
-          skipMeetingById(db, String(id), now);
-          line = `Meeting ${id} skipped`;
-          break;
-        case 'retry':
-          line = retryMeetingById(db, String(id), now).status === 'queued'
-            ? `Meeting ${id} queued again`
-            : `Meeting ${id} has no client, so it is unassigned again`;
-          break;
-      }
-      ctx.audit({ actor: ctx.actor, event: `meeting.${action}`, kind: 'meeting', detail: line });
-    });
+    switch (action) {
+      case 'assign':
+        await assignMeetingToClient(db, String(id), code!, now, (q, r) => audit(q, `Meeting ${id} assigned to ${r.code}`));
+        break;
+      case 'skip':
+        await skipMeetingById(db, String(id), now, (q) => audit(q, `Meeting ${id} skipped`));
+        break;
+      case 'retry':
+        await retryMeetingById(db, String(id), now, (q, r) =>
+          audit(q, r.status === 'queued' ? `Meeting ${id} queued again` : `Meeting ${id} has no client, so it is unassigned again`));
+        break;
+    }
   } catch (e) {
     if (e instanceof CorrectionError) throw fromCorrection(e);
     throw e;
   }
-  const meeting = meetingDetail(db, String(id), now, ctx.accountOf)!;
+  const meeting = (await meetingDetail(db, String(id), now, ctx.accountOf))!;
   return action === 'skip' ? { meeting } : { meeting, warning: MEETING_COST_WARNING };
 }

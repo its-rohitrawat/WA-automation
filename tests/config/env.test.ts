@@ -63,6 +63,14 @@ describe('meeting settings', () => {
     for (const v of ['yes', 'TRUE', 'on', '2']) expect(envError({ ...on, MEETINGS_ENABLED: v })).toMatch(/MEETINGS_ENABLED/);
   });
 
+  it('INVITES_GMAIL is off by default and accepts true, false, 1 and 0 only', () => {
+    expect(parseEnv({}).INVITES_GMAIL).toBe(false);
+    expect(parseEnv({ INVITES_GMAIL: 'true' }).INVITES_GMAIL).toBe(true);
+    expect(parseEnv({ INVITES_GMAIL: '1' }).INVITES_GMAIL).toBe(true);
+    expect(parseEnv({ INVITES_GMAIL: '0' }).INVITES_GMAIL).toBe(false);
+    for (const v of ['yes', 'TRUE', 'on']) expect(envError({ INVITES_GMAIL: v })).toMatch(/INVITES_GMAIL/);
+  });
+
   it('TEAM_EMAIL_DOMAINS is a trimmed, lower-cased, comma-separated list', () => {
     expect(parseEnv({ TEAM_EMAIL_DOMAINS: ' OurStudio.example , ourstudio.co.example,' }).TEAM_EMAIL_DOMAINS).toEqual(['ourstudio.example', 'ourstudio.co.example']);
   });

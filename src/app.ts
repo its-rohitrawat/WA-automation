@@ -30,6 +30,7 @@ import { buildWorkbook } from './output/workbook.ts';
 import { ReportScheduler } from './report/scheduler.ts';
 import type { ReportHealth, ReportSender, ReportSettings } from './report/types.ts';
 import type { Prices } from './spend/pricing.ts';
+import type { GlobalSpend } from './spend/globalSpend.ts';
 import { SpendGuard } from './spend/spendGuard.ts';
 import { getClient, listClients, syncClients } from './store/clients.ts';
 import type { Db } from './store/db.ts';
@@ -96,10 +97,11 @@ export interface AppReportDeps {
 export interface ReportRunner {
   /** Never throws; a send runs on in the background. */
   tick(now: Date): Promise<void>;
-  health(now: Date): ReportHealth;
+  /** Never throws. */
+  health(now: Date): Promise<ReportHealth>;
   stop(waitMs: number): Promise<void>;
   /** At start: a send cut off by a crash becomes unknown. LiveReport does this itself before each sender's first send. */
-  recover?(now: Date): void;
+  recover?(now: Date): Promise<void>;
 }
 
 export interface AppDeps {
@@ -114,7 +116,13 @@ export interface AppDeps {
   ai: AiClient;
   drive: DriveApi;
   prices: Prices;
-  spendCapUsd: number;
+  /** The daily cap: a fixed number, or read at every check (SpendGuardOptions.capUsd). */
+  spendCapUsd: number | (() => number);
+  /**
+   * The platform-wide ceiling this runtime's spend joins (S4.3): the founder's only, as only the founder's spend is billed
+   * to the founder. A customer runtime, on its own key, has its own cap and no ceiling.
+   */
+  platformSpend?: { global: GlobalSpend; tenantId: string };
   quietMs: number;
   maxWaitMs: number;
   maxConcurrent: number;
@@ -162,7 +170,7 @@ export interface App {
    */
   stop(): Promise<void>;
   /** Applies a new allow-list. Throws, leaving the old allow-list in place, if the config conflicts with the DB. */
-  reloadClients(configs: ClientConfig[]): void;
+  reloadClients(configs: ClientConfig[]): Promise<void>;
   health: Health;
   publisher: DrivePublisher;
   debouncer: GroupDebouncer;
@@ -189,13 +197,27 @@ export interface SpendView {
 }
 
 /**
+ * The same promise with a handler attached now: awaited later it still rejects as before, but a rejection that comes
+ * while something else is awaited first never counts as unhandled (which would stop the service).
+ */
+function handled<T>(p: Promise<T>): Promise<T> {
+  p.catch(() => undefined);
+  return p;
+}
+
+/**
  * Wires gateway -> ingestor -> media queue / debouncer -> reconciler -> publisher. The founder-number gateway never sends
  * anything. The only sender is the optional morning report's, on the spare number, to REPORT_RECIPIENT only.
  */
-export function createApp(d: AppDeps): App {
+export async function createApp(d: AppDeps): Promise<App> {
   const startedAt = d.startedAt ?? d.clock.now();
-  const spend = new SpendGuard({ db: d.db, clock: d.clock, capUsd: d.spendCapUsd });
-  const health = new Health({ db: d.db, clock: d.clock, spend, dataDir: d.dataDir, freeBytes: d.freeBytes });
+  const spend = await SpendGuard.open({
+    db: d.db, clock: d.clock, capUsd: d.spendCapUsd, onError: (err) => d.log.error({ err }, 'spend row not written'),
+    ...(d.platformSpend ? { platform: d.platformSpend } : {}),
+  });
+  const health = new Health({
+    db: d.db, clock: d.clock, spend, dataDir: d.dataDir, freeBytes: d.freeBytes, onError: (err) => d.log.error({ err }, 'health snapshot not saved'),
+  });
   const reportScheduler = d.report && !d.liveReport
     ? new ReportScheduler({
         db: d.db, clock: d.clock, log: d.log, sender: d.report.sender, settings: d.report.settings, healthLine: () => health.workbookLine(),
@@ -223,19 +245,19 @@ export function createApp(d: AppDeps): App {
     minIntervalMs: d.publishIntervalMs,
     now: () => d.clock.now(),
     // workbookLine() leaves out publish failures: if this upload succeeds, they are already over.
-    build: () => {
+    build: async () => {
       const line = health.workbookLine();
       buildingLine = line.text;
       const now = d.clock.now();
       buildingDay = istDate(now); // the date the Today tab is worked out for
-      return buildWorkbook(loadTrackerView(d.db, now, line));
+      return buildWorkbook(await loadTrackerView(d.db, now, line));
     },
     onPublished: () => {
       publishedLine = buildingLine; // one publish runs at a time, so this is the line of the upload that just succeeded
       publishedDay = buildingDay;
       // The first publish creates the Drive root the file uploads need. A publish also follows every role change
       // (the reconciler's, and the CLI's through its rebuild request), which can make a sender's files due.
-      void uploader?.run();
+      runUploads();
       health.markPublished();
       hook((h) => h.onPublished());
     },
@@ -254,23 +276,30 @@ export function createApp(d: AppDeps): App {
       d.log.error({ ...fields, err }, 'health update failed');
     }
   };
+  const safelyAsync = async (fn: () => Promise<void>) => {
+    try {
+      await fn();
+    } catch (err) {
+      d.log.error({ err }, 'health update failed');
+    }
+  };
   /**
    * Gives Health the current shared-file counts. Called before a publish that a file change or a client change asked
    * for, so the workbook's health line does not show counts from the last tick (final review).
    */
-  const refreshMedia = () => health.setMedia(mediaStats(d.db, d.clock.now(), startedAt, MEDIA_MAX_WAIT_MS));
+  const refreshMedia = async () => health.setMedia(await mediaStats(d.db, d.clock.now(), startedAt, MEDIA_MAX_WAIT_MS));
   /** False once reloadClients removed the client. If the lookup itself fails, assume active and record as usual. */
-  const stillActive = (clientId: number): boolean => {
+  const stillActive = async (clientId: number): Promise<boolean> => {
     try {
-      return getClient(d.db, clientId).active;
+      return (await getClient(d.db, clientId)).active;
     } catch (err) {
       d.log.error({ clientId, err }, 'client lookup failed');
       return true;
     }
   };
-  const record = (clientId: number, outcome: ReconcileOutcome) => {
+  const record = async (clientId: number, outcome: ReconcileOutcome) => {
     // Removed while its run was in flight: reloadClients already forgot it, so its warning must not come back.
-    if (!stillActive(clientId)) return;
+    if (!(await stillActive(clientId))) return;
     safely(() => health.recordOutcome(clientId, outcome), { clientId });
     // The publisher is throttled, so this is cheap, and the workbook stops showing ✅ while groups fail.
     // A run that is waiting for shared files, or kept out by other paid calls in flight (busy), changed nothing, so it
@@ -285,8 +314,7 @@ export function createApp(d: AppDeps): App {
     voiceTranscriptionOn: (d.media?.voice ?? null) !== null,
     // A meeting's tracker step finishes the meeting here: the rebuild gets the meeting counts of now.
     onChanged: () => {
-      safely(refreshMeetings);
-      publisher.schedule();
+      void safelyAsync(refreshMeetings).then(() => publisher.schedule());
     },
     // A meeting's tracker step holds the client's run flag, so it never interleaves with a WhatsApp run (Task 9).
     exclusive: (clientId, fn) => debouncer.runExclusive(clientId, fn),
@@ -302,13 +330,13 @@ export function createApp(d: AppDeps): App {
     maxConcurrent: d.maxConcurrent,
     run: async (clientId) => {
       const outcome = await reconciler.run(clientId);
-      record(clientId, outcome);
+      await record(clientId, outcome);
       return outcome;
     },
     onError: (clientId, err) => {
       // The logger's err serializer keeps type, code and stack frames, and drops the message.
       d.log.error({ clientId, err }, 'reconcile crashed');
-      record(clientId, { status: 'failed', errorCode: 'crash' });
+      void record(clientId, { status: 'failed', errorCode: 'crash' }); // never rejects
     },
   });
 
@@ -336,6 +364,10 @@ export function createApp(d: AppDeps): App {
   const uploader = m
     ? new DriveFileUploader({ db: d.db, api: d.drive, dataDir: d.dataDir, clock: d.clock, log: d.log, onUploaded: () => publisher.schedule() })
     : undefined;
+  // Upload passes wait for start()'s reset of uploads that gave up: on Postgres a pass on another of the pool's
+  // connections could otherwise read before the reset commits (SQLite's one connection kept them in order).
+  let uploadsReady: Promise<unknown> = Promise.resolve();
+  const runUploads = (): void => void uploadsReady.then(() => uploader?.run());
   const mediaQueue = m
     ? new MediaQueue({
         db: d.db,
@@ -378,33 +410,35 @@ export function createApp(d: AppDeps): App {
         // member's file can go to Drive now.
         onSettled: (clientId) => {
           debouncer.notify(clientId);
-          safely(refreshMedia); // a "waiting" warning about this file must not reach the workbook it settles
-          publisher.schedule();
-          void uploader?.run();
+          // a "waiting" warning about this file must not reach the workbook it settles
+          void safelyAsync(refreshMedia).then(() => publisher.schedule());
+          runUploads();
         },
       })
     : undefined;
 
   const mt = d.meetings;
+  // The meetings read this synchronously: the scopes are read here and again on every tick, so a scope granted from the
+  // CLI (another process) is seen within one tick (30 s).
+  let meetingScopes = mt ? await meetingsReady(d.db) : false;
   const meetings = mt
-    ? new MeetingService({
+    ? await MeetingService.open({
         db: d.db, clock: d.clock, log: d.log, dataDir: d.dataDir, spend, prices: d.prices, drive: d.drive, api: mt.api, ai: mt.ai,
         transcriber: mt.transcriber, ...(mt.sttProblem ? { sttProblem: mt.sttProblem } : {}), ffmpeg: mt.ffmpeg, settings: mt.settings, clients: mt.clients, freeBytes: d.freeBytes ?? defaultFreeBytes,
         // The tracker step holds the client's run flag through the reconciler's exclusive (debouncer.runExclusive).
         track: (clientId, meeting) => reconciler.runMeeting(clientId, meeting),
-        hasMeetingScopes: () => meetingsReady(d.db),
+        hasMeetingScopes: () => meetingScopes,
         ...(mt.lostAccounts ? { lostAccounts: mt.lostAccounts } : {}),
         // A finished or failed meeting, or new rows: the workbook is rebuilt, with the meeting counts of now (not the
         // last tick's), as refreshMedia does for files.
         onChanged: () => {
-          safely(refreshMeetings);
-          publisher.schedule();
+          void safelyAsync(refreshMeetings).then(() => publisher.schedule());
         },
       })
     : undefined;
   /** Gives the meetings' health to the health line and to the optional callback (null when meetings are off). */
-  const refreshMeetings = () => {
-    const m = meetings ? meetings.health() : null;
+  const refreshMeetings = async () => {
+    const m = meetings ? await meetings.health() : null;
     health.setMeetings(m);
     d.onMeetingsHealth?.(m);
   };
@@ -418,9 +452,10 @@ export function createApp(d: AppDeps): App {
     media: m ? { sealer: m.sealer, onQueued: () => mediaQueue?.kick() } : undefined,
   });
 
-  const handleEvent = (e: NormalizedEvent) => {
+  // The gateway hands events over one after another and waits for each, so they are stored in the order they came.
+  const handleEvent = async (e: NormalizedEvent) => {
     try {
-      ingestor.handle(e);
+      await ingestor.handle(e);
     } catch (err) {
       d.log.error({ err }, 'ingest failed'); // never the event: it holds chat text and media keys
       throw err; // the gateway counts it in failedCount()
@@ -545,35 +580,57 @@ export function createApp(d: AppDeps): App {
   };
 
   let poll: ReturnType<typeof setInterval> | undefined;
-  const tick = () => {
+  const tick = async () => {
     // An uncaught throw inside setInterval would exit the service.
     try {
-      if (getKv(d.db, 'rebuild_requested')) {
-        setKv(d.db, 'rebuild_requested', '');
-        publisher.schedule();
-      }
+      // Read now, used after the synchronous kicks below (as unprocessed), so the tick's synchronous start is as before.
+      // Each read gets a handler at once (handled), so a failure while the other is awaited is never an unhandled
+      // rejection, which would stop the service; its await below still throws into this try (S1 review N2).
+      const rebuild = handled(getKv(d.db, 'rebuild_requested'));
       // Also re-runs a client waiting for a file that never settles (deferred for Claude or the budget) once its wait
-      // is over, and a message queued again because its file was read late (amendment 15g).
-      for (const clientId of clientIdsWithUnprocessed(d.db)) debouncer.ensure(clientId);
+      // is over, and a message queued again because its file was read late (amendment 15g). Read now, used after the
+      // synchronous kicks below, so the tick's synchronous start is as before.
+      const unprocessed = handled(clientIdsWithUnprocessed(d.db));
       mediaQueue?.kick(); // retries that are due, and files saved by cli link
-      void uploader?.run(); // retries that are due
+      runUploads(); // retries that are due
       meetings?.tick(); // discovery when due (MEETING_POLL_MINUTES), then the next due meeting
       backfill?.tick(); // a group waiting for WhatsApp, the spend cap or its first message
-      safely(refreshMeetings);
+      for (const clientId of await unprocessed) debouncer.ensure(clientId);
+      if (await rebuild) {
+        await setKv(d.db, 'rebuild_requested', '');
+        publisher.schedule();
+      }
+      // Spend another process booked (the CLI) reaches the cap checks by the next tick. After the kicks above, so the
+      // tick's synchronous start is as before. A failed read keeps the totals in memory, which hold this process's own.
+      try {
+        await spend.refresh();
+      } catch (err) {
+        d.log.error({ err }, 'spend totals could not be read again');
+      }
+      if (mt) {
+        try {
+          meetingScopes = await meetingsReady(d.db);
+        } catch (err) {
+          d.log.error({ err }, 'meeting scopes could not be read again'); // the last value stays
+        }
+      }
+      await safelyAsync(refreshMeetings);
       health.setIngestFailures(d.gateway.failedCount());
-      refreshMedia();
+      await safelyAsync(refreshMedia);
       if (reportRunner) {
         // tick() never throws. A send runs on in the background; the claim is already written when it returns.
         void reportRunner.tick(d.clock.now());
-        health.setReport(reportRunner.health(d.clock.now()));
+        health.setReport(await reportRunner.health(d.clock.now()));
       }
       // A line that changes with no other change (a file waiting too long, an upload that gave up, a message that could
       // not be saved) would otherwise reach the workbook only with an unrelated publish, possibly hours later.
-      if (health.workbookLine().text !== publishedLine) publisher.schedule();
+      // A publish in flight that took the same line is enough; if it fails, the publisher's own retry rebuilds it.
+      const line = health.workbookLine().text;
+      if (line !== publishedLine && line !== buildingLine) publisher.schedule();
       // The Today tab's counts, notes and order are worked out for the day it was built. After a quiet night the 06:00
       // link would show yesterday's: republish once when the IST date changes (Task 3 review round 2).
       if (publishedDay !== undefined && istDate(d.clock.now()) !== publishedDay) publisher.schedule();
-      health.persist();
+      await health.persist();
     } catch (err) {
       d.log.error({ err }, 'tick failed');
     }
@@ -596,25 +653,27 @@ export function createApp(d: AppDeps): App {
     },
     paidCalls: {
       reserve: (usd, kind, onBooked) => spend.reserve(usd, kind, onBooked),
-      settle: (id, kind, usd, detail) => spend.settle(id, kind, usd, detail),
+      settle: spend.settle.bind(spend), // bound, so both overloads (with and without a transaction handle) stay
       release: (id) => spend.release(id),
       fitsIgnoringHolds: (usd) => spend.fitsIgnoringHolds(usd),
     },
     start() {
       if (poll) return; // already started: a second interval would outlive stop()
       if (reportRunner?.recover) {
+        // A send cut off by a crash becomes unknown, never sent again by itself. Not awaited (start is synchronous): its
+        // UPDATE is queued before anything the first tick does, and the scheduler sends nothing until a recovery has
+        // succeeded (it tries again itself).
+        const failed = (err: unknown) => d.log.error({ err }, 'morning report recovery failed');
         try {
-          reportRunner.recover(d.clock.now()); // a send cut off by a crash becomes unknown, never sent again by itself
+          void reportRunner.recover(d.clock.now()).catch(failed);
         } catch (err) {
-          d.log.error({ err }, 'morning report recovery failed');
+          failed(err); // start() never throws for it
         }
       }
       if (uploader) {
-        try {
-          resetUploadFailures(d.db); // a restart gives uploads that gave up a fresh set of attempts
-        } catch (err) {
-          d.log.error({ err }, 'upload reset failed');
-        }
+        // A restart gives uploads that gave up a fresh set of attempts. Not awaited (start is synchronous); every upload
+        // pass waits for it (runUploads), so none reads before the reset is in. A failed reset still lets the passes run.
+        uploadsReady = resetUploadFailures(d.db).catch((err: unknown) => d.log.error({ err }, 'upload reset failed'));
       }
       if (m) {
         // Before the first tick, so no voice note being converted now can lose its folder.
@@ -625,8 +684,8 @@ export function createApp(d: AppDeps): App {
       d.gateway.start();
       meetings?.start(); // books speech parts left in flight and cleans work files before any meeting runs
       backfill?.start(); // carries on with a group whose earlier messages were being read at the last stop
-      tick();
-      poll = setInterval(tick, d.pollMs ?? 30_000);
+      void tick();
+      poll = setInterval(() => void tick(), d.pollMs ?? 30_000);
       publisher.schedule();
     },
     async stop() {
@@ -650,8 +709,9 @@ export function createApp(d: AppDeps): App {
       await Promise.all([debouncer.drain(drainMs), mediaQueue?.drain(drainMs), meetings?.drain(drainMs)]);
       // A call still running was probably billed: book it at its estimate. After a clean drain nothing is pending.
       try {
-        const count = spend.settlePending('shutdown before the paid call finished (estimated)');
+        const count = await spend.settlePending('shutdown before the paid call finished (estimated)');
         if (count > 0) d.log.warn({ count }, 'AI calls still running at shutdown; booked at their estimate');
+        await spend.flushed(); // every booking's row is written before main.ts closes the database
       } catch (err) {
         d.log.error({ err }, 'booking unfinished AI calls failed');
       }
@@ -676,21 +736,27 @@ export function createApp(d: AppDeps): App {
       } finally {
         clearTimeout(timer);
       }
+      // The events handed over before the gateway stopped, and a history answer still being stored, are stored before the
+      // database closes. Not earlier: everything above this stop's first await runs at once (a local run is aborted).
+      await d.gateway.idle?.();
+      await backfill?.idle();
     },
-    reloadClients(configs) {
-      const wasActive = listClients(d.db).map((c) => c.id);
-      syncClients(d.db, configs, d.clock.now()); // throws on a code conflict, before anything else changes; queues new groups' history
+    async reloadClients(configs) {
+      const wasActive = (await listClients(d.db)).map((c) => c.id);
+      await syncClients(d.db, configs, d.clock.now()); // throws on a code conflict, before anything else changes; queues new groups' history
       d.allow.replace(configs.map((c) => c.groupId));
       meetings?.setClients(configs);
-      const active = new Set(listClients(d.db).map((c) => c.id));
+      const active = new Set((await listClients(d.db)).map((c) => c.id));
       for (const id of wasActive) {
         if (active.has(id)) continue;
         debouncer.cancel(id);
         health.forget(id);
       }
-      safely(refreshMedia); // a removed client's files leave the counts before the publish
-      safely(() => health.persist());
-      publisher.schedule();
+      // a removed client's files leave the counts before the publish
+      void safelyAsync(refreshMedia).then(async () => {
+        await safelyAsync(() => health.persist());
+        publisher.schedule();
+      });
       backfill?.tick(); // a newly approved group starts reading its earlier messages; a removed one stops
     },
   };

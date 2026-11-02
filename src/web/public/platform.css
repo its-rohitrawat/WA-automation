@@ -1,0 +1,108 @@
+/* The platform screens (SaaS S5): Invite a customer, Getting started, Customers, and the sign-up page. Every class here
+   starts with pf- so nothing collides with the dashboard's own styles. Colours come from the dashboard's tokens, so both
+   themes follow. Matches the approved demo (a0, 29 Oct). */
+
+/* Forms */
+.pf-stack { display: grid; gap: 14px; }
+.pf-lbl { display: grid; gap: 6px; font-size: 13px; color: var(--muted); }
+.pf-lbl > span { font-weight: 600; color: var(--text); }
+.pf-lbl small { color: var(--faint); font-size: 12px; }
+.pf-inp { width: 100%; box-sizing: border-box; padding: 10px 12px; border-radius: 12px; background: var(--panel-2); border: 1px solid var(--line-2); color: var(--text); font: inherit; font-size: 14px; }
+.pf-inp:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
+.pf-inp::placeholder { color: var(--faint); }
+.pf-err { margin: 0; padding: 9px 12px; border-radius: 10px; font-size: 13px; color: var(--text); background: color-mix(in srgb, var(--s-overdue) 12%, var(--panel)); border: 1px solid color-mix(in srgb, var(--s-overdue) 40%, var(--line)); }
+.pf-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.pf-acts { display: flex; gap: 6px; flex-wrap: wrap; }
+.btn.pf-danger { color: #f07585; } :root[data-theme="light"] .btn.pf-danger { color: #b23247; }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+.pf-faint { color: var(--faint); }
+.pf-sub { display: block; color: var(--faint); font-size: 12px; margin-top: 2px; }
+.pf-mono { font: 400 12.5px var(--mono); color: var(--muted); overflow-wrap: anywhere; }
+.pf-note-code { font: 500 12px var(--mono); }
+
+/* Invite a customer */
+.pf-inv td { vertical-align: top; }
+.pf-inv .pf-when { white-space: nowrap; }
+.pf-link-box { display: grid; gap: 8px; margin-top: 12px; }
+.pf-link-box input { font: 400 12.5px var(--mono); }
+@media (max-width: 1200px) { .grid > .pf-col-form, .grid > .pf-col-list { grid-column: span 12; } }
+
+/* Getting started (onboarding) */
+.pf-ob-top { display: grid; gap: 14px; }
+.pf-ob-hello { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+.pf-ob-hello h2 { margin: 6px 0; font-size: 22px; letter-spacing: -0.02em; }
+.pf-ob-prog { display: flex; align-items: center; gap: 10px; } .pf-ob-prog b { font: 600 14px var(--mono); }
+.pf-bar { height: 8px; border-radius: 99px; background: var(--panel-2); border: 1px solid var(--line); overflow: hidden; }
+.pf-bar i { display: block; height: 100%; width: 0; border-radius: inherit; background: linear-gradient(90deg, var(--teal), var(--green)); transition: width 420ms var(--ease-out); }
+.pf-steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.pf-step { border: 1px solid var(--line); border-radius: 16px; background: var(--panel-2); }
+.pf-step.open { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); background: var(--panel); }
+.pf-step-head { all: unset; box-sizing: border-box; width: 100%; display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 12px 14px; cursor: pointer; border-radius: 16px; }
+.pf-step-head:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+.pf-step.locked .pf-step-head { cursor: not-allowed; }
+.pf-step.locked .pf-step-txt b { color: var(--muted); }
+.pf-num { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; font: 600 13px var(--mono); background: var(--panel); border: 1px solid var(--line-2); color: var(--muted); }
+.pf-step.done .pf-num { background: rgba(43, 170, 74, .16); border-color: rgba(43, 170, 74, .4); color: #4cc56b; }
+:root[data-theme="light"] .pf-step.done .pf-num { color: #1e7f37; }
+.pf-step-txt b { display: block; font-size: 14px; } .pf-step-txt small { display: block; color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+.pf-step-st { display: flex; align-items: center; gap: 8px; color: var(--faint); }
+.pf-step-st svg { transition: transform 200ms var(--ease-out); }
+.pf-step.open .pf-step-st svg { transform: rotate(180deg); }
+.pf-step-body { padding: 4px 14px 16px 60px; display: grid; gap: 12px; font-size: 13.5px; }
+.pf-coming { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: 12px; background: var(--panel-2); border: 1px dashed var(--line-2); color: var(--muted); }
+.pf-coming svg { flex: none; margin-top: 1px; color: var(--faint); }
+/* The inline WhatsApp link (views/linkQr.js): its button row, and the result lines. */
+.pf-link-foot { justify-content: center; margin-top: 4px; }
+.pf-link-done, .pf-link-fail { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: 12px; font-size: 13.5px; }
+.pf-link-done { background: rgba(43, 170, 74, .12); border: 1px solid rgba(43, 170, 74, .35); }
+.pf-link-done svg { flex: none; color: #4cc56b; }
+.pf-link-fail { margin-bottom: 10px; background: color-mix(in srgb, var(--s-overdue) 12%, var(--panel)); border: 1px solid color-mix(in srgb, var(--s-overdue) 40%, var(--line)); }
+.pf-link-fail svg { flex: none; color: var(--s-overdue); }
+.pf-unlock { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; font-size: 13.5px; }
+.pf-unlock li { display: flex; gap: 10px; align-items: flex-start; color: var(--muted); } .pf-unlock li svg { flex: none; margin-top: 1px; color: var(--faint); }
+.pf-unlock li.yes { color: var(--text); } .pf-unlock li.yes svg { color: var(--green); }
+:root[data-theme="light"] .pf-unlock li.yes svg { color: #008069; }
+@media (max-width: 960px) { .grid > .pf-col-steps, .grid > .pf-col-side { grid-column: span 12; } }
+@media (max-width: 520px) { .pf-step-body { padding-left: 14px; } .pf-step-head { grid-template-columns: 30px minmax(0, 1fr); } .pf-step-st { grid-column: 2; } }
+
+/* Customers */
+.pf-kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin-bottom: 16px; }
+.pf-kpi { display: grid; gap: 8px; align-content: start; }
+.pf-kpi > b { font: 600 30px/1 var(--mono); letter-spacing: -0.03em; font-variant-numeric: tabular-nums; }
+.pf-kpi > b small { font: 500 13px var(--font); letter-spacing: 0; color: var(--muted); }
+.pf-kpi > small { color: var(--muted); font-size: 12.5px; }
+.pf-cust td.pf-num-cell { font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.pf-cust-head { padding: 12px 12px 0; }
+@media (max-width: 1100px) { .pf-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+@media (prefers-reduced-motion: reduce) { .pf-bar i, .pf-step-st svg { transition: none; } }
+
+/* The sign-up page: the sign-in layout with a still left side (no 3D core), and a light theme (approved demo) */
+.pf-signup-body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--font); }
+.pf-signup .pf-su-left { background: radial-gradient(120% 90% at 20% 20%, rgba(37, 211, 102, .22), transparent 55%), radial-gradient(90% 80% at 90% 90%, rgba(52, 183, 241, .16), transparent 60%), #0b141a; }
+.pf-signup .si-card h2 { font-size: 25px; line-height: 1.15; }
+.pf-signup .si-card .sub b { color: inherit; }
+.pf-signup .gbtn { text-decoration: none; }
+.pf-signup .gbtn[aria-busy="true"] { opacity: .7; pointer-events: none; }
+:root[data-theme="light"] .pf-signup { background: var(--bg); color: var(--text); }
+:root[data-theme="light"] .pf-signup .si-right { background: var(--bg); }
+:root[data-theme="light"] .pf-signup .pf-su-left { background: radial-gradient(120% 90% at 20% 20%, rgba(0, 168, 132, .20), transparent 55%), radial-gradient(90% 80% at 90% 90%, rgba(83, 189, 235, .20), transparent 60%), #ffffff; border-right-color: var(--line); }
+:root[data-theme="light"] .pf-signup .si-brand, :root[data-theme="light"] .pf-signup .si-copy h1 { color: var(--text); }
+:root[data-theme="light"] .pf-signup .si-copy h1 span { color: #008069; }
+:root[data-theme="light"] .pf-signup .si-copy p, :root[data-theme="light"] .pf-signup .si-card .sub, :root[data-theme="light"] .pf-signup .si-list li { color: var(--muted); }
+:root[data-theme="light"] .pf-signup .si-card { background: #ffffff; border-color: var(--line-2); box-shadow: var(--shadow); color: var(--text); }
+:root[data-theme="light"] .pf-signup .si-or { color: var(--faint); }
+:root[data-theme="light"] .pf-signup .si-or::before, :root[data-theme="light"] .pf-signup .si-or::after { background: var(--line); }
+:root[data-theme="light"] .pf-signup .si-list svg { color: #008069; }
+:root[data-theme="light"] .pf-signup .si-denied, :root[data-theme="light"] .pf-signup .si-error { color: var(--text); }
+:root[data-theme="light"] .pf-signup .si-denied b, :root[data-theme="light"] .pf-signup .si-error b { color: #b23247; }
+:root[data-theme="light"] .pf-signup .si-foot { color: var(--faint); }
+
+/* Room for the floating Ask button (assistant.css: a pill 24px from the corner on laptops, a 52px circle 16px from it on
+   phones). Row actions sit outside its lane, on the left of it on laptops and at the left of each card on phones, and the
+   end of each platform screen scrolls clear of it. */
+.view:has(.pf-cust, .pf-col-form, .pf-steps) { padding-bottom: 112px; }
+.pf-cust td:last-child, .pf-inv td:last-child { padding-right: 120px; }
+@media (max-width: 720px) {
+  .pf-cust td:last-child, .pf-inv td:last-child { padding-right: 56px; justify-content: flex-start; }
+}

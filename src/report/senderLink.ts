@@ -2,7 +2,7 @@ import { senderSessionDbPath } from '../config/paths.ts';
 import type { Db } from '../store/db.ts';
 import { systemClock, type Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
-import { openSenderSession, openSessionDb, useSenderAuthState, type EncryptedAuth } from '../wa/authState.ts';
+import { openPhoneSession, openSenderSession, useSenderAuthState, type EncryptedAuth, type SessionHome } from '../wa/authState.ts';
 import { TRACKER_DEVICE_NAME } from '../wa/gateway.ts';
 import { backupAndReset, dropBackup, guardAuth, restoreBackup, type LinkDriver, type LinkOutcome } from '../wa/linkSession.ts';
 import { linkedNumber, linkSender, SENDER_DEVICE_NAME, type SenderSocketFactory } from '../wa/senderGateway.ts';
@@ -63,6 +63,8 @@ export interface SenderScheduler {
 
 export interface SpareLinkDeps {
   dataDir: string;
+  /** Where the sessions live (sessionHomeOf); the data folder's files when not given. */
+  sessions?: SessionHome;
   /** The master key; the spare session's own key is derived from it (useSenderAuthState). */
   key: Buffer;
   factory: SenderSocketFactory;
@@ -92,6 +94,7 @@ export function spareLinkDriver(d: SpareLinkDeps): LinkDriver {
   return {
     async run(hooks, signal): Promise<LinkOutcome> {
       const file = senderSessionDbPath(d.dataDir);
+      const home: SessionHome = d.sessions ?? { engine: 'sqlite', dataDir: d.dataDir };
       const scheduler = d.makeSender ? d.scheduler?.() : undefined;
       let db = d.reportDb?.();
       let own = false;
@@ -103,10 +106,10 @@ export function spareLinkDriver(d: SpareLinkDeps): LinkDriver {
         scheduler!.replaceSender(new LinkingSender(scheduler!.maskedRecipient(), clock.now().toISOString()));
       }
       /** Gives the scheduler a sender on whatever session the database now holds (the kept or the restored one). */
-      const handBack = (target: Db) => {
+      const handBack = async (target: Db) => {
         if (!scheduler) return;
         try {
-          scheduler.replaceSender(d.makeSender!(useSenderAuthState(target, d.key)));
+          scheduler.replaceSender(d.makeSender!(await useSenderAuthState(target, d.key)));
           if (own) d.adoptDb?.(target); // the sender keeps using it
           own = false;
         } catch (err) {
@@ -114,7 +117,7 @@ export function spareLinkDriver(d: SpareLinkDeps): LinkDriver {
         }
       };
       if (!db) {
-        const opened = openSenderSession(file, d.key);
+        const opened = await openSenderSession(home, d.key);
         if (opened.ok) {
           db = opened.db;
         } else if (opened.transient) {
@@ -123,17 +126,18 @@ export function spareLinkDriver(d: SpareLinkDeps): LinkDriver {
           return { ok: false, code: 'session_unavailable' }; // the stand-in stays: the session cannot be read anyway
         } else {
           if (opened.code !== 'decrypt_failed') {
+            // Only a file can be damaged: on Postgres the one failure reported is another master key.
             moveDamagedSession(file, clock.now()); // renamed aside, not deleted
             d.log.warn({ code: opened.code }, 'spare phone link: the damaged session file was moved aside');
           }
-          db = openSessionDb(file);
+          db = await openPhoneSession(home, 'spare');
         }
         own = true;
       }
-      const close = () => {
+      const close = async () => {
         if (!own) return;
         try {
-          db.close();
+          await db.close();
         } catch {
           // best effort
         }
@@ -141,51 +145,51 @@ export function spareLinkDriver(d: SpareLinkDeps): LinkDriver {
       let backedUp = false;
       // Writes from the link's sockets stop once the link is undone, so a late one never lands on the restored rows.
       let frozen = false;
-      const undo = () => {
+      const undo = async () => {
         frozen = true;
-        restoreBackup(db);
-        if (steppedAside) handBack(db); // the report goes on with the restored session
-        close();
+        await restoreBackup(db);
+        if (steppedAside) await handBack(db); // the report goes on with the restored session
+        await close();
       };
       try {
         // The spare number's rows only, backed up in the same file first (a crash mid-link restores them at the next start).
-        backupAndReset(db);
+        await backupAndReset(db);
         backedUp = true;
-        const auth = guardAuth(useSenderAuthState(db, d.key), () => frozen || signal.aborted);
+        const auth = guardAuth(await useSenderAuthState(db, d.key), () => frozen || signal.aborted);
         const r = await linkSender({
           factory: d.factory, auth, onQr: hooks.qr, onScanned: hooks.opening, signal,
           timeoutMs: d.connectTimeoutMs ?? 5 * 60_000, ...(d.settleMs !== undefined ? { settleMs: d.settleMs } : {}),
         });
         if (signal.aborted || !r.ok) {
-          undo();
+          await undo();
           return { ok: false, code: signal.aborted || r.ok ? 'aborted' : r.code };
         }
         // The founder's number must never send: neither REPORT_RECIPIENT nor the number the founder reader is linked to.
         const linked = linkedNumber(auth);
         const recipient = d.recipient();
         if (linked !== undefined && (linked === d.founderNumber() || (recipient !== undefined && linked === recipient))) {
-          undo(); // this link is never kept
+          await undo(); // this link is never kept
           return { ok: false, code: 'founder_number' };
         }
         frozen = true; // the link socket is closed; nothing more may write through it
-        dropBackup(db); // committed: the new link is kept
+        await dropBackup(db); // committed: the new link is kept
       } catch (err) {
         d.log.error({ err }, 'spare phone link failed; restoring the previous spare session');
         try {
-          if (backedUp) undo();
+          if (backedUp) await undo();
           else {
-            if (steppedAside) handBack(db);
-            close();
+            if (steppedAside) await handBack(db);
+            await close();
           }
         } catch (restoreErr) {
           d.log.error({ err: restoreErr }, 'the previous spare session could not be restored now; it is restored at the next start');
-          close();
+          await close();
         }
         return { ok: false, code: 'error' };
       }
       // After the commit nothing may undo or fail the link: these steps only log.
-      if (scheduler) handBack(db);
-      close(); // unless handed to the new sender: saved, and the report opens it at its next start
+      if (scheduler) await handBack(db);
+      await close(); // unless handed to the new sender: saved, and the report opens it at its next start
       return { ok: true, device: SENDER_DEVICE_NAME };
     },
   };

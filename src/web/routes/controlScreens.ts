@@ -7,13 +7,15 @@ import { ControlError, type AuditEntry } from '../../control/errors.ts';
 import { usageSummary } from '../../control/usage.ts';
 import type { UptimeLog } from '../../health/uptimeLog.ts';
 import { uptimeReport, type UptimeRobotClient } from '../../health/uptimeRobot.ts';
-import { tx, type Db } from '../../store/db.ts';
+import type { Db, Sql } from '../../store/db.ts';
 import type { Clock } from '../../util/clock.ts';
 import type { AuditLog } from '../audit.ts';
 import type { Guard } from '../guard.ts';
 import { sendJson } from '../http.ts';
 import type { Router } from '../router.ts';
-import { clearSessionCookie, hashToken, type SessionStore } from '../sessions.ts';
+import { FOUNDER_TENANT_ID } from '../../config/env.ts';
+import { clearSessionCookie, type SessionStore } from '../sessions.ts';
+import { auditedWrite, type AuditedWrite } from './auth.ts';
 import { actionSession, controlled, readBody, type ActionGuard } from './respond.ts';
 
 // The control screens' API (D5 Task 1-4 logic, served here): AI usage, uptime, audit logs, the morning briefing's
@@ -34,7 +36,14 @@ export interface ControlApiDeps extends ActionGuard {
   settings: Pick<SettingsStore, 'view' | 'set'>;
   /** The priority keywords and the sentiment switch (Settings screen). */
   priority: Pick<PrioritySettings, 'view' | 'set'>;
-  sessions: Pick<SessionStore, 'destroyAllFor'>;
+  sessions: Pick<SessionStore, 'destroyAllFor' | 'countFor' | 'agentLabel'>;
+  /** The customer these routes serve (Phase B 4): sign-out-everywhere ends its sessions only. Default: the founder. */
+  tenantId?: string;
+  /**
+   * Sign-out-everywhere's audit row and its sessions (auditedWrite): one transaction on one Db, the audit row first on
+   * two (the customer's Db, then the platform Db, where web_sessions is). Default: one transaction on db.
+   */
+  audited?: AuditedWrite;
   /**
    * Whether this request came in over the https public address (secureRequest): the session cookie is cleared with the
    * attributes sign-in set it with, so a browser on http://localhost (where Secure cookies are dropped) is signed out too.
@@ -47,18 +56,18 @@ const digits = (v: unknown) => (typeof v === 'string' ? v.replace(/\D/g, '') : '
 export function registerControlApi(router: Router, d: ControlApiDeps): void {
   const read = (path: string, answer: (ctx: Parameters<Parameters<Router['get']>[1]>[0]) => unknown) =>
     router.get(path, controlled(async (ctx) => {
-      d.guard.requireOwner(ctx.req);
+      await d.guard.requireOwner(ctx.req);
       sendJson(ctx.res, 200, await answer(ctx));
     }));
-  const auditFor = (actor: string, requestId: string) => (e: AuditEntry) => d.audit.record({ ...e, actor, requestId });
+  const auditFor = (actor: string, requestId: string) => (q: Sql, e: AuditEntry) => d.audit.record({ ...e, actor, requestId }, q);
 
-  read('/dashboard/api/usage', () => usageSummary(d.db, d.spend, d.clock.now(), { voiceLocal: d.voiceLocal }));
+  read('/dashboard/api/usage', async () => await usageSummary(d.db, d.spend, d.clock.now(), { voiceLocal: d.voiceLocal }));
   read('/dashboard/api/uptime', () => uptimeReport({ log: d.uptime.log, robot: d.uptime.robot, now: d.clock.now() }));
-  read('/dashboard/api/audit', ({ url }) => listAudit(d.db, parseAuditParams(url.searchParams), d.isOwner));
+  read('/dashboard/api/audit', async ({ url }) => await listAudit(d.db, parseAuditParams(url.searchParams), d.isOwner));
   read('/dashboard/api/settings', () => d.settings.view());
 
   router.post('/dashboard/api/settings', controlled(async (ctx) => {
-    const s = actionSession(ctx, d);
+    const s = await actionSession(ctx, d);
     const body = await readBody(ctx);
     if (typeof body !== 'object' || body === null || Array.isArray(body)) throw new ControlError(422, 'Send the setting as a JSON object', 'body');
     const { key, value, confirm } = body as Record<string, unknown>;
@@ -75,36 +84,37 @@ export function registerControlApi(router: Router, d: ControlApiDeps): void {
     if (key === 'dashboardSend' && value === true && confirm !== true) {
       throw new ControlError(422, "Confirm that the dashboard may send from the founder's WhatsApp", 'confirm');
     }
-    d.settings.set(key, value, s.email, auditFor(s.email, ctx.requestId));
-    sendJson(ctx.res, 200, d.settings.view());
+    await d.settings.set(key, value, s.email, auditFor(s.email, ctx.requestId));
+    sendJson(ctx.res, 200, await d.settings.view());
   }));
 
   // Priority keywords and the sentiment switch: the owner's own words and a boolean, checked by PrioritySettings.set.
   read('/dashboard/api/settings/priority', () => d.priority.view());
   router.post('/dashboard/api/settings/priority', controlled(async (ctx) => {
-    const s = actionSession(ctx, d);
+    const s = await actionSession(ctx, d);
     const body = await readBody(ctx);
     if (typeof body !== 'object' || body === null || Array.isArray(body)) throw new ControlError(422, 'Send the setting as a JSON object', 'body');
     const { key, value } = body as Record<string, unknown>;
     if (typeof key !== 'string') throw new ControlError(422, 'key must be the name of a setting', 'key');
-    sendJson(ctx.res, 200, d.priority.set(key, value, s.email, auditFor(s.email, ctx.requestId)));
+    sendJson(ctx.res, 200, await d.priority.set(key, value, s.email, auditFor(s.email, ctx.requestId)));
   }));
 
-  read('/dashboard/api/session', ({ req }) => {
-    const s = d.guard.requireOwner(req);
+  read('/dashboard/api/session', async ({ req }) => {
+    const s = await d.guard.requireOwner(req);
     // The browser label sign-in saved (cleaned there, for example "Safari on macOS"); null for an older session.
-    const row = d.db.prepare('SELECT agent_label FROM web_sessions WHERE id_hash = ?').get(hashToken(s.id)) as { agent_label: string | null } | undefined;
-    return { email: s.email, createdAt: s.createdAt, expiresAt: s.expiresAt, browser: row?.agent_label ?? null };
+    return { email: s.email, createdAt: s.createdAt, expiresAt: s.expiresAt, browser: await d.sessions.agentLabel(s.id) };
   });
 
-  router.post('/dashboard/api/session/signout-everywhere', controlled((ctx) => {
-    const s = actionSession(ctx, d);
-    // The sessions end and the audit row is written together: if the row cannot be written, nothing ends.
-    const ended = tx(d.db, () => {
-      const n = d.sessions.destroyAllFor(s.email);
-      d.audit.record({ actor: s.email, event: 'auth.signout_everywhere', kind: 'auth', detail: `Signed out everywhere (${n} ${n === 1 ? 'session' : 'sessions'})`, requestId: ctx.requestId });
-      return n;
-    });
+  router.post('/dashboard/api/session/signout-everywhere', controlled(async (ctx) => {
+    const s = await actionSession(ctx, d);
+    // The audit row first, then this customer's sessions of this email end: if the row cannot be written, nothing ends.
+    const tenant = d.tenantId ?? FOUNDER_TENANT_ID;
+    const n = await d.sessions.countFor(s.email, tenant);
+    const audited = d.audited ?? auditedWrite(d.db, d.db);
+    const ended = await audited(
+      (q) => d.audit.record({ actor: s.email, event: 'auth.signout_everywhere', kind: 'auth', detail: `Signed out everywhere (${n} ${n === 1 ? 'session' : 'sessions'})`, requestId: ctx.requestId }, q),
+      (q) => d.sessions.destroyAllFor(s.email, q, tenant),
+    );
     ctx.res.setHeader('Set-Cookie', clearSessionCookie({ secure: d.secureFor(ctx.req) }));
     sendJson(ctx.res, 200, { ended });
   }));

@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { Writable } from 'node:stream';
 import { proto, WAMessageStubType, type WAMessageUpdate } from 'baileys';
 import ExcelJS from 'exceljs';
+import type { Db, Sql } from '../src/store/db.ts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.ts';
 import { MAX_OUTPUT_TOKENS } from '../src/brain/claudeClient.ts';
@@ -16,8 +17,9 @@ import { createLogger, silentLogger, type Logger } from '../src/util/logger.ts';
 import { AllowList } from '../src/wa/allowlist.ts';
 import { openSessionDb, useEncryptedAuthState } from '../src/wa/authState.ts';
 import { WhatsAppGateway } from '../src/wa/gateway.ts';
+import { DbWork, expectNoTimers } from './helpers/advance.ts';
 import { FakeAi, op } from './helpers/ai.ts';
-import { MEHTA, OTHER_GROUP, seededDb, SHARMA } from './helpers/db.ts';
+import { idOf, MEHTA, OTHER_GROUP, row, rows, seededDb, SHARMA } from './helpers/db.ts';
 import { FakeDrive } from './helpers/fakeDrive.ts';
 import { closeWith, FakeSocket, SEND_METHODS } from './helpers/fakeSocket.ts';
 import { waText } from './helpers/wa.ts';
@@ -38,6 +40,24 @@ class CapturingDrive extends FakeDrive {
     await super.updateFile(id, mime, body);
     this.last = body;
   }
+}
+
+/**
+ * From now on a message cannot be stored: its INSERT fails through the Db, on either engine (a full disk, a lost
+ * connection). Ingest stores inside a transaction, so its handle fails the same way.
+ */
+function failStoring(db: Db, message: string): void {
+  const fails = (sql: string) => /INSERT INTO messages/.test(sql);
+  const failing = (q: Sql): Sql => ({
+    get: (s, p) => q.get(s, p), all: (s, p) => q.all(s, p), exec: (s) => q.exec(s),
+    run: (s, p) => (fails(s) ? Promise.reject(new Error(message)) : q.run(s, p)),
+    tx: (fn) => q.tx((inner) => fn(failing(inner))),
+  });
+  db = unwrapped.get(db) ?? db; // spied under DbWork's wrapper, which reads through to it (a spy on the wrapper loops)
+  const run = db.run.bind(db);
+  const tx = db.tx.bind(db);
+  vi.spyOn(db, 'run').mockImplementation((s, p) => (fails(s) ? Promise.reject(new Error(message)) : run(s, p)));
+  vi.spyOn(db, 'tx').mockImplementation(((fn: (q: Sql) => Promise<unknown>) => tx((q) => fn(failing(q)))) as Db['tx']);
 }
 
 function capturingLogger() {
@@ -63,13 +83,27 @@ async function overviewTexts(buf: Buffer): Promise<string[]> {
   return out;
 }
 
-function setup(o: { ai?: FakeAi; drive?: FakeDrive; log?: Logger; drainMs?: number } = {}) {
+/** The app's statements in flight (setup's database): advance() moves fake time and waits for them between timers. */
+const work = new DbWork();
+const advance = (ms: number) => work.advance(ms);
+/** setup's wrapped database, to the one it wraps. */
+const unwrapped = new WeakMap<Db, Db>();
+
+/**
+ * Waits until the events the last setup's gateway was handed are stored (the gateway hands them over in order), and
+ * the database work they start is done: a history answer is stored on its own channel, then sets its next timer.
+ */
+let settled: () => Promise<void> = async () => {};
+
+async function setup(o: { ai?: FakeAi; drive?: FakeDrive; log?: Logger; drainMs?: number; pollMs?: number } = {}) {
   const ai = o.ai ?? new FakeAi();
   const drive = o.drive ?? new FakeDrive();
-  const db = seededDb();
+  const plain = await seededDb();
+  const db = work.wrap(plain);
+  unwrapped.set(db, plain);
   const allow = new AllowList([SHARMA.groupId, MEHTA.groupId]);
   const sockets: FakeSocket[] = [];
-  const auth = useEncryptedAuthState(openSessionDb(':memory:'), randomBytes(32));
+  const auth = await useEncryptedAuthState(openSessionDb(':memory:'), randomBytes(32));
   const gateway = new WhatsAppGateway({
     allow,
     factory: () => {
@@ -80,9 +114,13 @@ function setup(o: { ai?: FakeAi; drive?: FakeDrive; log?: Logger; drainMs?: numb
     auth: auth.state,
     saveCreds: auth.saveCreds,
   });
-  const app = createApp({
+  settled = async () => {
+    await gateway.idle();
+    await work.quiet();
+  };
+  const app = await createApp({
     db, clock: systemClock, log: o.log ?? silentLogger(), gateway, allow, ai, drive, prices: P, spendCapUsd: 15,
-    quietMs: 240_000, maxWaitMs: 1_200_000, maxConcurrent: 3, dataDir: '.', freeBytes: () => 500e9, pollMs: 30_000,
+    quietMs: 240_000, maxWaitMs: 1_200_000, maxConcurrent: 3, dataDir: '.', freeBytes: () => 500e9, pollMs: o.pollMs ?? 30_000,
     drainMs: o.drainMs,
   });
   app.start();
@@ -111,14 +149,22 @@ function stopping(app: { stop(): Promise<void> }) {
   return { state, promise };
 }
 
-/** stop() ends with a final upload, and building the workbook runs on (fake) timers: advance until it resolves. */
+/**
+ * stop() ends with a final upload, and building the workbook runs on (fake) timers: advance until it resolves, then
+ * real waits (the database's own I/O) up to 8 s, under the test's 20 s timeout so a hang names itself.
+ */
 async function finish(stop: ReturnType<typeof stopping>): Promise<void> {
-  for (let i = 0; i < 30 && !stop.state.done; i++) await vi.advanceTimersByTimeAsync(1_000);
-  expect(stop.state.done).toBe(true);
-  await stop.promise;
+  await work.until(stop.promise, { fakeMs: 30_000, stepMs: 1_000, realCapMs: 8_000, label: 'app.stop()' });
 }
 
 const stopApp = (app: { stop(): Promise<void> }) => finish(stopping(app));
+
+/**
+ * advance(ms), exactly ms of fake time, with a cap on the real time it may take: a stage still running after
+ * realCapMs fails naming `label`, not with the test's plain 20 s timeout.
+ */
+const advanceCapped = (ms: number, label: string, realCapMs: number) =>
+  work.until(advance(ms), { fakeMs: 0, stepMs: 1_000, realCapMs, label });
 
 /** Every row of the Sharma tab as cell texts. Call with real timers. */
 async function sharmaRows(buf: Buffer): Promise<string[][]> {
@@ -146,27 +192,28 @@ describe('app end to end', () => {
   it('stores only allowed messages, reconciles them and publishes the tracker', async () => {
     const ai = new FakeAi([{ ops: [bannerTask()] }]);
     const { lines, log } = capturingLogger();
-    const { db, drive, app, sock } = setup({ ai, log });
+    const { db, drive, app, sock } = await setup({ ai, log });
     sock.emit('messages.upsert', { type: 'notify', messages: [
       waText('m1', 'Rahul, homepage banner thoda bright karo. 18 tak chahiye.'),
       waText('x1', 'private family plans', { group: OTHER_GROUP }),
       waText('p1', 'personal chat', { group: '919811111111@s.whatsapp.net' }),
     ] });
-    expect(db.prepare('SELECT wa_id FROM messages').all()).toEqual([{ wa_id: 'm1' }]);
+    await settled();
+    expect(await rows(db, 'SELECT wa_id FROM messages')).toEqual([{ wa_id: 'm1' }]);
 
-    await vi.advanceTimersByTimeAsync(240_000);
+    await advance(240_000);
     expect(ai.calls).toHaveLength(1);
     expect(ai.calls[0]!.user).toContain('banner thoda bright');
     expect(ai.calls[0]!.user).not.toContain('private family plans');
     expect(ai.calls[0]!.user).not.toContain('personal chat');
-    expect(listTasks(db, 1).map((t) => t.code)).toEqual(['SHA-001']);
+    expect((await listTasks(db, await idOf(db, 'SHA'))).map((t) => t.code)).toEqual(['SHA-001']);
 
-    await vi.advanceTimersByTimeAsync(60_000);
+    await advance(60_000);
     expect(drive.created.map((f) => f.name)).toEqual(['Tracker.xlsx']);
     expect(drive.updated.length).toBeGreaterThanOrEqual(1);
     for (const name of SEND_METHODS) expect(sock[name]).not.toHaveBeenCalled();
     await stopApp(app);
-    expect(vi.getTimerCount()).toBe(0);
+    expectNoTimers();
     const logged = JSON.stringify(lines);
     expect(logged).not.toContain('thoda bright');
     expect(logged).not.toContain('private family plans');
@@ -174,21 +221,22 @@ describe('app end to end', () => {
   });
 
   it('applies a new allow-list without a restart', async () => {
-    const { db, app, sock } = setup();
-    app.reloadClients([SHARMA]);
+    const { db, app, sock } = await setup();
+    await app.reloadClients([SHARMA]);
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('z1', 'Mehta message', { group: MEHTA.groupId })] });
-    expect(db.prepare("SELECT COUNT(*) AS n FROM messages WHERE wa_id = 'z1'").get()).toEqual({ n: 0 });
+    await settled();
+    expect(await row(db, "SELECT COUNT(*) AS n FROM messages WHERE wa_id = 'z1'")).toEqual({ n: 0 });
     await stopApp(app);
   });
 
   it('republishes when the CLI requests a rebuild', async () => {
-    const { db, drive, app } = setup();
-    await vi.advanceTimersByTimeAsync(1_000);
+    const { db, drive, app } = await setup();
+    await advance(1_000);
     const before = drive.uploads;
-    setKv(db, 'rebuild_requested', new Date().toISOString());
-    await vi.advanceTimersByTimeAsync(90_000);
+    await setKv(db, 'rebuild_requested', new Date().toISOString());
+    await advance(90_000);
     expect(drive.uploads).toBeGreaterThan(before);
-    expect(getKv(db, 'rebuild_requested')).toBe('');
+    expect(await getKv(db, 'rebuild_requested')).toBe('');
     await stopApp(app);
   });
 });
@@ -206,23 +254,24 @@ describe('app shutdown', () => {
     ai.gate = new Promise<void>((r) => {
       release = r;
     });
-    const { db, app, sock } = setup({ ai });
+    const { db, app, sock } = await setup({ ai });
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'Rahul, homepage banner thoda bright karo.')] });
-    await vi.advanceTimersByTimeAsync(240_000);
+    await settled();
+    await advance(240_000);
     expect(ai.calls).toHaveLength(1);
 
     const stop = stopping(app);
-    await vi.advanceTimersByTimeAsync(60_000);
+    await advance(60_000);
     expect(stop.state.done).toBe(false);
-    expect(listTasks(db, 1)).toEqual([]);
+    expect(await listTasks(db, await idOf(db, 'SHA'))).toEqual([]);
     expect(sock.end).not.toHaveBeenCalled(); // WhatsApp stays connected during the drain
 
     release();
     await finish(stop);
-    expect(listTasks(db, 1).map((t) => t.code)).toEqual(['SHA-001']);
-    expect(db.prepare('SELECT COUNT(*) AS n FROM messages WHERE processed_at IS NULL').get()).toEqual({ n: 0 });
+    expect((await listTasks(db, await idOf(db, 'SHA'))).map((t) => t.code)).toEqual(['SHA-001']);
+    expect(await row(db, 'SELECT COUNT(*) AS n FROM messages WHERE processed_at IS NULL')).toEqual({ n: 0 });
     expect(sock.end).toHaveBeenCalledTimes(1);
-    expect(vi.getTimerCount()).toBe(0);
+    expectNoTimers();
   });
 
   it('uploads a result applied during the drain before stop resolves', async () => {
@@ -230,18 +279,19 @@ describe('app shutdown', () => {
     const g = gate();
     ai.gate = g.promise;
     const drive = new CapturingDrive();
-    const { app, sock } = setup({ ai, drive });
+    const { app, sock } = await setup({ ai, drive });
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'Rahul, homepage banner thoda bright karo.')] });
-    await vi.advanceTimersByTimeAsync(239_000);
+    await settled();
+    await advance(239_000);
     expect(drive.uploads).toBe(1);
-    await vi.advanceTimersByTimeAsync(2_000);
+    await advance(2_000);
     expect(ai.calls).toHaveLength(1);
 
     const stop = stopping(app);
     g.resolve();
     await finish(stop);
     expect(drive.uploads).toBe(2);
-    expect(vi.getTimerCount()).toBe(0);
+    expectNoTimers();
 
     vi.useRealTimers();
     const wb = new ExcelJS.Workbook();
@@ -256,26 +306,27 @@ describe('app shutdown', () => {
     const aiCall = gate();
     ai.gate = aiCall.promise;
     const drive = new CapturingDrive();
-    const { db, app, sock } = setup({ ai, drive });
+    const { db, app, sock } = await setup({ ai, drive });
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'Rahul, homepage banner thoda bright karo.')] });
-    await vi.advanceTimersByTimeAsync(241_000);
+    await settled();
+    await advance(241_000);
     expect(ai.calls).toHaveLength(1);
     expect(drive.uploads).toBe(1);
 
     const upload = gate();
     drive.gate = upload.promise;
     app.publisher.schedule();
-    await vi.advanceTimersByTimeAsync(1_000); // an upload of the old state is now in flight
+    await advance(1_000); // an upload of the old state is now in flight
     const stop = stopping(app);
     aiCall.resolve();
-    await vi.advanceTimersByTimeAsync(1_000); // the drain applies the paid result
-    expect(listTasks(db, 1).map((t) => t.code)).toEqual(['SHA-001']);
+    await advance(1_000); // the drain applies the paid result
+    expect((await listTasks(db, await idOf(db, 'SHA'))).map((t) => t.code)).toEqual(['SHA-001']);
     expect(drive.uploads).toBe(1);
     drive.gate = undefined;
     upload.resolve();
     await finish(stop);
     expect(drive.uploads).toBe(3);
-    expect(vi.getTimerCount()).toBe(0);
+    expectNoTimers();
 
     vi.useRealTimers();
     expect((await sharmaRows(drive.last!)).map((r) => r[0])).toContain('SHA-001');
@@ -285,105 +336,110 @@ describe('app shutdown', () => {
     const ai = new FakeAi();
     ai.gate = new Promise<void>(() => {});
     const { lines, log } = capturingLogger();
-    const { db, app, sock } = setup({ ai, drainMs: 5_000, log });
+    const { db, app, sock } = await setup({ ai, drainMs: 5_000, log });
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'hello')] });
-    await vi.advanceTimersByTimeAsync(240_000);
+    await settled();
+    await advance(240_000);
     expect(ai.calls).toHaveLength(1);
 
     await stopApp(app);
     const c = ai.calls[0]!;
-    const rows = db.prepare('SELECT kind, usd, detail FROM spend').all() as { kind: string; usd: number; detail: string }[];
+    const rows = await db.all<{ kind: string; usd: number; detail: string }>('SELECT kind, usd, detail FROM spend');
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ kind: 'ai', detail: 'shutdown before the paid call finished (estimated)' });
     expect(rows[0]!.usd).toBeCloseTo(estimateCostUsd(c.system.length + c.user.length, P, MAX_OUTPUT_TOKENS), 9);
     expect(lines.find((l) => l.count === 1)).toMatchObject({ level: 40 });
-    expect(vi.getTimerCount()).toBe(0);
+    expectNoTimers();
   });
 
   it('books nothing extra when the drain finished cleanly', async () => {
     const ai = new FakeAi([{ ops: [bannerTask()] }]);
     const aiCall = gate();
     ai.gate = aiCall.promise;
-    const { db, app, sock } = setup({ ai });
+    const { db, app, sock } = await setup({ ai });
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'Rahul, homepage banner thoda bright karo.')] });
-    await vi.advanceTimersByTimeAsync(241_000);
+    await settled();
+    await advance(241_000);
     const stop = stopping(app);
     aiCall.resolve();
     await finish(stop);
-    expect(db.prepare('SELECT detail FROM spend').all()).toEqual([{ detail: 'batch 1' }]);
+    const batch = (await row<{ id: number }>(db, 'SELECT id FROM batches'))!.id; // the database's id (Postgres: shared)
+    expect(await db.all('SELECT detail FROM spend')).toEqual([{ detail: `batch ${batch}` }]);
   });
 
   it('starting twice leaves no extra timer behind', async () => {
-    const { app } = setup();
+    const { app } = await setup();
     app.start();
     await stopApp(app);
-    expect(vi.getTimerCount()).toBe(0);
+    expectNoTimers();
   });
 
   it('gives up on a hung AI call after 120 seconds by default', async () => {
     const ai = new FakeAi();
     ai.gate = new Promise<void>(() => {});
-    const { app, sock } = setup({ ai });
+    const { app, sock } = await setup({ ai });
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'hello')] });
-    await vi.advanceTimersByTimeAsync(240_000);
+    await settled();
+    await advance(240_000);
     expect(ai.calls).toHaveLength(1);
 
     const t0 = Date.now();
     const stop = stopping(app);
-    await vi.advanceTimersByTimeAsync(119_000);
+    await advance(119_000);
     expect(stop.state.done).toBe(false);
     await finish(stop); // the drain gives up at 120 s, then the final upload runs
     expect(Date.now() - t0).toBeLessThan(125_000);
-    expect(vi.getTimerCount()).toBe(0);
+    expectNoTimers();
   });
 
   it('gives up on a hung AI call after drainMs', async () => {
     const ai = new FakeAi();
     ai.gate = new Promise<void>(() => {});
-    const { app, sock } = setup({ ai, drainMs: 5_000 });
+    const { app, sock } = await setup({ ai, drainMs: 5_000 });
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'hello')] });
-    await vi.advanceTimersByTimeAsync(240_000);
+    await settled();
+    await advance(240_000);
 
     const t0 = Date.now();
     const stop = stopping(app);
-    await vi.advanceTimersByTimeAsync(4_900);
+    await advance(4_900);
     expect(stop.state.done).toBe(false);
     await finish(stop);
     expect(Date.now() - t0).toBeLessThan(10_000);
-    expect(vi.getTimerCount()).toBe(0);
+    expectNoTimers();
   });
 
   it('waits at most 5 seconds for a gateway that never stops', async () => {
-    const { app, gateway } = setup();
+    const { app, gateway } = await setup();
     const realStop = gateway.stop.bind(gateway);
     vi.spyOn(gateway, 'stop').mockImplementation(() => {
       void realStop(); // clears the gateway's own timers; the caller still never sees it finish
       return new Promise<void>(() => {});
     });
-    await vi.advanceTimersByTimeAsync(1_000);
+    await advance(1_000);
 
     const stop = stopping(app);
-    await vi.advanceTimersByTimeAsync(3_000);
+    await advance(3_000);
     expect(stop.state.done).toBe(false);
-    await vi.advanceTimersByTimeAsync(2_500); // the 5 s cap has passed by now
+    await advance(2_500); // the 5 s cap has passed by now
     expect(stop.state.done).toBe(true);
     await finish(stop);
-    expect(vi.getTimerCount()).toBe(0);
+    expectNoTimers();
   });
 
   it('waits at most 10 seconds for a hung Drive upload', async () => {
     const drive = new FakeDrive();
     drive.gate = new Promise<void>(() => {});
-    const { app } = setup({ drive });
-    await vi.advanceTimersByTimeAsync(1_000);
+    const { app } = await setup({ drive });
+    await advance(1_000);
     expect(drive.folders).toEqual(['WA Agent']); // the upload itself is hanging
 
     const stop = stopping(app);
-    await vi.advanceTimersByTimeAsync(9_900);
+    await advance(9_900);
     expect(stop.state.done).toBe(false);
-    await vi.advanceTimersByTimeAsync(100);
+    await advance(100);
     expect(stop.state.done).toBe(true);
-    expect(vi.getTimerCount()).toBe(0);
+    expectNoTimers();
   });
 });
 
@@ -396,26 +452,29 @@ describe('app allow-list changes', () => {
 
   it('cancels a removed group: no AI call and no reconcile run for it', async () => {
     const run = vi.spyOn(Reconciler.prototype, 'run');
-    const { db, ai, app, sock } = setup();
+    const { db, ai, app, sock } = await setup();
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('z1', 'Mehta message', { group: MEHTA.groupId })] });
-    expect(db.prepare("SELECT COUNT(*) AS n FROM messages WHERE wa_id = 'z1'").get()).toEqual({ n: 1 });
+    await settled();
+    expect(await row(db, "SELECT COUNT(*) AS n FROM messages WHERE wa_id = 'z1'")).toEqual({ n: 1 });
 
-    app.reloadClients([SHARMA]);
-    await vi.advanceTimersByTimeAsync(1_300_000);
+    await app.reloadClients([SHARMA]);
+    await advance(1_300_000);
     expect(ai.calls).toEqual([]);
     expect(run).not.toHaveBeenCalled();
     await stopApp(app);
   });
 
   it('clears the health warning of a failed group once it is removed', async () => {
-    const { db, app, sock } = setup({ ai: new FakeAi([new Error('boom')]) });
+    const { db, app, sock } = await setup({ ai: new FakeAi([new Error('boom')]) });
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('z1', 'Mehta message', { group: MEHTA.groupId })] });
-    await vi.advanceTimersByTimeAsync(240_000);
+    await settled();
+    await advance(240_000);
     expect(app.health.line()).toEqual({ ok: false, text: '⚠️ 1 group waiting (AI error)' });
 
-    app.reloadClients([SHARMA]);
+    await app.reloadClients([SHARMA]);
     expect(app.health.line().ok).toBe(true);
-    expect(readHealthSnapshot(db)!.failed).toEqual([]);
+    await advance(0); // the snapshot is saved after the file counts are read again
+    expect((await readHealthSnapshot(db))!.failed).toEqual([]);
     await stopApp(app);
   });
 
@@ -423,18 +482,19 @@ describe('app allow-list changes', () => {
     const ai = new FakeAi([new Error('boom')]);
     const g = gate();
     ai.gate = g.promise;
-    const { db, drive, app, sock } = setup({ ai });
+    const { db, drive, app, sock } = await setup({ ai });
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('z1', 'Mehta message', { group: MEHTA.groupId })] });
-    await vi.advanceTimersByTimeAsync(240_000);
+    await settled();
+    await advance(240_000);
     expect(ai.calls).toHaveLength(1);
 
-    app.reloadClients([SHARMA]);
-    await vi.advanceTimersByTimeAsync(60_000); // the publish that reloadClients scheduled
+    await app.reloadClients([SHARMA]);
+    await advance(60_000); // the publish that reloadClients scheduled
     const uploads = drive.uploads;
     g.resolve();
-    await vi.advanceTimersByTimeAsync(120_000);
+    await advance(120_000);
     expect(app.health.line().ok).toBe(true);
-    expect(readHealthSnapshot(db)!.failed).toEqual([]);
+    expect((await readHealthSnapshot(db))!.failed).toEqual([]);
     expect(drive.uploads).toBe(uploads); // no publish scheduled for the removed group
     await stopApp(app);
   });
@@ -442,35 +502,38 @@ describe('app allow-list changes', () => {
   it('ignores the crash of a group removed while its run was in flight', async () => {
     const g = gate<never>();
     vi.spyOn(Reconciler.prototype, 'run').mockImplementationOnce(() => g.promise);
-    const { db, app, sock } = setup();
+    const { db, app, sock } = await setup();
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('z1', 'Mehta message', { group: MEHTA.groupId })] });
-    await vi.advanceTimersByTimeAsync(240_000);
+    await settled();
+    await advance(240_000);
 
-    app.reloadClients([SHARMA]);
+    await app.reloadClients([SHARMA]);
     g.reject(new Error('boom'));
-    await vi.advanceTimersByTimeAsync(1_000);
+    await advance(1_000);
     expect(app.health.line().ok).toBe(true);
-    expect(readHealthSnapshot(db)!.failed).toEqual([]);
+    expect((await readHealthSnapshot(db))!.failed).toEqual([]);
     await stopApp(app);
   });
 
   it('keeps the old allow-list when the new config conflicts with the database', async () => {
-    const { db, app, sock } = setup();
-    expect(() => app.reloadClients([SHARMA, { ...MEHTA, code: 'MEX' }])).toThrow(/codes are permanent/);
+    const { db, app, sock } = await setup();
+    await expect(app.reloadClients([SHARMA, { ...MEHTA, code: 'MEX' }])).rejects.toThrow(/codes are permanent/);
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('z1', 'Mehta message', { group: MEHTA.groupId })] });
-    expect(db.prepare("SELECT COUNT(*) AS n FROM messages WHERE wa_id = 'z1'").get()).toEqual({ n: 1 });
+    await settled();
+    expect(await row(db, "SELECT COUNT(*) AS n FROM messages WHERE wa_id = 'z1'")).toEqual({ n: 1 });
     await stopApp(app);
   });
 
   it('picks up the waiting messages of a group that is added back', async () => {
-    const { ai, app, sock } = setup();
+    const { ai, app, sock } = await setup();
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('z1', 'Mehta message', { group: MEHTA.groupId })] });
-    app.reloadClients([SHARMA]);
-    await vi.advanceTimersByTimeAsync(1_300_000);
+    await settled();
+    await app.reloadClients([SHARMA]);
+    await advance(1_300_000);
     expect(ai.calls).toEqual([]);
 
-    app.reloadClients([SHARMA, MEHTA]);
-    await vi.advanceTimersByTimeAsync(30_000 + 240_000); // next tick, then the quiet period
+    await app.reloadClients([SHARMA, MEHTA]);
+    await advance(30_000 + 240_000); // next tick, then the quiet period
     expect(ai.calls).toHaveLength(1);
     expect(ai.calls[0]!.user).toContain('Mehta message');
     await stopApp(app);
@@ -486,23 +549,25 @@ describe('app ingest failures', () => {
 
   it('logs a failed database write without the chat text and still counts it', async () => {
     const { lines, log } = capturingLogger();
-    const { db, app, sock, gateway } = setup({ log });
-    db.exec("CREATE TRIGGER fail_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'cannot store: banner thoda bright'); END");
+    const { db, app, sock, gateway } = await setup({ log });
+    failStoring(db, 'cannot store: banner thoda bright');
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'Rahul, homepage banner thoda bright karo.')] });
+    await settled();
 
     expect(gateway.failedCount()).toBe(1);
-    expect(lines.find((l) => l.msg === 'ingest failed')).toMatchObject({ err: { type: 'SqliteError' } });
+    expect(lines.find((l) => l.msg === 'ingest failed')).toMatchObject({ err: { type: 'Error' } });
     expect(JSON.stringify(lines)).not.toContain('thoda bright');
     await stopApp(app);
   });
 
   it('records the count of unsaved messages on the next tick and warns in health', async () => {
-    const { db, app, sock, gateway } = setup();
-    db.exec("CREATE TRIGGER fail_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'cannot store'); END");
+    const { db, app, sock, gateway } = await setup();
+    failStoring(db, 'cannot store');
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'hello')] });
+    await settled();
     expect(gateway.failedCount()).toBe(1);
-    await vi.advanceTimersByTimeAsync(30_000);
-    expect(readHealthSnapshot(db)!.ingestFailures).toBe(1);
+    await advance(30_000);
+    expect((await readHealthSnapshot(db))!.ingestFailures).toBe(1);
     expect(app.health.line()).toEqual({ ok: false, text: '⚠️ 1 incoming message could not be saved. See docs/SETUP.md.' });
     await stopApp(app);
   });
@@ -517,13 +582,14 @@ describe('app health and publishing', () => {
 
   it('publishes after a failed reconcile so the workbook shows the problem', async () => {
     const drive = new CapturingDrive();
-    const { app, sock } = setup({ ai: new FakeAi([new Error('boom')]), drive });
+    const { app, sock } = await setup({ ai: new FakeAi([new Error('boom')]), drive });
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'hello')] });
-    await vi.advanceTimersByTimeAsync(239_000);
+    await settled();
+    await advance(239_000);
     expect(drive.uploads).toBe(1);
 
-    await vi.advanceTimersByTimeAsync(2_000); // the reconcile fails at 240 s
-    await vi.advanceTimersByTimeAsync(30_000);
+    await advance(2_000); // the reconcile fails at 240 s
+    await advance(30_000);
     expect(drive.uploads).toBe(2);
     await stopApp(app);
 
@@ -533,27 +599,32 @@ describe('app health and publishing', () => {
 
   it('a run that waits for a shared file calls no AI and publishes nothing, and goes ahead once the file stops blocking (12d)', async () => {
     const run = vi.spyOn(Reconciler.prototype, 'run');
-    const { db, ai, drive, app, sock } = setup();
+    // A tick every 240 s, not 30 s: the 40 minutes below take 10 ticks, not 80 (each one database work, slow on
+    // Postgres). The points the test relies on are not the tick's: the run at 240 s is the quiet timer's, and the file's
+    // 30 minutes are its own; the first tick after them (1,920 s) re-runs the message, well inside the 40 minutes.
+    const { db, ai, drive, app, sock } = await setup({ pollMs: 240_000 });
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'see this')] });
+    await settled();
     // A file of this message is still being read (the media queue is wired in Task 15).
-    insertMedia(db, {
-      messageId: messageRowId(db, 1, 'm1')!, clientId: 1, kind: 'image', status: 'pending', mimeType: 'image/jpeg', fileName: null, fileSize: 1000,
+    await insertMedia(db, {
+      messageId: (await messageRowId(db, await idOf(db, 'SHA'), 'm1'))!, clientId: await idOf(db, 'SHA'), kind: 'image', status: 'pending', mimeType: 'image/jpeg', fileName: null, fileSize: 1000,
       seconds: null, forwarded: false, refEnc: null, errorCode: null, createdAt: new Date().toISOString(),
     });
-    await vi.advanceTimersByTimeAsync(239_000);
+    // Real caps per stage 4 + 2 + 2 + 8 s, all under the 20 s timeout: a slow or hung stage names itself.
+    await advanceCapped(239_000, '12d: to 239 s', 4_000);
     expect(drive.uploads).toBe(1);
 
-    await vi.advanceTimersByTimeAsync(2_000); // the run at 240 s waits for the file
-    await vi.advanceTimersByTimeAsync(60_000);
+    await advanceCapped(2_000, '12d: the run at 240 s', 2_000); // the run at 240 s waits for the file
+    await advanceCapped(60_000, '12d: 60 s more', 2_000);
     expect(run).toHaveBeenCalled();
     await expect(run.mock.results[0]!.value).resolves.toEqual({ status: 'waiting' });
     expect(ai.calls).toHaveLength(0);
     expect(drive.uploads).toBe(1);
-    expect(readHealthSnapshot(db)!.failed).toEqual([]);
+    expect((await readHealthSnapshot(db))!.failed).toEqual([]);
 
     // 30 minutes after the file arrived it no longer holds up its message: a later run goes ahead and publishes. The
     // file, still pending, now counts as waiting too long, and that change to the health line publishes too (final review).
-    await vi.advanceTimersByTimeAsync(40 * 60_000);
+    await advanceCapped(40 * 60_000, '12d: 40 min more', 8_000);
     expect(ai.calls).toHaveLength(1);
     expect(ai.calls[0]!.user).toContain(': see this {image, still being read}');
     expect(drive.uploads).toBe(3);
@@ -563,62 +634,62 @@ describe('app health and publishing', () => {
   it('logs a crashed reconcile without its message, records it and publishes', async () => {
     vi.spyOn(Reconciler.prototype, 'run').mockRejectedValueOnce(new Error('Rahul said the secret banner text'));
     const { lines, log } = capturingLogger();
-    const { db, drive, app, sock } = setup({ log });
+    const { db, drive, app, sock } = await setup({ log });
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'hello')] });
-    await vi.advanceTimersByTimeAsync(239_000);
+    await settled();
+    await advance(239_000);
     expect(drive.uploads).toBe(1);
 
-    await vi.advanceTimersByTimeAsync(2_000);
-    await vi.advanceTimersByTimeAsync(30_000);
+    await advance(2_000);
+    await advance(30_000);
     const crash = lines.find((l) => l.msg === 'reconcile crashed');
-    expect(crash).toMatchObject({ clientId: 1, err: { type: 'Error' } });
+    expect(crash).toMatchObject({ clientId: await idOf(db, 'SHA'), err: { type: 'Error' } });
     expect(JSON.stringify(lines)).not.toContain('secret banner text');
-    expect(readHealthSnapshot(db)!.failed).toEqual([{ clientId: 1, errorCode: 'crash' }]);
+    expect((await readHealthSnapshot(db))!.failed).toEqual([{ clientId: await idOf(db, 'SHA'), errorCode: 'crash' }]);
     expect(drive.uploads).toBe(2);
     await stopApp(app);
   });
 
   it('keeps ticking when saving the health snapshot fails', async () => {
     const { lines, log } = capturingLogger();
-    const { db, drive, app } = setup({ log });
-    await vi.advanceTimersByTimeAsync(1_000);
+    const { db, drive, app } = await setup({ log });
+    await advance(1_000);
     const persist = vi.spyOn(app.health, 'persist').mockImplementation(() => {
       throw Object.assign(new Error('database is locked'), { code: 'SQLITE_BUSY' });
     });
 
-    await vi.advanceTimersByTimeAsync(30_000);
+    await advance(30_000);
     expect(lines.filter((l) => l.msg === 'tick failed')).toHaveLength(1);
     const before = drive.uploads;
-    setKv(db, 'rebuild_requested', new Date().toISOString());
-    await vi.advanceTimersByTimeAsync(60_000);
+    await setKv(db, 'rebuild_requested', new Date().toISOString());
+    await advance(60_000);
     expect(lines.filter((l) => l.msg === 'tick failed').length).toBeGreaterThanOrEqual(2);
     expect(lines.find((l) => l.msg === 'tick failed')).toMatchObject({ err: { type: 'Error', code: 'SQLITE_BUSY' } });
-    expect(getKv(db, 'rebuild_requested')).toBe('');
+    expect(await getKv(db, 'rebuild_requested')).toBe('');
     expect(drive.uploads).toBeGreaterThan(before);
 
     persist.mockRestore();
     await stopApp(app);
-    expect(vi.getTimerCount()).toBe(0);
+    expectNoTimers();
   });
 
   it('reports Drive failures in health, keeps them out of the uploaded workbook, and clears them after an upload', async () => {
     const drive = new CapturingDrive();
-    const { db, app } = setup({ drive });
-    await vi.advanceTimersByTimeAsync(1_000);
+    const { db, app } = await setup({ drive });
+    await advance(1_000);
     expect(drive.created).toHaveLength(1);
 
     drive.failUpdateWith = Object.assign(new Error('Unauthorized'), { code: 401 });
-    const failed = app.publisher.publishNow();
-    await vi.advanceTimersByTimeAsync(1_000);
-    await failed;
+    // Fake time short of the 60 s backoff retry, so only this publish runs.
+    await work.until(app.publisher.publishNow(), { fakeMs: 10_000, stepMs: 1_000, realCapMs: 8_000, label: 'publishNow() with a 401' });
     expect(app.health.line()).toEqual({ ok: false, text: '❌ Google sign-in expired. Run: npm run cli -- google-auth, then restart the service' });
-    expect(readHealthSnapshot(db)!.publishFailingSince).not.toBeNull();
+    expect((await readHealthSnapshot(db))!.publishFailingSince).not.toBeNull();
 
     drive.failUpdateWith = undefined;
-    await vi.advanceTimersByTimeAsync(60_000); // the publisher's backoff retry
+    await advance(60_000); // the publisher's backoff retry
     expect(drive.updated).toHaveLength(1);
     expect(app.health.line().ok).toBe(true);
-    expect(readHealthSnapshot(db)!.publishFailingSince).toBeNull();
+    expect((await readHealthSnapshot(db))!.publishFailingSince).toBeNull();
     await stopApp(app);
 
     vi.useRealTimers();
@@ -629,14 +700,16 @@ describe('app health and publishing', () => {
 
   it('refreshes the workbook when the source message of a task is deleted', async () => {
     const drive = new CapturingDrive();
-    const { db, app, sock } = setup({ ai: new FakeAi([{ ops: [bannerTask()] }]), drive });
+    const { db, app, sock } = await setup({ ai: new FakeAi([{ ops: [bannerTask()] }]), drive });
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'Rahul, homepage banner thoda bright karo.')] });
-    await vi.advanceTimersByTimeAsync(300_000); // reconciled at 240 s and uploaded
-    expect(listTasks(db, 1).map((t) => t.code)).toEqual(['SHA-001']);
+    await settled();
+    await advance(300_000); // reconciled at 240 s and uploaded
+    expect((await listTasks(db, await idOf(db, 'SHA'))).map((t) => t.code)).toEqual(['SHA-001']);
     const before = drive.uploads;
 
     sock.emit('messages.update', [{ key: { remoteJid: SHARMA.groupId, id: 'm1' }, update: { messageStubType: WAMessageStubType.REVOKE } } as WAMessageUpdate]);
-    await vi.advanceTimersByTimeAsync(60_000);
+    await settled();
+    await advance(60_000);
     expect(drive.uploads).toBe(before + 1);
     const uploaded = drive.last!;
     await stopApp(app);
@@ -648,19 +721,20 @@ describe('app health and publishing', () => {
 
   it('publishes once when only the workbook health line changes, and not again while it stays the same (final review)', async () => {
     const drive = new CapturingDrive();
-    const { db, app, sock } = setup({ drive });
-    await vi.advanceTimersByTimeAsync(1_000);
+    const { db, app, sock } = await setup({ drive });
+    await advance(1_000);
     expect(drive.uploads).toBe(1); // the start publish
-    await vi.advanceTimersByTimeAsync(60_000); // two ticks with the same line publish nothing
+    await advance(60_000); // two ticks with the same line publish nothing
     expect(drive.uploads).toBe(1);
 
     // A message that cannot be saved changes only the health line: no reconcile, no file, no other publish.
-    db.exec("CREATE TRIGGER fail_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'cannot store'); END");
+    failStoring(db, 'cannot store');
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('m1', 'hello')] });
-    await vi.advanceTimersByTimeAsync(31_000); // the next tick sees the new line
+    await settled();
+    await advance(31_000); // the next tick sees the new line
     expect(drive.uploads).toBe(2);
     const uploaded = drive.last!;
-    await vi.advanceTimersByTimeAsync(5 * 60_000); // ten more ticks, same line
+    await advance(5 * 60_000); // ten more ticks, same line
     expect(drive.uploads).toBe(2);
     await stopApp(app);
 
@@ -671,16 +745,18 @@ describe('app health and publishing', () => {
   it('republishes once after IST midnight with no other event, so the Today tab carries the new date (Task 3 review round 2)', async () => {
     const drive = new CapturingDrive();
     vi.setSystemTime(new Date('2026-10-19T18:00:00Z')); // 23:30 IST on 19 Oct
-    const { app } = setup({ drive });
-    await vi.advanceTimersByTimeAsync(1_000);
+    // A tick every 240 s, not 30 s: the 95 minutes below take 24 ticks, not 190 (each one database work, slow on
+    // Postgres). The tick sees the new date: one at 20 min (23:50, still 19 Oct), the first after midnight at 32 min.
+    const { app } = await setup({ drive, pollMs: 240_000 });
+    await advance(1_000);
     expect(drive.uploads).toBe(1); // the start publish, built on 19 Oct
     const first = drive.last!;
-    await vi.advanceTimersByTimeAsync(20 * 60_000); // still 19 Oct IST: quiet ticks publish nothing
+    await advance(20 * 60_000); // still 19 Oct IST: quiet ticks publish nothing
     expect(drive.uploads).toBe(1);
-    await vi.advanceTimersByTimeAsync(15 * 60_000); // past 00:00 IST on 20 Oct, still no event
+    await advance(15 * 60_000); // past 00:00 IST on 20 Oct, still no event
     expect(drive.uploads).toBe(2);
     const second = drive.last!;
-    await vi.advanceTimersByTimeAsync(60 * 60_000); // the rest of the new day stays quiet
+    await advance(60 * 60_000); // the rest of the new day stays quiet
     expect(drive.uploads).toBe(2);
     await stopApp(app);
 
@@ -695,7 +771,7 @@ describe('app health and publishing', () => {
   });
 
   it('points to the safe procedure when WhatsApp unlinks the device', async () => {
-    const { app, sock } = setup();
+    const { app, sock } = await setup();
     closeWith(sock, 401);
     expect(app.health.line()).toEqual({ ok: false, text: '❌ WhatsApp unlinked since 19 Oct 12:30. Follow docs/SETUP.md → "Status logged_out".' });
     await stopApp(app);
@@ -715,21 +791,24 @@ describe('app: a newly approved group\'s earlier messages (history backfill)', (
   const ON_DEMAND = proto.HistorySync.HistorySyncType.ON_DEMAND;
 
   it('pages back from the first new message, holds the AI meanwhile, then reads old and new together in time order', async () => {
-    const { db, ai, app, sock } = setup();
+    const { db, ai, app, sock } = await setup();
     // seededDb approved Sharma at 07:00: no message yet, so it waits for the first new one.
     expect(sock.fetchMessageHistory).not.toHaveBeenCalled();
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('L1', 'NEW: send the final logo today', { ts: sec('2026-10-19T07:00:30Z') })] });
-    await vi.advanceTimersByTimeAsync(30_000); // the tick
+    await settled();
+    await advance(30_000); // the tick
     expect(sock.fetchMessageHistory).toHaveBeenCalledExactlyOnceWith(50, { remoteJid: SHARMA.groupId, fromMe: false, id: 'L1' }, Date.parse('2026-10-19T07:00:30Z'));
     sock.emit('messaging-history.set', { chats: [], contacts: [], syncType: ON_DEMAND, messages: [waText('E1', 'OLD: please make a logo', { ts: sec('2026-10-17T09:00:00Z') })] });
-    await vi.advanceTimersByTimeAsync(4_000); // the gap, then the next page from the new oldest message
+    await settled();
+    await advance(4_000); // the gap, then the next page from the new oldest message
     expect(sock.fetchMessageHistory).toHaveBeenCalledTimes(2);
     expect(sock.fetchMessageHistory.mock.calls[1]![1]).toEqual({ remoteJid: SHARMA.groupId, fromMe: false, id: 'E1' });
     expect(ai.calls).toEqual([]); // held: nothing is reconciled while earlier messages are being read
     // Older than 7 days: dropped, and the backfill ends.
     sock.emit('messaging-history.set', { chats: [], contacts: [], syncType: ON_DEMAND, messages: [waText('E0', 'TOO OLD', { ts: sec('2026-10-10T09:00:00Z') })] });
-    expect(db.prepare("SELECT 1 FROM messages WHERE wa_id = 'E0'").get()).toBeUndefined();
-    await vi.advanceTimersByTimeAsync(240_000);
+    await settled();
+    expect(await row(db, "SELECT 1 FROM messages WHERE wa_id = 'E0'")).toBeUndefined();
+    await advance(240_000);
     expect(ai.calls).toHaveLength(1);
     const user = ai.calls[0]!.user;
     expect(user.indexOf('OLD: please make a logo')).toBeGreaterThan(-1);
@@ -739,11 +818,13 @@ describe('app: a newly approved group\'s earlier messages (history backfill)', (
   });
 
   it('asks for nothing for a group that is not approved, and stops a group that is removed', async () => {
-    const { app, sock } = setup();
+    const { app, sock } = await setup();
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('X1', 'not ours', { group: OTHER_GROUP, ts: sec('2026-10-19T07:00:30Z') })] });
-    app.reloadClients([MEHTA]); // Sharma removed before its first message
+    await settled();
+    await app.reloadClients([MEHTA]); // Sharma removed before its first message
     sock.emit('messages.upsert', { type: 'notify', messages: [waText('L1', 'after removal', { ts: sec('2026-10-19T07:00:40Z') })] });
-    await vi.advanceTimersByTimeAsync(60_000);
+    await settled();
+    await advance(60_000);
     expect(sock.fetchMessageHistory).not.toHaveBeenCalled();
     await stopApp(app);
   });

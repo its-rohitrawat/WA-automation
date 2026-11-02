@@ -29,8 +29,8 @@ function scriptedFactory(scripts: Script[] = []) {
   return { factory, sockets };
 }
 
-function senderAuth(linked: boolean): EncryptedAuth {
-  const auth = useSenderAuthState(openSessionDb(':memory:'), randomBytes(32));
+async function senderAuth(linked: boolean): Promise<EncryptedAuth> {
+  const auth = await useSenderAuthState(openSessionDb(':memory:'), randomBytes(32));
   return { ...auth, hasSession: linked };
 }
 
@@ -52,14 +52,14 @@ function expectNoLeak(fn: () => unknown, values: string[]): void {
   expect(message).not.toMatch(/\d{5,}/);
 }
 
-function setup(
+async function setup(
   o: { scripts?: Script[]; auth?: EncryptedAuth; noAuth?: boolean; connectTimeoutMs?: number; sendTimeoutMs?: number; lingerMs?: number } = {},
 ) {
   const { factory, sockets } = scriptedFactory(o.scripts);
   const gw = new SenderGateway({
     recipient: RECIPIENT,
     factory,
-    auth: o.noAuth ? undefined : (o.auth ?? senderAuth(true)),
+    auth: o.noAuth ? undefined : (o.auth ?? await senderAuth(true)),
     connectTimeoutMs: o.connectTimeoutMs ?? 1_000,
     sendTimeoutMs: o.sendTimeoutMs ?? 1_000,
     lingerMs: o.lingerMs ?? 0,
@@ -69,7 +69,7 @@ function setup(
 
 describe('SenderGateway', () => {
   it('sends one text message with the link preview off, and no document, to the configured recipient, then disconnects', async () => {
-    const { gw, sockets } = setup();
+    const { gw, sockets } = await setup();
     expect(await gw.sendReport('Morning report · 23 Oct')).toEqual({ status: 'sent', messageIds: ['msg-1'] });
     const sock = sockets[0]!;
     expect(sock.sendMessage.mock.calls).toEqual([[JID, { text: 'Morning report · 23 Oct', linkPreview: null }]]);
@@ -79,18 +79,19 @@ describe('SenderGateway', () => {
   });
 
   it('sets no presence, sends no read receipts and changes no chat', async () => {
-    const { gw, sockets } = setup();
+    const { gw, sockets } = await setup();
     await gw.sendReport('hi');
     for (const name of SEND_METHODS.filter((n) => n !== 'sendMessage')) expect(sockets[0]![name]).not.toHaveBeenCalled();
   });
 
-  it('refuses any recipient other than REPORT_RECIPIENT, and takes no recipient from the caller', () => {
+  it('refuses any recipient other than REPORT_RECIPIENT, and takes no recipient from the caller', async () => {
     expect(recipientJid(RECIPIENT)).toBe(JID);
     expect(() => checkRecipient(JID, JID)).not.toThrow();
     expect(() => checkRecipient('919811111111@s.whatsapp.net', JID)).toThrow(RecipientRefusedError);
     expect(() => checkRecipient('120363000000000001@g.us', JID)).toThrow(RecipientRefusedError);
+    const auth = await senderAuth(true);
     for (const bad of ['+919800000000', '91 98000 00000', '120363000000000001@g.us', '']) {
-      expect(() => new SenderGateway({ recipient: bad, factory: scriptedFactory().factory, auth: senderAuth(true) })).toThrow(/digits only/);
+      expect(() => new SenderGateway({ recipient: bad, factory: scriptedFactory().factory, auth })).toThrow(/digits only/);
     }
     expect(SenderGateway.prototype.sendReport.length).toBe(1); // the text only
   });
@@ -102,22 +103,23 @@ describe('SenderGateway', () => {
     }
   });
 
-  it('never puts the refused number or JID in an error message', () => {
+  it('never puts the refused number or JID in an error message', async () => {
     const badRecipients = [
       '+919800000000', '91 98000 00000', '120363000000000001@g.us',
       '9812345678', '919812345', '9198123456789', '915812345678', '449812345678',
     ];
+    const auth = await senderAuth(true);
     for (const bad of badRecipients) {
       expectNoLeak(() => recipientJid(bad), [bad]);
-      expectNoLeak(() => new SenderGateway({ recipient: bad, factory: scriptedFactory().factory, auth: senderAuth(true) }), [bad]);
+      expectNoLeak(() => new SenderGateway({ recipient: bad, factory: scriptedFactory().factory, auth }), [bad]);
     }
     for (const refused of ['919811111111@s.whatsapp.net', '120363000000000001@g.us']) {
       expectNoLeak(() => checkRecipient(refused, JID), [refused, JID]);
     }
   });
 
-  it('tells the masked recipient it sends to: the last 4 digits only', () => {
-    const { gw } = setup();
+  it('tells the masked recipient it sends to: the last 4 digits only', async () => {
+    const { gw } = await setup();
     expect(gw.maskedRecipient()).toBe('…0000');
     expect(gw.maskedRecipient()).not.toMatch(/\d{5,}/);
   });
@@ -128,7 +130,7 @@ describe('SenderGateway', () => {
   });
 
   it('fails definitely, without connecting, when the spare number is not linked', async () => {
-    const { gw, sockets } = setup({ auth: senderAuth(false) });
+    const { gw, sockets } = await setup({ auth: await senderAuth(false) });
     expect(gw.status().state).toBe('not_linked');
     expect(await gw.sendReport('hi')).toEqual({ status: 'failed', code: 'not_linked' });
     expect(sockets).toHaveLength(0);
@@ -136,9 +138,9 @@ describe('SenderGateway', () => {
 
   it("fails definitely, without connecting, when the saved link is the recipient's own number (scanned with the founder's phone)", async () => {
     for (const id of [`${RECIPIENT}:5@s.whatsapp.net`, `${RECIPIENT}@s.whatsapp.net`]) {
-      const auth = senderAuth(true);
+      const auth = await senderAuth(true);
       auth.state.creds.me = { id, name: 'Founder' };
-      const { gw, sockets } = setup({ auth });
+      const { gw, sockets } = await setup({ auth });
       expect(gw.status().state).toBe('self_send');
       expect(await gw.sendReport('hi')).toEqual({ status: 'failed', code: 'self_send' });
       expect(gw.status().state).toBe('self_send');
@@ -149,7 +151,7 @@ describe('SenderGateway', () => {
   it("fails definitely, without connecting, when the saved link is the founder reader's own number, also when it is not REPORT_RECIPIENT", async () => {
     const FOUNDER = '919811112222';
     for (const id of [`${FOUNDER}:7@s.whatsapp.net`, `${FOUNDER}@s.whatsapp.net`]) {
-      const auth = senderAuth(true);
+      const auth = await senderAuth(true);
       auth.state.creds.me = { id, name: 'Founder' };
       const { factory, sockets } = scriptedFactory();
       const gw = new SenderGateway({ recipient: RECIPIENT, founderNumber: FOUNDER, factory, auth, connectTimeoutMs: 1_000, lingerMs: 0 });
@@ -159,7 +161,7 @@ describe('SenderGateway', () => {
       expect(sockets).toHaveLength(0);
     }
     // sendReport checks again at send time, not only at construction.
-    const auth = senderAuth(true);
+    const auth = await senderAuth(true);
     auth.state.creds.me = { id: '919800000099:2@s.whatsapp.net', name: 'Spare' };
     const { factory, sockets } = scriptedFactory();
     const gw = new SenderGateway({ recipient: RECIPIENT, founderNumber: FOUNDER, factory, auth, connectTimeoutMs: 1_000, lingerMs: 0 });
@@ -171,7 +173,7 @@ describe('SenderGateway', () => {
   });
 
   it('sends normally with a founder number set when the saved link is a third number', async () => {
-    const auth = senderAuth(true);
+    const auth = await senderAuth(true);
     auth.state.creds.me = { id: '919800000099:2@s.whatsapp.net', name: 'Spare' };
     const { factory, sockets } = scriptedFactory();
     const gw = new SenderGateway({ recipient: RECIPIENT, founderNumber: '919811112222', factory, auth, connectTimeoutMs: 1_000, lingerMs: 0 });
@@ -181,16 +183,16 @@ describe('SenderGateway', () => {
   });
 
   it('sends normally when the saved link is another number', async () => {
-    const auth = senderAuth(true);
+    const auth = await senderAuth(true);
     auth.state.creds.me = { id: '919800000099:2@s.whatsapp.net', name: 'Spare' };
-    const { gw, sockets } = setup({ auth });
+    const { gw, sockets } = await setup({ auth });
     expect(gw.status().state).toBe('idle');
     expect(await gw.sendReport('hi')).toEqual({ status: 'sent', messageIds: ['msg-1'] });
     expect(sockets).toHaveLength(1);
   });
 
   it('fails definitely, without connecting, when the stored session could not be read (no auth)', async () => {
-    const { gw, sockets } = setup({ noAuth: true });
+    const { gw, sockets } = await setup({ noAuth: true });
     expect(gw.status().state).toBe('unreadable');
     expect(await gw.sendReport('hi')).toEqual({ status: 'failed', code: 'session_unreadable' });
     expect(gw.status().state).toBe('unreadable');
@@ -216,7 +218,7 @@ describe('SenderGateway', () => {
       { script: () => {}, code: 'connect_timeout', state: 'idle', statusCode: null },
     ];
     for (const c of cases) {
-      const { gw, sockets } = setup({ scripts: [c.script], connectTimeoutMs: 20 });
+      const { gw, sockets } = await setup({ scripts: [c.script], connectTimeoutMs: 20 });
       expect(await gw.sendReport('hi')).toEqual({ status: 'failed', code: c.code });
       expect(sockets[0]!.sendMessage).not.toHaveBeenCalled();
       expect(sockets[0]!.end).toHaveBeenCalled();
@@ -225,14 +227,14 @@ describe('SenderGateway', () => {
   });
 
   it('reports unknown when a send times out or fails after it started', async () => {
-    const timedOut = setup({ scripts: [hang], sendTimeoutMs: 20 });
+    const timedOut = await setup({ scripts: [hang], sendTimeoutMs: 20 });
     expect(await timedOut.gw.sendReport('hi')).toEqual({ status: 'unknown', code: 'timeout' });
 
     const textFails: Script = (s) => {
       s.sendMessage.mockRejectedValueOnce(new Error('socket error'));
       open(s);
     };
-    const failed = setup({ scripts: [textFails] });
+    const failed = await setup({ scripts: [textFails] });
     expect(await failed.gw.sendReport('hi')).toEqual({ status: 'unknown', code: 'send_error' });
     expect(failed.sockets[0]!.sendMessage).toHaveBeenCalledTimes(1);
     expect(failed.sockets[0]!.end).toHaveBeenCalled();
@@ -247,7 +249,7 @@ describe('SenderGateway', () => {
         made++;
         throw new Error('bad socket options');
       },
-      auth: senderAuth(true),
+      auth: await senderAuth(true),
       connectTimeoutMs: 1_000,
       lingerMs: 0,
     });
@@ -261,7 +263,7 @@ describe('SenderGateway', () => {
     sock.ev.on = () => {
       throw new Error('listener failed');
     };
-    const broken = new SenderGateway({ recipient: RECIPIENT, factory: () => sock, auth: senderAuth(true), connectTimeoutMs: 1_000, lingerMs: 0 });
+    const broken = new SenderGateway({ recipient: RECIPIENT, factory: () => sock, auth: await senderAuth(true), connectTimeoutMs: 1_000, lingerMs: 0 });
     expect(await broken.sendReport('hi')).toEqual({ status: 'failed', code: 'connect_error' });
     expect(sock.sendMessage).not.toHaveBeenCalled();
     expect(sock.end).toHaveBeenCalled();
@@ -269,14 +271,14 @@ describe('SenderGateway', () => {
   });
 
   it('sends one report at a time', async () => {
-    const { gw } = setup({ scripts: [hang], sendTimeoutMs: 50 });
+    const { gw } = await setup({ scripts: [hang], sendTimeoutMs: 50 });
     const first = gw.sendReport('hi');
     expect(await gw.sendReport('hi')).toEqual({ status: 'failed', code: 'busy' });
     expect(await first).toEqual({ status: 'unknown', code: 'timeout' });
   });
 
   it('stop ends a send in progress and refuses later sends', async () => {
-    const { gw, sockets } = setup({ scripts: [hang], sendTimeoutMs: 50 });
+    const { gw, sockets } = await setup({ scripts: [hang], sendTimeoutMs: 50 });
     const p = gw.sendReport('hi');
     await vi.waitFor(() => expect(sockets[0]?.sendMessage).toHaveBeenCalled());
     await gw.stop();
@@ -286,7 +288,7 @@ describe('SenderGateway', () => {
   });
 
   it('sends nothing when stop comes while the socket is still connecting', async () => {
-    const { gw, sockets } = setup({ scripts: [() => {}] });
+    const { gw, sockets } = await setup({ scripts: [() => {}] });
     const p = gw.sendReport('hi');
     await vi.waitFor(() => expect(sockets).toHaveLength(1));
     await gw.stop();
@@ -297,7 +299,7 @@ describe('SenderGateway', () => {
   });
 
   it('listens only to creds.update and connection.update: it never reads chats', async () => {
-    const { gw, sockets } = setup();
+    const { gw, sockets } = await setup();
     await gw.sendReport('hi');
     expect(sockets[0]!.subscribedEvents().sort()).toEqual(['connection.update', 'creds.update']);
   });
@@ -314,14 +316,14 @@ describe('SenderGateway', () => {
       },
     ];
     for (const script of noId) {
-      const { gw, sockets } = setup({ scripts: [script] });
+      const { gw, sockets } = await setup({ scripts: [script] });
       expect(await gw.sendReport('hi')).toEqual({ status: 'unknown', code: 'send_error' });
       expect(sockets[0]!.end).toHaveBeenCalled();
     }
   });
 
   it('keeps the socket open for the linger time after the message left', async () => {
-    const { gw, sockets } = setup({ lingerMs: 400 });
+    const { gw, sockets } = await setup({ lingerMs: 400 });
     const p = gw.sendReport('hi');
     await vi.waitFor(() => expect(sockets[0]?.sendMessage).toHaveBeenCalledTimes(1), { interval: 5 });
     await new Promise((r) => setTimeout(r, 10));
@@ -331,7 +333,7 @@ describe('SenderGateway', () => {
   });
 
   it('stop() during the linger ends it at once and keeps the sent result: the message id is already back', async () => {
-    const { gw, sockets } = setup({ lingerMs: 60_000 });
+    const { gw, sockets } = await setup({ lingerMs: 60_000 });
     const p = gw.sendReport('hi');
     await vi.waitFor(() => expect(sockets[0]?.sendMessage).toHaveBeenCalledTimes(1), { interval: 5 });
     await new Promise((r) => setTimeout(r, 10)); // now in the linger
@@ -341,7 +343,7 @@ describe('SenderGateway', () => {
   });
 
   it('is free for the next send after a send that went out', async () => {
-    const { gw, sockets } = setup();
+    const { gw, sockets } = await setup();
     expect(await gw.sendReport('day 1')).toEqual({ status: 'sent', messageIds: ['msg-1'] });
     expect(await gw.sendReport('day 2')).toEqual({ status: 'sent', messageIds: ['msg-1'] });
     expect(sockets).toHaveLength(2);
@@ -351,12 +353,12 @@ describe('SenderGateway', () => {
 
   it('is free for the next send after a definite failure or an unknown result', async () => {
     const qr: Script = (s) => s.emit('connection.update', { qr: 'QR-1' });
-    const afterFailure = setup({ scripts: [qr, open] });
+    const afterFailure = await setup({ scripts: [qr, open] });
     expect(await afterFailure.gw.sendReport('hi')).toEqual({ status: 'failed', code: 'not_linked' });
     expect(await afterFailure.gw.sendReport('hi')).toEqual({ status: 'sent', messageIds: ['msg-1'] });
     expect(afterFailure.sockets).toHaveLength(2);
 
-    const afterUnknown = setup({ scripts: [hang, open], sendTimeoutMs: 20 });
+    const afterUnknown = await setup({ scripts: [hang, open], sendTimeoutMs: 20 });
     expect(await afterUnknown.gw.sendReport('hi')).toEqual({ status: 'unknown', code: 'timeout' });
     expect(await afterUnknown.gw.sendReport('hi')).toEqual({ status: 'sent', messageIds: ['msg-1'] });
     expect(afterUnknown.sockets).toHaveLength(2);
@@ -374,7 +376,7 @@ describe('SenderGateway', () => {
       open(s);
     };
     for (const script of [endThrows, endRejects]) {
-      const { gw, sockets } = setup({ scripts: [script, script] });
+      const { gw, sockets } = await setup({ scripts: [script, script] });
       expect(await gw.sendReport('hi')).toEqual({ status: 'sent', messageIds: ['msg-1'] });
       expect(sockets[0]!.end).toHaveBeenCalled();
       expect(await gw.sendReport('hi')).toEqual({ status: 'sent', messageIds: ['msg-1'] });
@@ -383,14 +385,14 @@ describe('SenderGateway', () => {
   });
 
   it('shows connecting while the socket opens, open while sending, and idle afterwards', async () => {
-    const connecting = setup({ scripts: [() => {}], connectTimeoutMs: 50 });
+    const connecting = await setup({ scripts: [() => {}], connectTimeoutMs: 50 });
     const p = connecting.gw.sendReport('hi');
     await vi.waitFor(() => expect(connecting.sockets).toHaveLength(1));
     expect(connecting.gw.status().state).toBe('connecting');
     expect(await p).toEqual({ status: 'failed', code: 'connect_timeout' });
     expect(connecting.gw.status().state).toBe('idle');
 
-    const sending = setup({ scripts: [hang], sendTimeoutMs: 50 });
+    const sending = await setup({ scripts: [hang], sendTimeoutMs: 50 });
     const q = sending.gw.sendReport('hi');
     await vi.waitFor(() => expect(sending.sockets[0]?.sendMessage).toHaveBeenCalled());
     expect(sending.gw.status().state).toBe('open');
@@ -408,12 +410,12 @@ describe('SenderGateway', () => {
         saves++;
         return Promise.reject(new Error('disk'));
       };
-      const auth = { ...senderAuth(true), saveCreds };
+      const auth = { ...(await senderAuth(true)), saveCreds };
       const credsThenOpen: Script = (s) => {
         s.emit('creds.update', {});
         open(s);
       };
-      const { gw } = setup({ auth, scripts: [credsThenOpen] });
+      const { gw } = await setup({ auth, scripts: [credsThenOpen] });
       expect(await gw.sendReport('hi')).toEqual({ status: 'sent', messageIds: ['msg-1'] });
       expect(saves).toBeGreaterThan(0);
       await new Promise((r) => setTimeout(r, 20));
@@ -429,16 +431,16 @@ describe('SenderGateway default timings', () => {
     vi.useRealTimers();
   });
 
-  function defaultGateway(scripts: Script[]) {
+  async function defaultGateway(scripts: Script[]) {
     const { factory, sockets } = scriptedFactory(scripts);
     // No connectTimeoutMs, sendTimeoutMs or lingerMs: the production defaults apply.
-    const gw = new SenderGateway({ recipient: RECIPIENT, factory, auth: senderAuth(true) });
+    const gw = new SenderGateway({ recipient: RECIPIENT, factory, auth: await senderAuth(true) });
     return { gw, sockets };
   }
 
   it('lingers 15 s after the message left before closing the socket', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    const { gw, sockets } = defaultGateway([open]);
+    const { gw, sockets } = await defaultGateway([open]);
     const p = gw.sendReport('hi');
     await vi.advanceTimersByTimeAsync(0);
     expect(sockets[0]!.sendMessage).toHaveBeenCalledTimes(1);
@@ -457,7 +459,7 @@ describe('SenderGateway default timings', () => {
       if (event === 'connection.update') throw new Error('listener failed');
       on(event as 'creds.update', listener);
     }) as typeof sock.ev.on;
-    const gw = new SenderGateway({ recipient: RECIPIENT, factory: () => sock, auth: senderAuth(true) });
+    const gw = new SenderGateway({ recipient: RECIPIENT, factory: () => sock, auth: await senderAuth(true) });
     expect(await gw.sendReport('hi')).toEqual({ status: 'failed', code: 'connect_error' });
     expect(sock.end).toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
@@ -465,7 +467,7 @@ describe('SenderGateway default timings', () => {
 
   it('waits 60 s for the connection to open', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    const { gw, sockets } = defaultGateway([() => {}]);
+    const { gw, sockets } = await defaultGateway([() => {}]);
     const p = gw.sendReport('hi');
     await vi.advanceTimersByTimeAsync(59_900);
     expect(sockets[0]!.end).not.toHaveBeenCalled();
@@ -475,7 +477,7 @@ describe('SenderGateway default timings', () => {
 
   it('leaves no timer running after a send that went out', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    const { gw } = defaultGateway([open]);
+    const { gw } = await defaultGateway([open]);
     let result: unknown;
     const p = gw.sendReport('hi').then((r) => (result = r));
     await vi.advanceTimersByTimeAsync(15_000);
@@ -491,7 +493,7 @@ describe('SenderGateway default timings', () => {
       s.sendMessage.mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
       open(s);
     };
-    const { gw, sockets } = defaultGateway([gated]);
+    const { gw, sockets } = await defaultGateway([gated]);
     let result: unknown;
     const p = gw.sendReport('hi').then((r) => (result = r));
     await vi.advanceTimersByTimeAsync(0);
@@ -511,7 +513,7 @@ describe('SenderGateway default timings', () => {
       open(s);
     };
     const { factory, sockets } = scriptedFactory([endHangs]);
-    const gw = new SenderGateway({ recipient: RECIPIENT, factory, auth: senderAuth(true), lingerMs: 0 });
+    const gw = new SenderGateway({ recipient: RECIPIENT, factory, auth: await senderAuth(true), lingerMs: 0 });
     let result: unknown;
     const p = gw.sendReport('hi').then((r) => (result = r));
     await vi.advanceTimersByTimeAsync(2_900);
@@ -531,7 +533,7 @@ describe('SenderGateway default timings', () => {
       s.sendMessage.mockImplementationOnce(() => new Promise(() => {})); // the text send never answers
       open(s);
     };
-    const { gw, sockets } = defaultGateway([stuck]);
+    const { gw, sockets } = await defaultGateway([stuck]);
     let result: unknown;
     const p = gw.sendReport('hi').then((r) => (result = r));
     await vi.advanceTimersByTimeAsync(0);
@@ -554,7 +556,7 @@ describe('SenderGateway default timings', () => {
 
   it('leaves no timer running after WhatsApp refuses the connection', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    const { gw } = defaultGateway([(s) => closeWith(s, 401)]);
+    const { gw } = await defaultGateway([(s) => closeWith(s, 401)]);
     let result: unknown;
     const p = gw.sendReport('hi').then((r) => (result = r));
     await vi.advanceTimersByTimeAsync(0);
@@ -565,7 +567,7 @@ describe('SenderGateway default timings', () => {
 
   it('gives the message 120 s before reporting unknown', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    const { gw, sockets } = defaultGateway([hang]);
+    const { gw, sockets } = await defaultGateway([hang]);
     let result: unknown;
     const p = gw.sendReport('hi').then((r) => (result = r));
     await vi.advanceTimersByTimeAsync(119_900);
@@ -586,7 +588,7 @@ describe('linkSender', () => {
       },
       open,
     ]);
-    const auth = senderAuth(false);
+    const auth = await senderAuth(false);
     const saveCreds = vi.fn(auth.saveCreds);
     const qr: string[] = [];
     expect(await linkSender({ factory, auth: { ...auth, saveCreds }, onQr: (q) => qr.push(q), timeoutMs: 1_000, settleMs: 0 })).toEqual({ ok: true });
@@ -603,14 +605,14 @@ describe('linkSender', () => {
   it('opens at most 3 sockets when WhatsApp keeps asking for a restart', async () => {
     const restart: Script = (s) => closeWith(s, 515);
     const { factory, sockets } = scriptedFactory([restart, restart, restart, restart, restart, restart]);
-    expect(await linkSender({ factory, auth: senderAuth(false), onQr: () => {}, timeoutMs: 1_000, settleMs: 0 })).toEqual({ ok: false, code: 'closed' });
+    expect(await linkSender({ factory, auth: await senderAuth(false), onQr: () => {}, timeoutMs: 1_000, settleMs: 0 })).toEqual({ ok: false, code: 'closed' });
     expect(sockets).toHaveLength(3);
     for (const s of sockets) expect(s.end).toHaveBeenCalled();
   });
 
   it('keeps the linked socket open for the settle time before saving and closing', async () => {
     const { factory, sockets } = scriptedFactory([(s) => closeWith(s, 515), open]);
-    const auth = senderAuth(false);
+    const auth = await senderAuth(false);
     const saveCreds = vi.fn(auth.saveCreds);
     const p = linkSender({ factory, auth: { ...auth, saveCreds }, onQr: () => {}, timeoutMs: 1_000, settleMs: 200 });
     await vi.waitFor(() => expect(sockets).toHaveLength(2), { interval: 5 });
@@ -624,14 +626,14 @@ describe('linkSender', () => {
 
   it('stops when WhatsApp refuses the link', async () => {
     const { factory } = scriptedFactory([(s) => closeWith(s, 401)]);
-    expect(await linkSender({ factory, auth: senderAuth(false), onQr: () => {}, timeoutMs: 1_000, settleMs: 0 })).toEqual({ ok: false, code: 'logged_out' });
+    expect(await linkSender({ factory, auth: await senderAuth(false), onQr: () => {}, timeoutMs: 1_000, settleMs: 0 })).toEqual({ ok: false, code: 'logged_out' });
   });
 });
 
 describe('linkSender with a signal (the dashboard)', () => {
   it('an abort closes the socket and gives closed; no settle wait, no save', async () => {
     const { factory, sockets } = scriptedFactory([(s) => s.emit('connection.update', { qr: 'QR-1' })]);
-    const auth = senderAuth(false);
+    const auth = await senderAuth(false);
     const saveCreds = vi.fn(auth.saveCreds);
     const stop = new AbortController();
     const p = linkSender({ factory, auth: { ...auth, saveCreds }, onQr: () => {}, timeoutMs: 60_000, settleMs: 60_000, signal: stop.signal });
@@ -644,7 +646,7 @@ describe('linkSender with a signal (the dashboard)', () => {
 
   it('an abort during the settle time ends the open socket without saving', async () => {
     const { factory, sockets } = scriptedFactory([open]);
-    const auth = senderAuth(false);
+    const auth = await senderAuth(false);
     const saveCreds = vi.fn(auth.saveCreds);
     const stop = new AbortController();
     const p = linkSender({ factory, auth: { ...auth, saveCreds }, onQr: () => {}, timeoutMs: 1_000, settleMs: 60_000, signal: stop.signal });
@@ -659,11 +661,11 @@ describe('linkSender with a signal (the dashboard)', () => {
   it('onScanned fires when WhatsApp asks for its restart after a QR code, not for a restart with no QR', async () => {
     let scanned = 0;
     const withQr = scriptedFactory([(s) => { s.emit('connection.update', { qr: 'QR-1' }); closeWith(s, 515); }, open]);
-    await linkSender({ factory: withQr.factory, auth: senderAuth(false), onQr: () => {}, onScanned: () => scanned++, timeoutMs: 1_000, settleMs: 0 });
+    await linkSender({ factory: withQr.factory, auth: await senderAuth(false), onQr: () => {}, onScanned: () => scanned++, timeoutMs: 1_000, settleMs: 0 });
     expect(scanned).toBe(1);
     scanned = 0;
     const noQr = scriptedFactory([(s) => closeWith(s, 515), open]);
-    await linkSender({ factory: noQr.factory, auth: senderAuth(false), onQr: () => {}, onScanned: () => scanned++, timeoutMs: 1_000, settleMs: 0 });
+    await linkSender({ factory: noQr.factory, auth: await senderAuth(false), onQr: () => {}, onScanned: () => scanned++, timeoutMs: 1_000, settleMs: 0 });
     expect(scanned).toBe(0);
   });
 });

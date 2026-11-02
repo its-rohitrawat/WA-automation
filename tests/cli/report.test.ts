@@ -7,15 +7,17 @@ import {
   addReportCommands, ConfirmCancelled, linkSenderCommand, reportSendNowCommand, reportStatusCommand, type CliDeps,
 } from '../../src/cli/commands.ts';
 import { parseEnv } from '../../src/config/env.ts';
-import { senderSessionDbPath, sessionDbPath, trackerDbPath } from '../../src/config/paths.ts';
+import { senderSessionDbPath, sessionDbPath } from '../../src/config/paths.ts';
 import { StaticKeyProvider } from '../../src/crypto/keyProvider.ts';
 import type { HealthSnapshot } from '../../src/health/health.ts';
-import { openDb, type Db } from '../../src/store/db.ts';
+import type { Db } from '../../src/store/db.ts';
 import { getKv, setKv } from '../../src/store/kv.ts';
 import { claimReport, finishReport, REPORT_REQUEST_KEY, reportFor, reportRequest, retryReport, skipReport } from '../../src/store/reports.ts';
 import { acquireLock } from '../../src/util/lock.ts';
 import { openSessionDb, SenderSessionDecryptError, useEncryptedAuthState, useSenderAuthState } from '../../src/wa/authState.ts';
 import type { SenderSocketFactory } from '../../src/wa/senderGateway.ts';
+import { cliStore, type CliStore } from '../helpers/cliEnv.ts';
+import { onSqlite } from '../helpers/db.ts';
 import { closeWith, FakeSocket, SEND_METHODS } from '../helpers/fakeSocket.ts';
 
 /** renameSync passes through, except that it fails for the one path in failRename (a file another program has locked). */
@@ -49,10 +51,12 @@ let lines: string[];
 let sockets: FakeSocket[];
 let scripts: Script[];
 let confirm: ReturnType<typeof vi.fn<(q: string) => Promise<boolean>>>;
+/** The store the commands reach (tests/helpers/cliEnv.ts): the data folder on SQLite, the test's own customer on Postgres. */
+let store: CliStore;
 
 function deps(env: Record<string, string> = {}): CliDeps {
   return {
-    env: parseEnv({ DATA_DIR: dataDir, GROUPS_FILE: join(dir, 'groups.json'), REPORT_ENABLED: 'true', REPORT_RECIPIENT: NUMBER, ...env }),
+    env: parseEnv({ DATA_DIR: dataDir, GROUPS_FILE: join(dir, 'groups.json'), REPORT_ENABLED: 'true', REPORT_RECIPIENT: NUMBER, ...store.env, ...env }),
     keyProvider: new StaticKeyProvider(KEY),
     socketFactory: () => {
       throw new Error('the founder-number socket must not be used');
@@ -75,12 +79,13 @@ function deps(env: Record<string, string> = {}): CliDeps {
 
 const out = () => lines.join('\n');
 
-function withTracker<T>(fn: (db: Db) => T): T {
-  const db = openDb(trackerDbPath(dataDir));
+/** The tracker the commands reach (the data folder's tracker.db, or the test's own customer on Postgres). */
+async function withTracker<T>(fn: (db: Db) => T | Promise<T>): Promise<T> {
+  const db = await store.open();
   try {
-    return fn(db);
+    return await fn(db);
   } finally {
-    db.close();
+    await db.close();
   }
 }
 
@@ -89,7 +94,7 @@ function withTracker<T>(fn: (db: Db) => T): T {
  * recipientMasked is the number the service sends to (default …5678, the .env REPORT_RECIPIENT); null leaves it out, as a
  * service started before the field existed does.
  */
-function writeSnapshot(at: Date, opts: { reportOn?: boolean; recipientMasked?: string | null } = {}): void {
+async function writeSnapshot(at: Date, opts: { reportOn?: boolean; recipientMasked?: string | null } = {}): Promise<void> {
   const masked = opts.recipientMasked === undefined ? '…5678' : opts.recipientMasked;
   const snap: HealthSnapshot = {
     at: at.toISOString(), line: { ok: true, text: '✅ Connected' }, whatsapp: { state: 'open', since: at.toISOString(), lastErrorCode: null, credsSaveFailures: 0 },
@@ -99,15 +104,15 @@ function writeSnapshot(at: Date, opts: { reportOn?: boolean; recipientMasked?: s
       ? {}
       : { report: { text: 'Morning report: due now', warning: null, ...(masked === null ? {} : { recipientMasked: masked }) } }),
   };
-  withTracker((db) => setKv(db, 'health', JSON.stringify(snap)));
+  await withTracker((db) => setKv(db, 'health', JSON.stringify(snap)));
 }
 
 async function seedSender(key: Buffer = KEY): Promise<void> {
   const sdb = openSessionDb(senderSessionDbPath(dataDir));
-  const auth = useSenderAuthState(sdb, key);
+  const auth = await useSenderAuthState(sdb, key);
   auth.state.creds.me = { id: '919800000099:2@s.whatsapp.net', name: 'Spare' };
   await auth.saveCreds();
-  sdb.close();
+  await sdb.close();
 }
 
 /** The founder reader's own number (session.db), deliberately not REPORT_RECIPIENT. */
@@ -116,10 +121,10 @@ const FOUNDER = '919811112222';
 /** Writes the founder's linked session (data/session.db, the master key itself), as `cli link` does. */
 async function seedFounder(key: Buffer = KEY): Promise<void> {
   const db = openSessionDb(sessionDbPath(dataDir));
-  const auth = useEncryptedAuthState(db, key);
+  const auth = await useEncryptedAuthState(db, key);
   auth.state.creds.me = { id: `${FOUNDER}:7@s.whatsapp.net`, name: 'Founder' };
   await auth.saveCreds();
-  db.close();
+  await db.close();
 }
 
 /** A spare-number socket factory whose QR code is scanned by the phone with this number. */
@@ -137,24 +142,25 @@ function scannedBy(number: string): SenderSocketFactory {
   };
 }
 
-const senderLinked = (): boolean => {
+const senderLinked = async (): Promise<boolean> => {
   const sdb = openSessionDb(senderSessionDbPath(dataDir));
   try {
-    return useSenderAuthState(sdb, KEY).hasSession;
+    return (await useSenderAuthState(sdb, KEY)).hasSession;
   } finally {
-    sdb.close();
+    await sdb.close();
   }
 };
 
-const request = () => withTracker((db) => getKv(db, REPORT_REQUEST_KEY));
+const request = async () => await withTracker((db) => getKv(db, REPORT_REQUEST_KEY));
 
 /** Files in the data folder whose names start with sender-session.db. */
 const senderFiles = () => readdirSync(dataDir).filter((f) => f.startsWith('sender-session.db')).sort();
 
-beforeEach(() => {
+beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), 'wa-report-'));
   dataDir = join(dir, 'data');
   mkdirSync(dataDir, { recursive: true });
+  store = await cliStore(dataDir);
   lines = [];
   sockets = [];
   scripts = [];
@@ -169,7 +175,9 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-describe('cli link-sender', () => {
+// SQLite only (S2.7): the spare phone's session file, data/sender-session.db, its backups and the founder's session.db
+// (Postgres keeps them as wa_auth rows: tests/wa/authStatePg.test.ts; a customer's spare link: tests/web/customerLink).
+describe.runIf(onSqlite)('cli link-sender', () => {
   it('links the spare number by QR into its own file, without touching the founder session or sending anything', async () => {
     scripts = [
       (s) => {
@@ -185,7 +193,7 @@ describe('cli link-sender', () => {
     expect(existsSync(sessionDbPath(dataDir))).toBe(false);
     expect(sockets).toHaveLength(2);
     for (const s of sockets) for (const name of SEND_METHODS) expect(s[name]).not.toHaveBeenCalled();
-    expect(senderLinked()).toBe(false); // the fake socket never sets creds.me; the file is the spare number's own
+    expect(await senderLinked()).toBe(false); // the fake socket never sets creds.me; the file is the spare number's own
     const lock = await acquireLock(dataDir); // released by the command
     await lock.release();
   });
@@ -214,7 +222,7 @@ describe('cli link-sender', () => {
     await linkSenderCommand({ reset: true }, deps());
     expect(confirm.mock.calls[0]![0]).toContain('data/sender-session.db');
     expect(out()).toContain('Nothing was changed.');
-    expect(senderLinked()).toBe(true);
+    expect(await senderLinked()).toBe(true);
     expect(sockets).toHaveLength(0);
   });
 
@@ -223,7 +231,7 @@ describe('cli link-sender', () => {
     confirm.mockRejectedValue(new ConfirmCancelled());
     await linkSenderCommand({ reset: true }, deps());
     expect(out()).toContain('Cancelled. Nothing was changed.');
-    expect(senderLinked()).toBe(true);
+    expect(await senderLinked()).toBe(true);
     expect(sockets).toHaveLength(0);
   });
 
@@ -283,7 +291,7 @@ describe('cli link-sender', () => {
     expect(message).toContain('"WA Agent - Tracker"');
     expect(message).not.toContain(NUMBER);
     expect(out()).not.toContain('Spare number linked.');
-    expect(senderLinked()).toBe(false);
+    expect(await senderLinked()).toBe(false);
     expect(sockets).toHaveLength(1);
     for (const s of sockets) for (const name of SEND_METHODS) expect(s[name]).not.toHaveBeenCalled();
     const lock = await acquireLock(dataDir); // released after the failure
@@ -307,7 +315,7 @@ describe('cli link-sender', () => {
       expect(message).toContain('SPARE phone');
       expect(message).not.toContain(FOUNDER);
       expect(out()).not.toContain('Spare number linked.');
-      expect(senderLinked()).toBe(false); // the spare number's session rows were cleared
+      expect(await senderLinked()).toBe(false); // the spare number's session rows were cleared
       for (const s of sockets) for (const name of SEND_METHODS) expect(s[name]).not.toHaveBeenCalled();
       // The founder's session was only read: the file is byte for byte the same, with no -wal or -shm left beside it.
       expect(readFileSync(sessionDbPath(dataDir)).equals(founderFile)).toBe(true);
@@ -320,7 +328,7 @@ describe('cli link-sender', () => {
     const founderFile = readFileSync(sessionDbPath(dataDir));
     await linkSenderCommand({ reset: false }, { ...deps(), senderSocketFactory: scannedBy('919800000099') });
     expect(out()).toContain('Spare number linked.');
-    expect(senderLinked()).toBe(true);
+    expect(await senderLinked()).toBe(true);
     expect(readFileSync(sessionDbPath(dataDir)).equals(founderFile)).toBe(true);
     expect(readdirSync(dataDir).filter((f) => f.startsWith('session.db'))).toEqual(['session.db']);
   });
@@ -356,7 +364,7 @@ describe('cli link-sender', () => {
     expect(confirm).toHaveBeenCalledTimes(1);
     expect(out()).toContain('Reset: the saved spare-number session was deleted.');
     expect(out()).toContain('Spare number linked.');
-    expect(senderLinked()).toBe(false); // readable with this key now
+    expect(await senderLinked()).toBe(false); // readable with this key now
     expect(existsSync(sessionDbPath(dataDir))).toBe(false);
   });
 
@@ -384,7 +392,7 @@ describe('cli link-sender', () => {
     expect(out()).toContain('Spare number linked.');
     expect(sockets).toHaveLength(1);
     expect(existsSync(sessionDbPath(dataDir))).toBe(false);
-    expect(senderLinked()).toBe(false); // the fresh file is readable with the spare number's own key
+    expect(await senderLinked()).toBe(false); // the fresh file is readable with the spare number's own key
   });
 
   it('a damaged session file: its -wal and -shm files move with it, and an earlier damaged copy is never overwritten', async () => {
@@ -400,7 +408,7 @@ describe('cli link-sender', () => {
     expect(readFileSync(`${file}-wal.damaged-20261023T090000-2`).toString()).toBe('wal bytes');
     expect(readFileSync(`${file}-shm.damaged-20261023T090000-2`).toString()).toBe('shm bytes');
     expect(out()).toContain('Spare number linked.');
-    expect(senderLinked()).toBe(false);
+    expect(await senderLinked()).toBe(false);
   });
 
   it('a damaged session file: an earlier damaged -wal copy is never overwritten, even with no earlier main-file copy', async () => {
@@ -495,15 +503,15 @@ describe('cli link-sender', () => {
 });
 
 describe('cli report status', () => {
-  it('shows the settings, today and the last days, with the number masked', () => {
-    withTracker((db) => {
-      skipReport(db, '2026-10-21', 'connect_timeout', '2026-10-21T06:30:00.000Z');
-      claimReport(db, '2026-10-22', '2026-10-22T00:30:00.000Z');
-      finishReport(db, '2026-10-22', 'sent', 'msg-1,msg-2', '2026-10-22T00:31:00.000Z');
-      claimReport(db, DAY, '2026-10-23T00:30:00.000Z');
-      finishReport(db, DAY, 'unknown', 'timeout', '2026-10-23T00:33:00.000Z');
+  it('shows the settings, today and the last days, with the number masked', async () => {
+    await withTracker(async (db) => {
+      await skipReport(db, '2026-10-21', 'connect_timeout', '2026-10-21T06:30:00.000Z');
+      await claimReport(db, '2026-10-22', '2026-10-22T00:30:00.000Z');
+      await finishReport(db, '2026-10-22', 'sent', 'msg-1,msg-2', '2026-10-22T00:31:00.000Z');
+      await claimReport(db, DAY, '2026-10-23T00:30:00.000Z');
+      await finishReport(db, DAY, 'unknown', 'timeout', '2026-10-23T00:33:00.000Z');
     });
-    reportStatusCommand(deps());
+    await reportStatusCommand(deps());
     expect(lines).toEqual([
       'Morning report: on, 06:00 to 12:00 IST, to the number ending …5678',
       'Today (2026-10-23): Morning report: unknown, check WhatsApp',
@@ -514,14 +522,14 @@ describe('cli report status', () => {
     expect(out()).not.toContain(NUMBER);
   });
 
-  it("repeats the running service's warning", () => {
+  it("repeats the running service's warning", async () => {
     const snap = {
       at: NOW.toISOString(), line: { ok: false, text: 'x' }, whatsapp: { state: 'open', since: NOW.toISOString(), lastErrorCode: null, credsSaveFailures: 0 },
       downSince: null, failed: [], lastSuccessAt: null, lastPublishedAt: null, spentToday: 0, capUsd: 15, freeGb: 100, publishFailingSince: null,
       ingestFailures: 0, report: { text: 'Morning report: due now', warning: '⚠️ Morning report: the spare number is not linked.' },
     };
-    withTracker((db) => setKv(db, 'health', JSON.stringify(snap)));
-    reportStatusCommand(deps());
+    await withTracker((db) => setKv(db, 'health', JSON.stringify(snap)));
+    await reportStatusCommand(deps());
     expect(lines).toEqual([
       'Morning report: on, 06:00 to 12:00 IST, to the number ending …5678',
       'Today (2026-10-23): Morning report: due now',
@@ -529,15 +537,15 @@ describe('cli report status', () => {
     ]);
   });
 
-  it("does not repeat an old snapshot's warning: says the service has not reported since then", () => {
+  it("does not repeat an old snapshot's warning: says the service has not reported since then", async () => {
     const at = new Date(NOW.getTime() - 3 * 60_000);
     const snap = {
       at: at.toISOString(), line: { ok: false, text: 'x' }, whatsapp: { state: 'open', since: at.toISOString(), lastErrorCode: null, credsSaveFailures: 0 },
       downSince: null, failed: [], lastSuccessAt: null, lastPublishedAt: null, spentToday: 0, capUsd: 15, freeGb: 100, publishFailingSince: null,
       ingestFailures: 0, report: { text: 'Morning report: due now', warning: '⚠️ Morning report: the spare number is not linked.' },
     };
-    withTracker((db) => setKv(db, 'health', JSON.stringify(snap)));
-    reportStatusCommand(deps());
+    await withTracker((db) => setKv(db, 'health', JSON.stringify(snap)));
+    await reportStatusCommand(deps());
     expect(lines).toEqual([
       'Morning report: on, 06:00 to 12:00 IST, to the number ending …5678',
       'Today (2026-10-23): Morning report: due now',
@@ -545,30 +553,30 @@ describe('cli report status', () => {
     ]);
   });
 
-  it('says when the report is off', () => {
-    reportStatusCommand(deps({ REPORT_ENABLED: 'false' }));
+  it('says when the report is off', async () => {
+    await reportStatusCommand(deps({ REPORT_ENABLED: 'false' }));
     expect(lines).toEqual(['Morning report: off (set REPORT_ENABLED=true and REPORT_RECIPIENT in .env, then restart the service)']);
     // A stopped service does not matter while the report is off: still the one line.
-    writeSnapshot(new Date(NOW.getTime() - 3 * 60_000), { reportOn: false });
+    await writeSnapshot(new Date(NOW.getTime() - 3 * 60_000), { reportOn: false });
     lines = [];
-    reportStatusCommand(deps({ REPORT_ENABLED: 'false' }));
+    await reportStatusCommand(deps({ REPORT_ENABLED: 'false' }));
     expect(lines).toEqual(['Morning report: off (set REPORT_ENABLED=true and REPORT_RECIPIENT in .env, then restart the service)']);
   });
 
-  it("still shows today's row when the report is off", () => {
-    withTracker((db) => {
-      claimReport(db, DAY, '2026-10-23T00:30:00.000Z');
-      finishReport(db, DAY, 'sent', 'msg-1,msg-2', '2026-10-23T00:31:00.000Z');
+  it("still shows today's row when the report is off", async () => {
+    await withTracker(async (db) => {
+      await claimReport(db, DAY, '2026-10-23T00:30:00.000Z');
+      await finishReport(db, DAY, 'sent', 'msg-1,msg-2', '2026-10-23T00:31:00.000Z');
     });
-    reportStatusCommand(deps({ REPORT_ENABLED: 'false' }));
+    await reportStatusCommand(deps({ REPORT_ENABLED: 'false' }));
     expect(lines[0]).toBe('Morning report: off (set REPORT_ENABLED=true and REPORT_RECIPIENT in .env, then restart the service)');
     expect(lines[1]).toMatch(/^Today \(2026-10-23\): /);
     expect(lines).toHaveLength(2);
   });
 
-  it('shows the number the running service sends to, and says to restart when .env now names another', () => {
-    writeSnapshot(NOW, { recipientMasked: '…1111' });
-    reportStatusCommand(deps());
+  it('shows the number the running service sends to, and says to restart when .env now names another', async () => {
+    await writeSnapshot(NOW, { recipientMasked: '…1111' });
+    await reportStatusCommand(deps());
     expect(lines).toEqual([
       'Morning report: on, 06:00 to 12:00 IST, to the number ending …1111',
       '⚠️ REPORT_RECIPIENT in .env now ends …5678, but the running service still sends to the number ending …1111. Restart the service (net stop wa-agent, then net start wa-agent) to use it.',
@@ -577,21 +585,21 @@ describe('cli report status', () => {
     expect(out()).not.toContain(NUMBER);
 
     lines = [];
-    writeSnapshot(NOW);
-    reportStatusCommand(deps());
+    await writeSnapshot(NOW);
+    await reportStatusCommand(deps());
     expect(lines).toEqual(['Morning report: on, 06:00 to 12:00 IST, to the number ending …5678', 'Today (2026-10-23): Morning report: due now']);
 
     // A service that has stopped reporting sends nothing now: the .env number is what the next start uses.
     lines = [];
-    writeSnapshot(new Date(NOW.getTime() - 3 * 60_000), { recipientMasked: '…1111' });
-    reportStatusCommand(deps());
+    await writeSnapshot(new Date(NOW.getTime() - 3 * 60_000), { recipientMasked: '…1111' });
+    await reportStatusCommand(deps());
     expect(lines[0]).toBe('Morning report: on, 06:00 to 12:00 IST, to the number ending …5678');
     expect(out()).not.toContain('…1111');
   });
 
-  it('follows REPORT_DAYS: no report on a Saturday by default, due now with REPORT_DAYS=daily', () => {
+  it('follows REPORT_DAYS: no report on a Saturday by default, due now with REPORT_DAYS=daily', async () => {
     vi.setSystemTime(new Date('2026-10-24T02:00:00.000Z')); // Saturday 07:30 IST, inside the send window
-    reportStatusCommand(deps());
+    await reportStatusCommand(deps());
     expect(lines).toEqual([
       'Morning report: on, 06:00 to 12:00 IST, to the number ending …5678',
       'Today (2026-10-24): Morning report: no report today (weekend)',
@@ -599,15 +607,15 @@ describe('cli report status', () => {
     expect(out()).not.toMatch(/due|skipped/);
 
     lines = [];
-    reportStatusCommand(deps({ REPORT_DAYS: 'daily' }));
+    await reportStatusCommand(deps({ REPORT_DAYS: 'daily' }));
     expect(lines).toEqual(['Morning report: on, 06:00 to 12:00 IST, to the number ending …5678', 'Today (2026-10-24): Morning report: due now']);
   });
 
-  it('lists at most the last 7 days, newest first', () => {
-    withTracker((db) => {
-      for (let d = 14; d <= 22; d++) skipReport(db, `2026-10-${d}`, 'connect_timeout', `2026-10-${d}T06:30:00.000Z`);
+  it('lists at most the last 7 days, newest first', async () => {
+    await withTracker(async (db) => {
+      for (let d = 14; d <= 22; d++) await skipReport(db, `2026-10-${d}`, 'connect_timeout', `2026-10-${d}T06:30:00.000Z`);
     });
-    reportStatusCommand(deps());
+    await reportStatusCommand(deps());
     const history = lines.filter((l) => l.startsWith('  2026-'));
     expect(history.map((l) => l.slice(2, 12))).toEqual(['2026-10-22', '2026-10-21', '2026-10-20', '2026-10-19', '2026-10-18', '2026-10-17', '2026-10-16']);
   });
@@ -615,7 +623,7 @@ describe('cli report status', () => {
 
 describe('cli report send-now', () => {
   it('asks, then hands the request to the running service, stamped with the time of the yes', async () => {
-    writeSnapshot(NOW);
+    await writeSnapshot(NOW);
     const answeredAt = new Date(NOW.getTime() + 30_000);
     confirm.mockImplementation(async () => {
       vi.setSystemTime(answeredAt); // the owner took 30 s to answer
@@ -625,118 +633,118 @@ describe('cli report send-now', () => {
     expect(confirm).toHaveBeenCalledTimes(1);
     expect(confirm.mock.calls[0]![0]).toContain('the number ending …5678');
     expect(confirm.mock.calls[0]![0]).not.toContain(NUMBER);
-    expect(request()).toBe(reportRequest(DAY, undefined, answeredAt));
-    expect(request()).toBe(`${DAY}|none||2026-10-23T03:30:30.000Z`);
+    expect(await request()).toBe(reportRequest(DAY, undefined, answeredAt));
+    expect(await request()).toBe(`${DAY}|none||2026-10-23T03:30:30.000Z`);
     expect(out()).toContain('Requested.');
   });
 
   it('records the row the owner was shown, so the service honours the request only while it is unchanged', async () => {
-    writeSnapshot(NOW);
-    withTracker((db) => {
-      claimReport(db, DAY, '2026-10-23T00:30:00.000Z');
-      retryReport(db, DAY, 'connect_timeout', '2026-10-23T00:32:00.000Z', '2026-10-23T00:30:30.000Z');
+    await writeSnapshot(NOW);
+    await withTracker(async (db) => {
+      await claimReport(db, DAY, '2026-10-23T00:30:00.000Z');
+      await retryReport(db, DAY, 'connect_timeout', '2026-10-23T00:32:00.000Z', '2026-10-23T00:30:30.000Z');
     });
     await reportSendNowCommand(deps());
-    const row = withTracker((db) => reportFor(db, DAY));
-    expect(request()).toBe(reportRequest(DAY, row, NOW));
-    expect(request()).toBe(`${DAY}|retry|2026-10-23T00:30:30.000Z|${NOW.toISOString()}`);
+    const row = await withTracker(async (db) => await reportFor(db, DAY));
+    expect(await request()).toBe(reportRequest(DAY, row, NOW));
+    expect(await request()).toBe(`${DAY}|retry|2026-10-23T00:30:30.000Z|${NOW.toISOString()}`);
   });
 
   it('refuses without asking when today was already sent', async () => {
-    writeSnapshot(NOW);
-    withTracker((db) => {
-      claimReport(db, DAY, '2026-10-23T00:30:00.000Z');
-      finishReport(db, DAY, 'sent', 'msg-1,msg-2', '2026-10-23T00:31:00.000Z');
+    await writeSnapshot(NOW);
+    await withTracker(async (db) => {
+      await claimReport(db, DAY, '2026-10-23T00:30:00.000Z');
+      await finishReport(db, DAY, 'sent', 'msg-1,msg-2', '2026-10-23T00:31:00.000Z');
     });
     await reportSendNowCommand(deps());
     expect(out()).toBe("Today's report was already sent at 06:01 IST. Nothing was sent.");
     expect(confirm).not.toHaveBeenCalled();
-    expect(request()).toBeUndefined();
+    expect(await request()).toBeUndefined();
   });
 
   it('refuses while a send is running', async () => {
-    writeSnapshot(NOW);
-    withTracker((db) => claimReport(db, DAY, '2026-10-23T03:29:00.000Z'));
+    await writeSnapshot(NOW);
+    await withTracker(async (db) => await claimReport(db, DAY, '2026-10-23T03:29:00.000Z'));
     await reportSendNowCommand(deps());
     expect(out()).toContain('being sent right now');
     expect(confirm).not.toHaveBeenCalled();
   });
 
   it("does not refuse a 'sending' row older than 10 minutes (its outcome was lost): it warns first and records that row", async () => {
-    writeSnapshot(NOW);
+    await writeSnapshot(NOW);
     // the 08:30 send went out, then recording its outcome failed, so the row stayed 'sending' (status reads unknown)
-    withTracker((db) => claimReport(db, DAY, '2026-10-23T03:00:00.000Z'));
+    await withTracker(async (db) => await claimReport(db, DAY, '2026-10-23T03:00:00.000Z'));
     await reportSendNowCommand(deps());
     expect(out()).not.toContain('being sent right now');
     expect(confirm).toHaveBeenCalledTimes(1);
     expect(confirm.mock.calls[0]![0]).toContain("may already be on the founder's phone");
-    expect(request()).toBe(`${DAY}|sending|2026-10-23T03:00:00.000Z|${NOW.toISOString()}`);
+    expect(await request()).toBe(`${DAY}|sending|2026-10-23T03:00:00.000Z|${NOW.toISOString()}`);
     expect(out()).toContain('Requested.');
   });
 
   it('refuses when the service is not running', async () => {
     await reportSendNowCommand(deps());
-    writeSnapshot(new Date(NOW.getTime() - 3 * 60_000));
+    await writeSnapshot(new Date(NOW.getTime() - 3 * 60_000));
     await reportSendNowCommand(deps());
     expect(lines).toEqual([
       'The service is not running, so nothing can be sent. Start it first (net start wa-agent), then run this again.',
       'The service is not running, so nothing can be sent. Start it first (net start wa-agent), then run this again.',
     ]);
     expect(confirm).not.toHaveBeenCalled();
-    expect(request()).toBeUndefined();
+    expect(await request()).toBeUndefined();
   });
 
   it('warns first when the last try ended unknown', async () => {
-    writeSnapshot(NOW);
-    withTracker((db) => {
-      claimReport(db, DAY, '2026-10-23T00:30:00.000Z');
-      finishReport(db, DAY, 'unknown', 'timeout', '2026-10-23T00:33:00.000Z');
+    await writeSnapshot(NOW);
+    await withTracker(async (db) => {
+      await claimReport(db, DAY, '2026-10-23T00:30:00.000Z');
+      await finishReport(db, DAY, 'unknown', 'timeout', '2026-10-23T00:33:00.000Z');
     });
     await reportSendNowCommand(deps());
     expect(confirm.mock.calls[0]![0]).toContain("may already be on the founder's phone");
-    expect(request()).toBe(`${DAY}|unknown|2026-10-23T00:33:00.000Z|${NOW.toISOString()}`);
+    expect(await request()).toBe(`${DAY}|unknown|2026-10-23T00:33:00.000Z|${NOW.toISOString()}`);
   });
 
   it('changes nothing when declined or cancelled', async () => {
-    writeSnapshot(NOW);
+    await writeSnapshot(NOW);
     confirm.mockResolvedValueOnce(false).mockRejectedValueOnce(new ConfirmCancelled());
     await reportSendNowCommand(deps());
     await reportSendNowCommand(deps());
     expect(lines).toEqual(['Nothing was sent.', 'Cancelled. Nothing was sent.']);
-    expect(request()).toBeUndefined();
+    expect(await request()).toBeUndefined();
   });
 
   it('refuses after the yes when the service sent today meanwhile', async () => {
-    writeSnapshot(NOW);
+    await writeSnapshot(NOW);
     confirm.mockImplementation(async () => {
-      withTracker((db) => {
-        claimReport(db, DAY, '2026-10-23T03:30:00.000Z');
-        finishReport(db, DAY, 'sent', 'msg-1,msg-2', '2026-10-23T03:31:00.000Z');
+      await withTracker(async (db) => {
+        await claimReport(db, DAY, '2026-10-23T03:30:00.000Z');
+        await finishReport(db, DAY, 'sent', 'msg-1,msg-2', '2026-10-23T03:31:00.000Z');
       });
       return true;
     });
     await reportSendNowCommand(deps());
     expect(out()).toBe("Today's report was already sent at 09:01 IST. Nothing was sent.");
-    expect(request()).toBeUndefined();
+    expect(await request()).toBeUndefined();
   });
 
   it('refuses after the yes when a send started meanwhile', async () => {
-    writeSnapshot(NOW);
+    await writeSnapshot(NOW);
     confirm.mockImplementation(async () => {
-      withTracker((db) => claimReport(db, DAY, '2026-10-23T03:30:00.000Z'));
+      await withTracker(async (db) => await claimReport(db, DAY, '2026-10-23T03:30:00.000Z'));
       return true;
     });
     await reportSendNowCommand(deps());
     expect(out()).toContain('being sent right now');
-    expect(request()).toBeUndefined();
+    expect(await request()).toBeUndefined();
   });
 
   it('refuses after the yes when today changed from what was shown (a send ended unknown meanwhile)', async () => {
-    writeSnapshot(NOW);
+    await writeSnapshot(NOW);
     confirm.mockImplementation(async () => {
-      withTracker((db) => {
-        claimReport(db, DAY, '2026-10-23T03:30:00.000Z');
-        finishReport(db, DAY, 'unknown', 'timeout', '2026-10-23T03:32:00.000Z');
+      await withTracker(async (db) => {
+        await claimReport(db, DAY, '2026-10-23T03:30:00.000Z');
+        await finishReport(db, DAY, 'unknown', 'timeout', '2026-10-23T03:32:00.000Z');
       });
       return true;
     });
@@ -744,31 +752,31 @@ describe('cli report send-now', () => {
     expect(out()).toContain('changed while you were answering');
     expect(out()).toContain('Morning report: unknown, check WhatsApp');
     expect(out()).toContain('Nothing was sent.');
-    expect(request()).toBeUndefined();
+    expect(await request()).toBeUndefined();
   });
 
   it('refuses after the yes when the same status was written again meanwhile (a newer try)', async () => {
-    writeSnapshot(NOW);
-    withTracker((db) => {
-      claimReport(db, DAY, '2026-10-23T00:30:00.000Z');
-      retryReport(db, DAY, 'connect_timeout', '2026-10-23T00:32:00.000Z', '2026-10-23T00:30:30.000Z');
+    await writeSnapshot(NOW);
+    await withTracker(async (db) => {
+      await claimReport(db, DAY, '2026-10-23T00:30:00.000Z');
+      await retryReport(db, DAY, 'connect_timeout', '2026-10-23T00:32:00.000Z', '2026-10-23T00:30:30.000Z');
     });
     confirm.mockImplementation(async () => {
-      withTracker((db) => {
-        expect(claimReport(db, DAY, '2026-10-23T03:30:00.000Z')).toBe(true);
-        expect(retryReport(db, DAY, 'connect_timeout', '2026-10-23T03:32:00.000Z', '2026-10-23T03:30:30.000Z')).toBe(true);
+      await withTracker(async (db) => {
+        expect(await claimReport(db, DAY, '2026-10-23T03:30:00.000Z')).toBe(true);
+        expect(await retryReport(db, DAY, 'connect_timeout', '2026-10-23T03:32:00.000Z', '2026-10-23T03:30:30.000Z')).toBe(true);
       });
       return true;
     });
     await reportSendNowCommand(deps());
-    expect(withTracker((db) => reportFor(db, DAY))?.status).toBe('retry');
+    expect((await withTracker(async (db) => await reportFor(db, DAY)))?.status).toBe('retry');
     expect(out()).toContain('changed while you were answering');
     expect(out()).toContain('Nothing was sent.');
-    expect(request()).toBeUndefined();
+    expect(await request()).toBeUndefined();
   });
 
   it('refuses after the yes when the IST date changed meanwhile', async () => {
-    writeSnapshot(NOW);
+    await writeSnapshot(NOW);
     confirm.mockImplementation(async () => {
       vi.setSystemTime(new Date('2026-10-23T18:31:00.000Z')); // 00:01 IST on 24 Oct
       return true;
@@ -776,38 +784,38 @@ describe('cli report send-now', () => {
     await reportSendNowCommand(deps());
     expect(out()).toContain('The date changed while you were answering');
     expect(out()).toContain('Nothing was sent.');
-    expect(request()).toBeUndefined();
+    expect(await request()).toBeUndefined();
   });
 
   it('refuses without asking when the running service was started with the report off', async () => {
-    writeSnapshot(NOW, { reportOn: false });
+    await writeSnapshot(NOW, { reportOn: false });
     await reportSendNowCommand(deps());
     expect(lines).toEqual([
       'The running service has the morning report off (it was started before REPORT_ENABLED=true was set). Restart it (net stop wa-agent, then net start wa-agent), wait a minute, then run this again.',
     ]);
     expect(confirm).not.toHaveBeenCalled();
-    expect(request()).toBeUndefined();
+    expect(await request()).toBeUndefined();
   });
 
   it('refuses without asking when the running service sends to another number than REPORT_RECIPIENT in .env now names', async () => {
-    writeSnapshot(NOW, { recipientMasked: '…1111' });
+    await writeSnapshot(NOW, { recipientMasked: '…1111' });
     await reportSendNowCommand(deps());
     expect(lines).toEqual([
       'The running service sends to the number ending …1111, but REPORT_RECIPIENT in .env now ends …5678. Nothing was sent. Restart the service (net stop wa-agent, then net start wa-agent), wait a minute, then run this again.',
     ]);
     expect(out()).not.toContain(NUMBER);
     expect(confirm).not.toHaveBeenCalled();
-    expect(request()).toBeUndefined();
+    expect(await request()).toBeUndefined();
   });
 
   it('refuses without asking when the running service does not say which number it sends to (started before this update)', async () => {
-    writeSnapshot(NOW, { recipientMasked: null });
+    await writeSnapshot(NOW, { recipientMasked: null });
     await reportSendNowCommand(deps());
     expect(lines).toEqual([
       'The running service does not say which number it sends to (it was started before an update). Nothing was sent. Restart the service (net stop wa-agent, then net start wa-agent), wait a minute, then run this again.',
     ]);
     expect(confirm).not.toHaveBeenCalled();
-    expect(request()).toBeUndefined();
+    expect(await request()).toBeUndefined();
   });
 
   it('refuses when the report is off', async () => {

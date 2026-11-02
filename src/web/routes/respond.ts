@@ -33,8 +33,8 @@ export interface ActionGuard {
 }
 
 /** For a request that changes something: a signed-in owner, then the Origin and CSRF checks, then the rate limit. */
-export function actionSession(ctx: RequestContext, d: ActionGuard): OwnerSession {
-  const session = d.guard.requireOwner(ctx.req);
+export async function actionSession(ctx: RequestContext, d: ActionGuard): Promise<OwnerSession> {
+  const session = await d.guard.requireOwner(ctx.req);
   d.guard.requireCsrf(ctx.req, session);
   d.actions.hit(ctx.req, ctx.res);
   return session;

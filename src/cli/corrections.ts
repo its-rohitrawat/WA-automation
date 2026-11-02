@@ -1,5 +1,5 @@
 import { clearPhaseLock, getClientByCode, setPhase, type ClientRow } from '../store/clients.ts';
-import { tx, type Db } from '../store/db.ts';
+import type { Db, Sql } from '../store/db.ts';
 import { setKv } from '../store/kv.ts';
 import { countProcessedBetween, resetProcessedSince } from '../store/messages.ts';
 import { findPeopleByJid, findPeopleByNumber, setRole, type PersonRow } from '../store/people.ts';
@@ -20,42 +20,48 @@ const ENUM_FIELDS = new Set<TaskField>(['side', 'category', 'priority']);
 
 export type EditOptions = Partial<Record<TaskField, string>>;
 
-export function requestRebuild(db: Db, now: Date): void {
-  setKv(db, 'rebuild_requested', now.toISOString());
+export async function requestRebuild(db: Sql, now: Date): Promise<void> {
+  await setKv(db, 'rebuild_requested', now.toISOString());
 }
 
-function findTask(db: Db, code: string): TaskRow {
-  const t = getTaskByCode(db, code.trim().toUpperCase());
+/** Runs fn in the caller's transaction q, or in a new one: a dashboard action writes its audit line in the same transaction. */
+function inTx<T>(db: Db, q: Sql | undefined, fn: (q: Sql) => Promise<T>): Promise<T> {
+  return q ? fn(q) : db.tx(fn);
+}
+
+async function findTask(db: Sql, code: string): Promise<TaskRow> {
+  const t = await getTaskByCode(db, code.trim().toUpperCase());
   if (!t) throw new CorrectionError(`No task called ${code}`);
   return t;
 }
 
-function findClient(db: Db, code: string): ClientRow {
-  const c = getClientByCode(db, code.trim().toUpperCase());
+async function findClient(db: Db, code: string): Promise<ClientRow> {
+  const c = await getClientByCode(db, code.trim().toUpperCase());
   if (!c) throw new CorrectionError(`No client with code ${code}`);
   return c;
 }
 
-export function humanEvent(db: Db, taskId: number | null, clientId: number, op: string, detail: object, now: Date): void {
-  recordEvent(db, { taskId, clientId, actor: 'human', op, detail, reason: 'cli', sourceIds: [], at: now.toISOString() });
+export async function humanEvent(db: Sql, taskId: number | null, clientId: number, op: string, detail: object, now: Date): Promise<void> {
+  await recordEvent(db, { taskId, clientId, actor: 'human', op, detail, reason: 'cli', sourceIds: [], at: now.toISOString() });
 }
 
-function setStatusAsHuman(db: Db, code: string, status: 'open' | 'done', now: Date): TaskRow {
-  const t = findTask(db, code);
+async function setStatusAsHuman(db: Db, code: string, status: 'open' | 'done', now: Date, q?: Sql): Promise<TaskRow> {
+  const t = await findTask(q ?? db, code);
   if (t.status === status) throw new CorrectionError(`Task ${t.code} is already ${status}`);
-  tx(db, () => {
-    setTaskStatus(db, t.id, status, istDate(now), now.toISOString(), 'human');
-    humanEvent(db, t.id, t.clientId, status === 'done' ? 'close_task' : 'reopen_task', { status }, now);
-    requestRebuild(db, now);
+  await inTx(db, q, async (q) => {
+    await setTaskStatus(q, t.id, status, istDate(now), now.toISOString(), 'human');
+    await humanEvent(q, t.id, t.clientId, status === 'done' ? 'close_task' : 'reopen_task', { status }, now);
+    await requestRebuild(q, now);
   });
-  return findTask(db, t.code);
+  return findTask(q ?? db, t.code);
 }
 
-export const closeTask = (db: Db, code: string, now: Date): TaskRow => setStatusAsHuman(db, code, 'done', now);
-export const reopenTask = (db: Db, code: string, now: Date): TaskRow => setStatusAsHuman(db, code, 'open', now);
+/** q: the caller's transaction, when the change is part of a larger one (src/control/taskActions.ts). */
+export const closeTask = (db: Db, code: string, now: Date, q?: Sql): Promise<TaskRow> => setStatusAsHuman(db, code, 'done', now, q);
+export const reopenTask = (db: Db, code: string, now: Date, q?: Sql): Promise<TaskRow> => setStatusAsHuman(db, code, 'open', now, q);
 
-export function editTask(db: Db, code: string, opts: EditOptions, now: Date): TaskRow {
-  const t = findTask(db, code);
+export async function editTask(db: Db, code: string, opts: EditOptions, now: Date, q?: Sql): Promise<TaskRow> {
+  const t = await findTask(q ?? db, code);
   const fields: Partial<Record<TaskField, string | null>> = {};
   for (const f of TASK_FIELDS) {
     const raw = opts[f];
@@ -73,77 +79,77 @@ export function editTask(db: Db, code: string, opts: EditOptions, now: Date): Ta
   check('priority', PRIORITIES);
   if (fields.title === null) throw new CorrectionError('title cannot be empty');
   if (fields.deadline != null && !isIsoDate(fields.deadline)) throw new CorrectionError('deadline must be YYYY-MM-DD, or none');
-  tx(db, () => {
-    updateTaskFields(db, t.id, fields, now.toISOString(), 'human');
-    humanEvent(db, t.id, t.clientId, 'update_task', fields, now);
-    requestRebuild(db, now);
+  await inTx(db, q, async (q) => {
+    await updateTaskFields(q, t.id, fields, now.toISOString(), 'human');
+    await humanEvent(q, t.id, t.clientId, 'update_task', fields, now);
+    await requestRebuild(q, now);
   });
-  return findTask(db, t.code);
+  return findTask(q ?? db, t.code);
 }
 
-export function unlockTask(db: Db, code: string, now: Date): TaskRow {
-  const t = findTask(db, code);
-  tx(db, () => {
-    clearTaskLocks(db, t.id, now.toISOString());
-    humanEvent(db, t.id, t.clientId, 'unlock', { lockedFields: t.lockedFields, statusLocked: t.statusLockedAt !== null }, now);
-    requestRebuild(db, now);
+export async function unlockTask(db: Db, code: string, now: Date, q?: Sql): Promise<TaskRow> {
+  const t = await findTask(q ?? db, code);
+  await inTx(db, q, async (q) => {
+    await clearTaskLocks(q, t.id, now.toISOString());
+    await humanEvent(q, t.id, t.clientId, 'unlock', { lockedFields: t.lockedFields, statusLocked: t.statusLockedAt !== null }, now);
+    await requestRebuild(q, now);
   });
-  return findTask(db, t.code);
+  return findTask(q ?? db, t.code);
 }
 
 /** Accepts a phone number (any punctuation) or a WhatsApp id (contains @). Returns how many group memberships changed. */
-export function setPersonRole(db: Db, who: string, roleInput: string, clientCode: string | undefined, now: Date): number {
+export async function setPersonRole(db: Db, who: string, roleInput: string, clientCode: string | undefined, now: Date): Promise<number> {
   const role = roleInput.trim().toLowerCase();
   if (role !== 'team' && role !== 'client') throw new CorrectionError('role must be team or client');
   const target = who.trim();
   let people: PersonRow[];
   let detailKey: { jid: string } | { number: string };
   if (target.includes('@')) {
-    people = findPeopleByJid(db, target);
+    people = await findPeopleByJid(db, target);
     detailKey = { jid: target };
   } else {
     const digits = target.replace(/\D/g, '');
     if (digits === '') throw new CorrectionError('Give the full phone number with country code, e.g. 919812345678, or a WhatsApp id');
     // The schema has no link between a LID row and a phone-number row, so only rows that carry this number or its phone id match.
-    const byNumber = findPeopleByNumber(db, digits);
+    const byNumber = await findPeopleByNumber(db, digits);
     const seen = new Set(byNumber.map((p) => p.id));
-    people = [...byNumber, ...findPeopleByJid(db, `${digits}@s.whatsapp.net`).filter((p) => !seen.has(p.id))];
+    people = [...byNumber, ...(await findPeopleByJid(db, `${digits}@s.whatsapp.net`)).filter((p) => !seen.has(p.id))];
     detailKey = { number: digits };
   }
   if (people.length === 0) throw new CorrectionError(`No one with that ${target.includes('@') ? 'WhatsApp id' : 'number'} has posted in an allowed group yet`);
   if (clientCode) {
-    const c = findClient(db, clientCode);
+    const c = await findClient(db, clientCode);
     people = people.filter((p) => p.clientId === c.id);
     if (people.length === 0) throw new CorrectionError(`That number has posted, but not in client ${c.code}`);
   }
   const chosen = people;
-  tx(db, () => {
+  await db.tx(async (q) => {
     for (const p of chosen) {
-      setRole(db, p.clientId, p.jid, role, 'human');
-      humanEvent(db, null, p.clientId, 'set_person_role', { ...detailKey, role }, now);
+      await setRole(q, p.clientId, p.jid, role, 'human');
+      await humanEvent(q, null, p.clientId, 'set_person_role', { ...detailKey, role }, now);
     }
-    requestRebuild(db, now);
+    await requestRebuild(q, now);
   });
   return chosen.length;
 }
 
-export function setClientPhase(db: Db, clientCode: string, phase: string, now: Date): void {
-  const c = findClient(db, clientCode);
+export async function setClientPhase(db: Db, clientCode: string, phase: string, now: Date): Promise<void> {
+  const c = await findClient(db, clientCode);
   const match = c.phases.find((p) => p.toLowerCase() === phase.trim().toLowerCase());
   if (!match) throw new CorrectionError(`Phase must be one of: ${c.phases.join(', ')}`);
-  tx(db, () => {
-    setPhase(db, c.id, match, 'human');
-    humanEvent(db, null, c.id, 'set_phase', { phase: match }, now);
-    requestRebuild(db, now);
+  await db.tx(async (q) => {
+    await setPhase(q, c.id, match, 'human');
+    await humanEvent(q, null, c.id, 'set_phase', { phase: match }, now);
+    await requestRebuild(q, now);
   });
 }
 
-export function unlockClientPhase(db: Db, clientCode: string, now: Date): void {
-  const c = findClient(db, clientCode);
-  tx(db, () => {
-    clearPhaseLock(db, c.id);
-    humanEvent(db, null, c.id, 'unlock_phase', { phase: c.currentPhase }, now);
-    requestRebuild(db, now);
+export async function unlockClientPhase(db: Db, clientCode: string, now: Date): Promise<void> {
+  const c = await findClient(db, clientCode);
+  await db.tx(async (q) => {
+    await clearPhaseLock(q, c.id);
+    await humanEvent(q, null, c.id, 'unlock_phase', { phase: c.currentPhase }, now);
+    await requestRebuild(q, now);
   });
 }
 
@@ -156,13 +162,13 @@ interface ReprocessWindow {
   untilIso: string | undefined;
 }
 
-function reprocessWindow(db: Db, clientCode: string, since: string, until: string | undefined): ReprocessWindow {
+async function reprocessWindow(db: Db, clientCode: string, since: string, until: string | undefined): Promise<ReprocessWindow> {
   if (!isIsoDate(since)) throw new CorrectionError('--since must be YYYY-MM-DD');
   if (until !== undefined) {
     if (!isIsoDate(until)) throw new CorrectionError('--until must be YYYY-MM-DD');
     if (until < since) throw new CorrectionError('--until must be on or after --since');
   }
-  const c = findClient(db, clientCode);
+  const c = await findClient(db, clientCode);
   if (!c.active) throw new CorrectionError(`Client ${c.code} is not in the allow-list; nothing to reprocess`);
   // --until covers that whole India-time day, so the limit is the start of the next day.
   const untilIso = until === undefined ? undefined : new Date(fromIstDate(until).getTime() + 86_400_000).toISOString();
@@ -170,18 +176,18 @@ function reprocessWindow(db: Db, clientCode: string, since: string, until: strin
 }
 
 /** How many processed messages a reprocess would queue. Changes nothing. */
-export function countReprocess(db: Db, clientCode: string, since: string, until?: string): number {
-  const w = reprocessWindow(db, clientCode, since, until);
+export async function countReprocess(db: Db, clientCode: string, since: string, until?: string): Promise<number> {
+  const w = await reprocessWindow(db, clientCode, since, until);
   return countProcessedBetween(db, w.clientId, w.sinceIso, w.untilIso);
 }
 
 /** Re-queues processed messages in the window for the AI. Returns how many were actually re-queued. */
-export function requestReprocess(db: Db, clientCode: string, since: string, now: Date, until?: string): number {
-  const w = reprocessWindow(db, clientCode, since, until);
-  return tx(db, () => {
-    const n = resetProcessedSince(db, w.clientId, w.sinceIso, w.untilIso);
-    humanEvent(db, null, w.clientId, 'reprocess', { since, until: until ?? null, messages: n }, now);
-    requestRebuild(db, now);
+export async function requestReprocess(db: Db, clientCode: string, since: string, now: Date, until?: string): Promise<number> {
+  const w = await reprocessWindow(db, clientCode, since, until);
+  return db.tx(async (q) => {
+    const n = await resetProcessedSince(q, w.clientId, w.sinceIso, w.untilIso);
+    await humanEvent(q, null, w.clientId, 'reprocess', { since, until: until ?? null, messages: n }, now);
+    await requestRebuild(q, now);
     return n;
   });
 }
@@ -194,10 +200,10 @@ export interface ReprocessResult {
 }
 
 /** Preview first; only re-queue when the job is small or the operator passed --yes. */
-export function reprocess(db: Db, clientCode: string, since: string, until: string | undefined, yes: boolean, now: Date): ReprocessResult {
-  const count = countReprocess(db, clientCode, since, until);
+export async function reprocess(db: Db, clientCode: string, since: string, until: string | undefined, yes: boolean, now: Date): Promise<ReprocessResult> {
+  const count = await countReprocess(db, clientCode, since, until);
   const maxCostUsd = Math.ceil(count / 200) * 0.5;
   if (count === 0) return { count, queued: 0, needsConfirm: false, maxCostUsd };
   if (count > REPROCESS_CONFIRM_ABOVE && !yes) return { count, queued: 0, needsConfirm: true, maxCostUsd };
-  return { count, queued: requestReprocess(db, clientCode, since, now, until), needsConfirm: false, maxCostUsd };
+  return { count, queued: await requestReprocess(db, clientCode, since, now, until), needsConfirm: false, maxCostUsd };
 }

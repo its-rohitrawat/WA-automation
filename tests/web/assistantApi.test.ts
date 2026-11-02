@@ -12,7 +12,7 @@ import { silentLogger } from '../../src/util/logger.ts';
 import { AuditLog } from '../../src/web/audit.ts';
 import { RateLimiter } from '../../src/web/guard.ts';
 import { registerAssistantApi } from '../../src/web/routes/assistant.ts';
-import { NOW, seededDb } from '../helpers/db.ts';
+import { NOW, rows, seeded } from '../helpers/db.ts';
 import { bootDashboard, OWNER } from '../helpers/web.ts';
 
 // The assistant's routes on the real dashboard server, with a fake Claude (no real API call): the owner's guard, CSRF,
@@ -40,10 +40,10 @@ class ProposingAi implements AssistantAi {
 }
 
 async function boot(o: { askCapacity?: number } = {}) {
-  const db = seededDb();
+  const { db, ids } = await seeded();
   const clock = manualClock(NOW);
-  createTask(db, {
-    clientId: 1, side: 'us', title: 'Send the revised quote', category: 'design', priority: 'medium', assignedTo: null, askedBy: null,
+  await createTask(db, {
+    clientId: ids.sharma, side: 'us', title: 'Send the revised quote', category: 'design', priority: 'medium', assignedTo: null, askedBy: null,
     raisedOn: '2026-10-18', deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'whatsapp',
   }, NOW);
   const spend = new SpendGuard({ db, clock, capUsd: 10 });
@@ -51,7 +51,7 @@ async function boot(o: { askCapacity?: number } = {}) {
   const pending = new PendingActions(clock);
   const ai = new ProposingAi();
   const status: AgentStatus = { at: NOW, up: true, line: { ok: true, text: 'ok' }, parts: [], lastMessageAt: null, spentToday: 0, capUsd: 10 };
-  const assistant = new Assistant({ ai, paid: spend, prices: PRICES, pending, settings, log: silentLogger(), clock, db, control: { status: () => status }, spend, voiceLocal: false });
+  const assistant = new Assistant({ ai, paid: spend, prices: PRICES, pending, settings, log: silentLogger(), clock, db, control: { status: async () => status }, spend, voiceLocal: false });
   const audit = new AuditLog(db, clock);
   const h = await bootDashboard({
     db, clock,
@@ -69,7 +69,7 @@ async function boot(o: { askCapacity?: number } = {}) {
 
 /** The answer's events, one JSON object per line. */
 const lines = (raw: unknown) => String(raw).trim().split('\n').map((l) => JSON.parse(l) as Record<string, unknown>);
-const auditRows = (db: Db) => db.prepare('SELECT actor, event, detail, request_id AS requestId FROM audit_log ORDER BY id').all() as Record<string, string | null>[];
+const auditRows = (db: Db) => rows<Record<string, string | null>>(db, 'SELECT actor, event, detail, request_id AS requestId FROM audit_log ORDER BY id');
 
 describe('assistant API', () => {
   it('needs the signed-in owner, and CSRF for anything that asks or changes', async () => {
@@ -101,15 +101,15 @@ describe('assistant API', () => {
     const events = lines(r.json);
     expect(events.map((e) => e.type)).toEqual(['tool', 'proposal', 'text', 'done']);
     const card = events[1]!.card as { id: string };
-    expect(getTaskByCode(db, 'SHA-001')?.status).toBe('open'); // nothing changes before Confirm
-    expect(auditRows(db)).toEqual([]);
+    expect((await getTaskByCode(db, 'SHA-001'))?.status).toBe('open'); // nothing changes before Confirm
+    expect(await auditRows(db)).toEqual([]);
 
     expect(await h.post('/dashboard/api/assistant/confirm', { body: { id: card.id } })).toMatchObject({ status: 200, json: { ok: true, message: 'SHA-001 updated.', task: 'SHA-001' } });
-    expect(getTaskByCode(db, 'SHA-001')?.status).toBe('done');
-    expect(auditRows(db)).toEqual([{ actor: OWNER, event: 'task.done', detail: 'Task SHA-001 marked done · via assistant', requestId: expect.any(String) }]);
+    expect((await getTaskByCode(db, 'SHA-001'))?.status).toBe('done');
+    expect(await auditRows(db)).toEqual([{ actor: OWNER, event: 'task.done', detail: 'Task SHA-001 marked done · via assistant', requestId: expect.any(String) }]);
     // A replayed Confirm is refused and changes nothing more.
     expect(await h.post('/dashboard/api/assistant/confirm', { body: { id: card.id } })).toMatchObject({ status: 404, json: { error: { field: 'id' } } });
-    expect(auditRows(db)).toHaveLength(1);
+    expect(await auditRows(db)).toHaveLength(1);
     expect(pending.size()).toBe(0);
   });
 
@@ -120,7 +120,7 @@ describe('assistant API', () => {
     expect((await h.post('/dashboard/api/assistant/confirm', { body: { id: first.id } })).status).toBe(404);
     lines((await h.post('/dashboard/api/assistant/ask', { body: { question: 'b' } })).json);
     expect(pending.size()).toBe(1);
-    h.sessions.destroyAllFor(OWNER);
+    await h.sessions.destroyAllFor(OWNER);
     expect(pending.size()).toBe(0);
   });
 });

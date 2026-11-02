@@ -50,8 +50,8 @@ export { TRACKER_ID_KEY };
 const DRIVE_FILE_ID = /^[A-Za-z0-9_-]{10,}$/;
 
 /** The Drive link to Tracker.xlsx, or undefined while the tracker was never uploaded (or the stored id is not a Drive id). */
-export function trackerLink(db: Db): string | undefined {
-  const id = getKv(db, TRACKER_ID_KEY);
+export async function trackerLink(db: Db): Promise<string | undefined> {
+  const id = await getKv(db, TRACKER_ID_KEY);
   return id !== undefined && DRIVE_FILE_ID.test(id) ? `https://drive.google.com/file/d/${id}/view` : undefined;
 }
 

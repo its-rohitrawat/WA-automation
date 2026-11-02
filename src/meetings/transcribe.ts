@@ -90,7 +90,7 @@ export interface MeetingTranscriber {
    */
   transcribePart(
     part: AudioPart,
-    o: { resumeJobId?: string; onJobId?: (id: string) => void; signal?: AbortSignal },
+    o: { resumeJobId?: string; onJobId?: (id: string) => void | Promise<void>; signal?: AbortSignal },
   ): Promise<{ model: string; segments: Segment[]; billedSeconds: number | null; forgetRef: string | null }>;
   /** Whether this provider keeps copies that forget() deletes. */
   readonly canForget: boolean;
@@ -285,8 +285,8 @@ async function runParts(id: number, t: MeetingTranscriber, deps: TranscribeMeeti
   const { db, log } = deps;
   // Normally done by recoverInflightParts at processor start; checked again here, so a part that may have been billed is
   // never sent again unbooked.
-  bookStuckParts(db, deps.spend, id, { inrPerUsd: t.inrPerUsd, clock: deps.clock, log });
-  const m = getMeeting(db, id);
+  await bookStuckParts(db, deps.spend, id, { inrPerUsd: t.inrPerUsd, clock: deps.clock, log });
+  const m = await getMeeting(db, id);
   if (m === undefined) throw new Error(`transcribeMeeting: no meeting ${id}`);
   if (m.status !== 'queued' || m.stage !== 'audio') throw new Error(`transcribeMeeting: meeting ${id} is not queued at stage audio`);
   if (m.audioPath === null || m.audioSeconds === null) throw new Error(`transcribeMeeting: meeting ${id} has no audio`);
@@ -311,13 +311,13 @@ async function runParts(id: number, t: MeetingTranscriber, deps: TranscribeMeeti
   const unheard = parts.filter((p) => p.unheard === true).length;
   if (noSpeech && unheard > 0) {
     // Nothing heard anywhere, and a part was given up: not a meeting without speech, but one the engine could not hear.
-    runUnheardAgain(ctx);
+    await runUnheardAgain(ctx);
     log.warn({ meetingId: id, parts: parts.length, unheard }, 'meeting fails: no speech was recognised in any part');
     throw new MeetingFailure('failed', 'nothing_heard');
   }
   const transcript = noSpeech ? [] : merged;
   const note: TranscribeMeetingResult['note'] = noSpeech ? 'no_speech' : unheard > 0 ? 'unheard_parts' : null;
-  advanceStage(db, id, 'transcribed', note !== null ? { transcript, note } : { transcript }, deps.clock.now().toISOString());
+  await advanceStage(db, id, 'transcribed', note !== null ? { transcript, note } : { transcript }, deps.clock.now().toISOString());
   log.info({ meetingId: id, parts: parts.length, segmentCount: transcript.length, noSpeech, unheard }, 'meeting transcribed');
 
   // Only now that the transcript is stored: the provider's own copies go. What fails stays noted in stt_forget, and
@@ -351,11 +351,11 @@ function removeParts(id: number, dir: string, log: Logger): void {
  * STT_PROVIDER none too. Returns how many parts were booked. A meeting whose record cannot be read or written is logged
  * by id and left for the next call (transcribeMeeting and the processor's final bookStuckParts check it again).
  */
-export function recoverInflightParts(db: Db, spend: SpendGuard, inrPerUsd: number, log: Logger, clock: Clock = systemClock): number {
+export async function recoverInflightParts(db: Db, spend: SpendGuard, inrPerUsd: number, log: Logger, clock: Clock = systemClock): Promise<number> {
   let booked = 0;
-  for (const id of meetingIdsWithInflightParts(db)) {
+  for (const id of await meetingIdsWithInflightParts(db)) {
     try {
-      booked += bookStuckParts(db, spend, id, { inrPerUsd, clock, log });
+      booked += await bookStuckParts(db, spend, id, { inrPerUsd, clock, log });
     } catch (e) {
       log.warn({ meetingId: id, code: errorCode(e) }, 'meeting speech parts could not be recovered');
     }

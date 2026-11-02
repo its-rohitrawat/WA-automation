@@ -167,7 +167,7 @@ const collator = new Intl.Collator('en', { sensitivity: 'base', numeric: true })
  * first, then by name. Search matches the group name and the client name, ignoring case and accents. `ignored` says
  * which untracked groups the owner set aside: the not_approved filter leaves them out, the ignored filter shows only them.
  */
-export function groupsOverview(o: {
+export async function groupsOverview(o: {
   db: Db;
   listing: GroupListing;
   configs: readonly ClientConfig[];
@@ -175,11 +175,11 @@ export function groupsOverview(o: {
   filter?: GroupFilter;
   limit?: number;
   ignored?: (groupId: string) => boolean;
-}): GroupsOverview {
+}): Promise<GroupsOverview> {
   const { db, listing } = o;
   const isIgnored = o.ignored ?? (() => false);
-  const byGroup = new Map(listClients(db, false).map((c) => [c.groupId, c]));
-  const withTasks = new Set((db.prepare('SELECT DISTINCT client_id AS id FROM tasks').all() as { id: number }[]).map((r) => r.id));
+  const byGroup = new Map((await listClients(db, false)).map((c) => [c.groupId, c]));
+  const withTasks = new Set((await db.all<{ id: number }>('SELECT DISTINCT client_id AS id FROM tasks')).map((r) => r.id));
   const approved = new Map(o.configs.map((c) => [c.groupId, c]));
   const liveIds = new Set(listing.groups.map((g) => g.id));
 

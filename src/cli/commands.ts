@@ -3,7 +3,7 @@ import type { Command } from 'commander';
 import qrcode from 'qrcode-terminal';
 import { maskNumber, reportRecipient, reportSettings, requireKey, type Env } from '../config/env.ts';
 import { loadGroupsFile, type ClientConfig } from '../config/groups.ts';
-import { masterKeyPath, senderSessionDbPath, sessionDbPath, trackerDbPath } from '../config/paths.ts';
+import { masterKeyPath, senderSessionDbPath } from '../config/paths.ts';
 import { DpapiKeyProvider, type KeyProvider } from '../crypto/keyProvider.ts';
 import { MediaRefSealer } from '../media/ref.ts';
 import { readHealthSnapshot } from '../health/health.ts';
@@ -15,7 +15,8 @@ import {
 import { describeReport, isStaleSending, reasonText } from '../report/scheduler.ts';
 import { latestBatches } from '../store/batches.ts';
 import { listClients, syncClients } from '../store/clients.ts';
-import { openDb, tx, type Db } from '../store/db.ts';
+import type { Db } from '../store/db.ts';
+import { databaseLine, openStore } from '../store/open.ts';
 import { setKv } from '../store/kv.ts';
 import { mediaSttForgetsGivenUp } from '../store/media.ts';
 import { sttForgetsGivenUp } from '../store/meetings.ts';
@@ -27,7 +28,8 @@ import { silentLogger } from '../util/logger.ts';
 import { istDate, istShortDate, istTime } from '../util/time.ts';
 import { AllowList } from '../wa/allowlist.ts';
 import {
-  openSenderSession, openSessionDb, readFounderNumber, resetSession, SenderSessionDecryptError, SessionDecryptError, useEncryptedAuthState,
+  founderNumberIn, openPhoneSession, openSenderSession, resetSession, SenderSessionDecryptError, SessionDecryptError, sessionHomeOf,
+  useEncryptedAuthState, type SessionHome,
   useSenderAuthState, type EncryptedAuth,
 } from '../wa/authState.ts';
 import { baileysSocketFactory, TRACKER_DEVICE_NAME, WhatsAppGateway, type GatewayState, type SocketFactory } from '../wa/gateway.ts';
@@ -89,7 +91,7 @@ export function defaultDeps(env: Env): CliDeps {
   };
 }
 
-const countMessages = (db: Db) => (db.prepare('SELECT COUNT(*) AS n FROM messages').get() as { n: number }).n;
+const countMessages = async (db: Db) => (await db.get<{ n: number }>('SELECT COUNT(*) AS n FROM messages'))!.n;
 
 const ADVICE_LOGGED_OUT = 'WhatsApp refused this session (logged out). Follow docs/SETUP.md → "Status logged_out" before running link --reset.';
 const ADVICE_FORBIDDEN = "WhatsApp refused this device (403). Check the founder's phone for a WhatsApp warning; do not reset the link.";
@@ -136,8 +138,8 @@ async function connectAndIngest(o: {
   });
   const ingestor = new Ingestor({ db: o.db, onNewMessages: () => {}, media: { sealer: o.mediaRefs } });
   let lastEvent = Date.now();
-  gateway.onEvent((e) => {
-    ingestor.handle(e);
+  gateway.onEvent(async (e) => {
+    await ingestor.handle(e);
     lastEvent = Date.now();
   });
   try {
@@ -168,12 +170,17 @@ async function connectAndIngest(o: {
         }
       }, POLL_MS);
     });
+    // The state as the wait ended; then the messages already handed over are stored before anything is counted (on
+    // Postgres each one is a network write), as the service waits for them before its database closes (src/app.ts).
+    const state = gateway.status().state;
+    await gateway.stop();
+    await gateway.idle();
     const failed = gateway.failedCount();
     if (failed > 0) deps.out(`${failed} messages could not be saved. They are lost from the tracker; check the log, and add anything important by hand.`);
-    const state = gateway.status().state;
     if (state !== 'open') throw new Error(terminalAdvice(state) ?? o.droppedMessage ?? ADVICE_DROPPED);
   } finally {
     await gateway.stop();
+    await gateway.idle(); // the caller closes the database next
   }
 }
 
@@ -186,13 +193,13 @@ export async function linkCommand(opts: { reset: boolean }, deps: CliDeps): Prom
   try {
     const key = deps.keyProvider.getKey();
     const configs = loadGroupsFile(env.GROUPS_FILE);
-    db = openDb(trackerDbPath(env.DATA_DIR));
-    sessionDb = openSessionDb(sessionDbPath(env.DATA_DIR));
-    syncClients(db, configs);
+    db = await openStore(env);
+    sessionDb = await openPhoneSession(sessionHomeOf(env, db), 'founder');
+    await syncClients(db, configs);
     if (opts.reset) {
       let hasSession: boolean;
       try {
-        hasSession = useEncryptedAuthState(sessionDb, key).hasSession;
+        hasSession = (await useEncryptedAuthState(sessionDb, key)).hasSession;
       } catch (e) {
         if (!(e instanceof SessionDecryptError)) throw e;
         hasSession = true; // a stored session this key cannot read: exactly what a reset is for
@@ -215,18 +222,18 @@ export async function linkCommand(opts: { reset: boolean }, deps: CliDeps): Prom
           return;
         }
         // Only the agent's own WhatsApp session rows (session.db) are deleted. tracker.db keeps its data.
-        resetSession(sessionDb);
-        setKv(db, 'session_reset_at', new Date().toISOString());
+        await resetSession(sessionDb);
+        await setKv(db, 'session_reset_at', new Date().toISOString());
         out('Reset: the saved WhatsApp session was deleted. Your tasks, messages and tracker data were NOT touched.');
       }
     }
-    const auth = useEncryptedAuthState(sessionDb, key);
+    const auth = await useEncryptedAuthState(sessionDb, key);
     if (auth.hasSession) {
       out('WhatsApp is already linked. Use --reset only after WhatsApp has unlinked this device.');
       return;
     }
     if (configs.length === 0) out('Note: the allow-list is empty, so nothing will be stored. Run list-groups next.');
-    const before = countMessages(db);
+    const before = await countMessages(db);
     await connectAndIngest({
       deps,
       db,
@@ -243,11 +250,11 @@ export async function linkCommand(opts: { reset: boolean }, deps: CliDeps): Prom
         qrcode.generate(qr, { small: true }, (art: string) => out(art));
       },
     });
-    out(`Linked. ${countMessages(db) - before} messages saved from the allowed groups.`);
+    out(`Linked. ${(await countMessages(db)) - before} messages saved from the allowed groups.`);
     out('Next: npm run cli -- list-groups (if you still need group ids), then start the service: net start wa-agent');
   } finally {
-    sessionDb?.close();
-    db?.close();
+    await sessionDb?.close();
+    await db?.close();
     await lock.release();
   }
 }
@@ -260,10 +267,10 @@ export async function listGroupsCommand(deps: CliDeps): Promise<void> {
   try {
     const key = deps.keyProvider.getKey();
     const configs = loadGroupsFile(env.GROUPS_FILE);
-    db = openDb(trackerDbPath(env.DATA_DIR));
-    sessionDb = openSessionDb(sessionDbPath(env.DATA_DIR));
-    syncClients(db, configs);
-    const auth = useEncryptedAuthState(sessionDb, key);
+    db = await openStore(env);
+    sessionDb = await openPhoneSession(sessionHomeOf(env, db), 'founder');
+    await syncClients(db, configs);
+    const auth = await useEncryptedAuthState(sessionDb, key);
     if (!auth.hasSession) {
       out('WhatsApp is not linked yet. Run: npm run cli -- link');
       return;
@@ -285,36 +292,37 @@ export async function listGroupsCommand(deps: CliDeps): Promise<void> {
       },
     });
   } finally {
-    sessionDb?.close();
-    db?.close();
+    await sessionDb?.close();
+    await db?.close();
     await lock.release();
   }
 }
 
-export function statusCommand(deps: CliDeps): void {
-  const db = openDb(trackerDbPath(deps.env.DATA_DIR));
+export async function statusCommand(deps: CliDeps): Promise<void> {
+  const db = await openStore(deps.env);
   try {
+    deps.out(databaseLine(deps.env)); // which database: the SQLite file, or Postgres's host, port, database and role
     deps.out(
       formatStatus({
-        snapshot: readHealthSnapshot(db),
-        clients: listClients(db, false),
-        batches: latestBatches(db),
-        unprocessed: unprocessedCounts(db),
+        snapshot: await readHealthSnapshot(db),
+        clients: await listClients(db, false),
+        batches: await latestBatches(db),
+        unprocessed: await unprocessedCounts(db),
         now: new Date(),
-        sttCopiesLeft: sttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: deps.env.STT_PROVIDER }),
+        sttCopiesLeft: await sttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: deps.env.STT_PROVIDER }),
         // Voice-note copies are deleted through the voice transcriber, so VOICE_STT_PROVIDER decides (Task 10), not STT_PROVIDER.
-        voiceCopiesLeft: mediaSttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: deps.env.VOICE_STT_PROVIDER }),
+        voiceCopiesLeft: await mediaSttForgetsGivenUp(db, { maxAttempts: MAX_FORGET_ATTEMPTS, provider: deps.env.VOICE_STT_PROVIDER }),
       }),
     );
   } finally {
-    db.close();
+    await db.close();
   }
 }
 
 export async function googleAuthCommand(deps: CliDeps): Promise<void> {
   const { env, out } = deps;
   const key = deps.keyProvider.getKey();
-  const db = openDb(trackerDbPath(env.DATA_DIR));
+  const db = await openStore(env);
   try {
     const clientId = requireKey(env, 'GOOGLE_OAUTH_CLIENT_ID');
     const clientSecret = requireKey(env, 'GOOGLE_OAUTH_CLIENT_SECRET');
@@ -332,17 +340,16 @@ export async function googleAuthCommand(deps: CliDeps): Promise<void> {
         out(url);
       },
     });
-    const tokens = new TokenStore(db, key);
     // Both or neither: the scope record must describe the token beside it.
-    tx(db, () => {
-      tokens.save(refreshToken);
-      saveGrantedScopes(db, scope);
+    await db.tx(async (q) => {
+      await new TokenStore(q, key).save(refreshToken);
+      await saveGrantedScopes(q, scope);
       // Issued by the desktop client: a 'web' left from an earlier dashboard reconnect would pair it with the wrong client.
-      saveTokenIssuer(db, MAIN_ACCOUNT, 'desktop');
+      await saveTokenIssuer(q, MAIN_ACCOUNT, 'desktop');
     });
     out(`${env.MEETINGS_ENABLED ? 'Google Drive, Meet and Calendar' : 'Google Drive'} connected. If the WA Agent service is running, restart it so it uses the new sign-in: net stop wa-agent, then net start wa-agent`);
   } finally {
-    db.close();
+    await db.close();
   }
 }
 
@@ -380,10 +387,15 @@ export async function linkSenderCommand(opts: { reset: boolean }, deps: CliDeps)
   // The lock comes first: with the service stopped, only one process ever uses the spare number's session.
   const lock = await acquireLock(env.DATA_DIR);
   let senderDb: Db | undefined;
+  /** Postgres only: wa_auth is on the customer's Db. On SQLite the tracker is never opened here. */
+  let trackerDb: Db | undefined;
   try {
     const key = deps.keyProvider.getKey();
     const file = senderSessionDbPath(env.DATA_DIR);
-    const opened = openSenderSession(file, key);
+    const sessions: SessionHome = env.DB_ENGINE === 'postgres'
+      ? { engine: 'postgres', db: (trackerDb = await openStore(env)) }
+      : { engine: 'sqlite', dataDir: env.DATA_DIR };
+    const opened = await openSenderSession(sessions, key);
     let auth: EncryptedAuth | undefined;
     if (opened.ok) {
       senderDb = opened.db;
@@ -407,8 +419,8 @@ export async function linkSenderCommand(opts: { reset: boolean }, deps: CliDeps)
         if (!yes) return;
         const movedTo = moveDamagedSession(file, new Date());
         out(`Moved aside: the damaged data/sender-session.db is now ${movedTo} (not deleted). The founder's link and the tracker were NOT touched.`);
-        senderDb = openSessionDb(file);
-        auth = useSenderAuthState(senderDb, key);
+        senderDb = await openPhoneSession(sessions, 'spare');
+        auth = await useSenderAuthState(senderDb, key);
       } else {
         // A linked session, or one written with another master key: exactly what a reset is for.
         const yes = await confirmChange(
@@ -416,10 +428,10 @@ export async function linkSenderCommand(opts: { reset: boolean }, deps: CliDeps)
           "This removes the saved link of the spare number (data/sender-session.db) only. The founder's WhatsApp link and all tracker data are not touched. You will scan a new QR code from the spare phone. Type yes to continue:",
         );
         if (!yes) return;
-        senderDb ??= openSessionDb(file);
-        resetSession(senderDb); // the spare number's session rows only
+        senderDb ??= await openPhoneSession(sessions, 'spare');
+        await resetSession(senderDb); // the spare number's session rows only
         out("Reset: the saved spare-number session was deleted. The founder's link and the tracker were NOT touched.");
-        auth = useSenderAuthState(senderDb, key);
+        auth = await useSenderAuthState(senderDb, key);
       }
     }
     if (!auth) throw new Error(SENDER_DAMAGED); // unreachable: every path without a session returned or threw above
@@ -443,29 +455,30 @@ export async function linkSenderCommand(opts: { reset: boolean }, deps: CliDeps)
     // founder reader is linked to (session.db, only read here). SenderGateway checks both again at service start and at
     // send time.
     const linked = linkedNumber(auth);
-    const founder = readFounderNumber(sessionDbPath(env.DATA_DIR), key);
+    const founder = await founderNumberIn(sessions, key);
     if (linked !== undefined && ((env.REPORT_RECIPIENT && linked === env.REPORT_RECIPIENT) || linked === founder)) {
-      resetSession(senderDb!); // the spare number's session rows only: this link is never used
+      await resetSession(senderDb!); // the spare number's session rows only: this link is never used
       throw new Error(
         `That QR code was scanned with the founder's phone. On the founder's phone remove the device named "${SENDER_DEVICE_NAME}" (keep "${TRACKER_DEVICE_NAME}", which the tracker uses), then run link-sender again and scan with the SPARE phone.`,
       );
     }
     out('Spare number linked. Next: set REPORT_RECIPIENT and REPORT_ENABLED=true in .env, then start the service (net start wa-agent).');
   } finally {
-    senderDb?.close();
+    await senderDb?.close();
+    await trackerDb?.close();
     await lock.release();
   }
 }
 
 /** Today's morning report and the last 7 days. Reads the tracker database only. */
-export function reportStatusCommand(deps: CliDeps): void {
+export async function reportStatusCommand(deps: CliDeps): Promise<void> {
   const { env, out } = deps;
   const settings = reportSettings(env);
   const now = new Date();
   const today = istDate(now);
-  const db = openDb(trackerDbPath(env.DATA_DIR));
+  const db = await openStore(env);
   try {
-    const snap = readHealthSnapshot(db);
+    const snap = await readHealthSnapshot(db);
     const fresh = snap !== undefined && now.getTime() - Date.parse(snap.at) <= SERVICE_FRESH_MS;
     if (settings.enabled) {
       // A running service sends to the number it was started with; .env may name another one since.
@@ -480,9 +493,9 @@ export function reportStatusCommand(deps: CliDeps): void {
     } else {
       out('Morning report: off (set REPORT_ENABLED=true and REPORT_RECIPIENT in .env, then restart the service)');
     }
-    const row = reportFor(db, today);
+    const row = await reportFor(db, today);
     if (settings.enabled || row) out(`Today (${today}): ${describeReport(row, now, settings, 'idle').text}`);
-    const past = recentReports(db, 8).filter((r) => r.date !== today).slice(0, 7);
+    const past = (await recentReports(db, 8)).filter((r) => r.date !== today).slice(0, 7);
     if (past.length > 0) {
       out('Last days:');
       for (const r of past) out(`  ${r.date}  ${r.status.padEnd(8)}${r.status === 'sent' ? `at ${istTime(new Date(r.updatedAt))} IST` : reasonText(r.detail)}`);
@@ -495,7 +508,7 @@ export function reportStatusCommand(deps: CliDeps): void {
       out(snap.report.warning);
     }
   } finally {
-    db.close();
+    await db.close();
   }
 }
 
@@ -528,15 +541,15 @@ export async function reportSendNowCommand(deps: CliDeps): Promise<void> {
   }
   const now = new Date();
   const today = istDate(now);
-  const db = openDb(trackerDbPath(env.DATA_DIR));
+  const db = await openStore(env);
   try {
-    const row = reportFor(db, today);
+    const row = await reportFor(db, today);
     const refusal = sendNowRefusal(row, now);
     if (refusal) {
       out(refusal);
       return;
     }
-    const snap = readHealthSnapshot(db);
+    const snap = await readHealthSnapshot(db);
     if (!snap || now.getTime() - Date.parse(snap.at) > SERVICE_FRESH_MS) {
       out('The service is not running, so nothing can be sent. Start it first (net start wa-agent), then run this again.');
       return;
@@ -580,10 +593,10 @@ export async function reportSendNowCommand(deps: CliDeps): Promise<void> {
     }
     // The service may have changed today's row while the owner was answering. Read it again and write the request in
     // the same transaction, so the request always names the row it was checked against.
-    const answer = tx(db, (): string | undefined => {
+    const answer = await db.tx(async (q): Promise<string | undefined> => {
       const at = new Date();
       if (istDate(at) !== today) return 'The date changed while you were answering. Nothing was sent. Run this again.';
-      const current = reportFor(db, today);
+      const current = await reportFor(q, today);
       const late = sendNowRefusal(current, at);
       if (late) return late;
       if (current?.status !== row?.status || current?.updatedAt !== row?.updatedAt) {
@@ -591,12 +604,12 @@ export async function reportSendNowCommand(deps: CliDeps): Promise<void> {
         return `Today's report changed while you were answering (now: ${nowText}). Nothing was sent. Check with: npm run cli -- report status, then run this again if it is still needed.`;
       }
       // Stamped with the time of the yes: the service drops a request older than 5 minutes.
-      setKv(db, REPORT_REQUEST_KEY, reportRequest(today, current, at));
+      await setKv(q, REPORT_REQUEST_KEY, reportRequest(today, current, at));
       return undefined;
     });
     out(answer ?? 'Requested. The service sends it within about a minute. Check with: npm run cli -- report status');
   } finally {
-    db.close();
+    await db.close();
   }
 }
 
@@ -614,18 +627,18 @@ export async function googleAccountCommand(opts: { account: string; remove: bool
     throw new Error('Extra Google accounts are for meetings. Set MEETINGS_ENABLED=true in .env first.');
   }
   const key = deps.keyProvider.getKey();
-  const db = openDb(trackerDbPath(env.DATA_DIR));
+  const db = await openStore(env);
   try {
     if (opts.remove) {
-      if (!meetingAccounts(db).includes(label)) {
-        out(`No Google account named ${label} is connected. Connected: ${meetingAccounts(db).join(', ') || 'none besides the main one'}.`);
+      if (!(await meetingAccounts(db)).includes(label)) {
+        out(`No Google account named ${label} is connected. Connected: ${(await meetingAccounts(db)).join(', ') || 'none besides the main one'}.`);
         return;
       }
       if (!(await deps.confirm(`Forget Google account ${label} here? Its meetings are no longer found. Type yes to continue: `))) {
         out('Nothing was changed.');
         return;
       }
-      removeMeetingAccount(db, label);
+      await removeMeetingAccount(db, label);
       out(`Google account ${label} forgotten here. To end its access at Google too, remove WA Agent at myaccount.google.com/permissions while signed in as that account.`);
       out(RESTART);
       return;
@@ -644,11 +657,11 @@ export async function googleAccountCommand(opts: { account: string; remove: bool
         out(url);
       },
     });
-    saveMeetingAccount(db, key, label, refreshToken, scope);
-    out(`Google account ${label} connected for meetings (read only). Connected accounts: main, ${meetingAccounts(db).join(', ')}.`);
+    await saveMeetingAccount(db, key, label, refreshToken, scope);
+    out(`Google account ${label} connected for meetings (read only). Connected accounts: main, ${(await meetingAccounts(db)).join(', ')}.`);
     out(RESTART);
   } finally {
-    db.close();
+    await db.close();
   }
 }
 

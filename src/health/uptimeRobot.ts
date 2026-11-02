@@ -198,6 +198,6 @@ export async function uptimeReport(o: { log: UptimeLog; robot?: UptimeRobotClien
     const intervals = merged(toIntervals(outages), now);
     return { source: 'uptimerobot', ratios: reading.ratios, ...withTimes(dailyDown(intervals, now, days), outages, intervals), knownSinceDay: null };
   }
-  const outages = o.log.outages(days);
-  return { source: 'agent', ratios: o.log.ratios(), ...withTimes(o.log.daily(days), outages, toIntervals(outages)), knownSinceDay: o.log.knownSinceDay() };
+  const outages = await o.log.outages(days);
+  return { source: 'agent', ratios: await o.log.ratios(), ...withTimes(await o.log.daily(days), outages, toIntervals(outages)), knownSinceDay: await o.log.knownSinceDay() };
 }

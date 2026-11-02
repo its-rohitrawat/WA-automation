@@ -32,7 +32,7 @@ describe('safeReturnPath', () => {
     expect(safeReturnPath('/dashboard')).toBe('/dashboard');
     for (const s of DASHBOARD_SCREENS) expect(safeReturnPath(`/dashboard/${s}`)).toBe(`/dashboard/${s}`);
     expect(safeReturnPath('/dashboard/clients/groups')).toBe('/dashboard/clients/groups');
-    expect(DASHBOARD_SCREENS).toHaveLength(11);
+    expect(DASHBOARD_SCREENS).toHaveLength(15); // with the platform's customers and invite, a customer's onboarding (SaaS S5), and the workspace chooser
   });
 
   it.each([

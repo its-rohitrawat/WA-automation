@@ -1,4 +1,4 @@
-import type { Db } from './db.ts';
+import type { Db, Sql } from './db.ts';
 import { getKv, setKv } from './kv.ts';
 
 // The 7-day history backfill of a newly approved group (owner decision, 28 Oct 2026), kept in kv so a restart carries
@@ -62,26 +62,27 @@ function parse(groupId: string, v: string | undefined): Backfill | undefined {
 }
 
 /** Queues (or restarts) the backfill of a group approved now: the 7 days before now. */
-export function queueBackfill(db: Db, groupId: string, clientId: number, now: Date): void {
-  saveBackfill(db, {
+export async function queueBackfill(db: Sql, groupId: string, clientId: number, now: Date): Promise<void> {
+  await saveBackfill(db, {
     groupId, clientId, since: new Date(now.getTime() - BACKFILL_DAYS * 86_400_000).toISOString(), until: now.toISOString(),
     state: 'waiting', requests: 0, empties: 0, timeouts: 0, failures: 0, cursor: null, found: 0, fetchingSince: null, finishedAt: null,
   });
 }
 
-export function getBackfill(db: Db, groupId: string): Backfill | undefined {
-  return parse(groupId, getKv(db, key(groupId)));
+export async function getBackfill(db: Sql, groupId: string): Promise<Backfill | undefined> {
+  return parse(groupId, await getKv(db, key(groupId)));
 }
 
-export function saveBackfill(db: Db, b: Backfill): void {
+export async function saveBackfill(db: Sql, b: Backfill): Promise<void> {
   const { groupId, ...rest } = b;
-  setKv(db, key(groupId), JSON.stringify(rest));
+  await setKv(db, key(groupId), JSON.stringify(rest));
 }
 
 /** Every backfill entry, finished ones too. */
-export function listBackfills(db: Db): Backfill[] {
-  // A range, not LIKE: "_" in the prefix would be a wildcard there.
-  const rows = db.prepare('SELECT k, v FROM kv WHERE k >= ? AND k < ? ORDER BY k').all(PREFIX, `${PREFIX.slice(0, -1)};`) as { k: string; v: string }[];
+export async function listBackfills(db: Sql): Promise<Backfill[]> {
+  // An exact prefix match. Not LIKE ("_" in the prefix would be a wildcard there), and not a text range: Postgres orders
+  // text by the database's collation, not byte by byte, so a range can miss every entry.
+  const rows = await db.all<{ k: string; v: string }>(`SELECT k, v FROM kv WHERE substr(k, 1, ${PREFIX.length}) = ? ORDER BY k`, [PREFIX]);
   return rows.flatMap((r) => parse(r.k.slice(PREFIX.length), r.v) ?? []);
 }
 
@@ -89,15 +90,9 @@ export function listBackfills(db: Db): Backfill[] {
  * Where the first request pages back from: the group's oldest message since it was approved. Messages kept from an
  * earlier approval are not used, so the days the group was not approved are read too.
  */
-export function firstAnchor(db: Db, clientId: number, until: string): { waId: string; fromMe: boolean; ts: string } | undefined {
-  const r = db.prepare('SELECT wa_id, from_me, ts FROM messages WHERE client_id = ? AND ts >= ? ORDER BY ts, id LIMIT 1').get(clientId, until) as
-    { wa_id: string; from_me: number; ts: string } | undefined;
+export async function firstAnchor(db: Sql, clientId: number, until: string): Promise<{ waId: string; fromMe: boolean; ts: string } | undefined> {
+  const r = await db.get<{ wa_id: string; from_me: number; ts: string }>('SELECT wa_id, from_me, ts FROM messages WHERE client_id = ? AND ts >= ? ORDER BY ts, id LIMIT 1', [clientId, until]);
   return r ? { waId: r.wa_id, fromMe: r.from_me === 1, ts: r.ts } : undefined;
-}
-
-/** The client's stored messages, to count what an answer added. */
-export function messageCount(db: Db, clientId: number): number {
-  return (db.prepare('SELECT COUNT(*) AS n FROM messages WHERE client_id = ?').get(clientId) as { n: number }).n;
 }
 
 /** How long a finished backfill shows on the Clients card. */
@@ -107,8 +102,8 @@ export const SHOW_DONE_MS = 7 * 86_400_000;
 export type BackfillStatus = { state: 'waiting' | 'reading'; found: number } | { state: 'done'; found: number } | null;
 
 /** The Clients card's line for a client: reading, waiting for the first message, or read (for a week after). */
-export function backfillStatus(db: Db, clientId: number, now: Date): BackfillStatus {
-  const b = listBackfills(db).find((x) => x.clientId === clientId);
+export async function backfillStatus(db: Db, clientId: number, now: Date): Promise<BackfillStatus> {
+  const b = (await listBackfills(db)).find((x) => x.clientId === clientId);
   if (!b || b.state === 'stopped') return null;
   const found = b.found;
   if (b.state === 'done') return b.finishedAt && now.getTime() - Date.parse(b.finishedAt) < SHOW_DONE_MS ? { state: 'done', found } : null;

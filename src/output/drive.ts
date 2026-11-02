@@ -342,14 +342,14 @@ export class DrivePublisher {
     } catch (e) {
       throw new PublishError('build', e);
     }
-    let root = getKv(db, 'drive_root_id');
+    let root = await getKv(db, 'drive_root_id');
     let rootIsNew = false;
     if (!root) {
       root = await api.createFolder(DRIVE_ROOT_NAME);
-      setKv(db, 'drive_root_id', root);
+      await setKv(db, 'drive_root_id', root);
       rootIsNew = true;
     }
-    const stored = getKv(db, TRACKER_ID_KEY);
+    const stored = await getKv(db, TRACKER_ID_KEY);
     if (stored) {
       try {
         await api.updateFile(stored, XLSX_MIME, body);
@@ -366,21 +366,21 @@ export class DrivePublisher {
       for (const folder of await api.findFolders(DRIVE_ROOT_NAME)) {
         if (folder === root) continue;
         if (await this.#reuse(folder, stored, body)) {
-          setKv(db, 'drive_root_id', folder);
+          await setKv(db, 'drive_root_id', folder);
           return;
         }
       }
     }
     try {
-      setKv(db, TRACKER_ID_KEY, await api.createFile(TRACKER_FILE_NAME, XLSX_MIME, body, root));
+      await setKv(db, TRACKER_ID_KEY, await api.createFile(TRACKER_FILE_NAME, XLSX_MIME, body, root));
     } catch (e) {
       if (!(e instanceof DriveNotFoundError)) throw e;
       // The root folder was removed: re-create it and retry once, in the same run.
       root = await api.createFolder(DRIVE_ROOT_NAME);
-      setKv(db, 'drive_root_id', root);
-      setKv(db, TRACKER_ID_KEY, await api.createFile(TRACKER_FILE_NAME, XLSX_MIME, body, root));
+      await setKv(db, 'drive_root_id', root);
+      await setKv(db, TRACKER_ID_KEY, await api.createFile(TRACKER_FILE_NAME, XLSX_MIME, body, root));
     }
-    this.#noteNewFile(stored);
+    await this.#noteNewFile(stored);
   }
 
   /** Writes the newest Tracker.xlsx this login can see in folder (other than stored) and keeps its id; false when there is none. */
@@ -393,15 +393,15 @@ export class DrivePublisher {
       if (e instanceof DriveNotFoundError) return false;
       throw e;
     }
-    setKv(this.#o.db, TRACKER_ID_KEY, found);
+    await setKv(this.#o.db, TRACKER_ID_KEY, found);
     return true;
   }
 
-  #noteNewFile(stored: string | undefined): void {
+  async #noteNewFile(stored: string | undefined): Promise<void> {
     const { db } = this.#o;
     // The first file ever is no news. A stored one that could not be reached means a new link: say so once.
     if (stored) {
-      setKv(db, TRACKER_NEW_FILE_KEY, (this.#o.now?.() ?? new Date()).toISOString());
+      await setKv(db, TRACKER_NEW_FILE_KEY, (this.#o.now?.() ?? new Date()).toISOString());
       try {
         this.#o.onNewFile?.();
       } catch (hookErr) {

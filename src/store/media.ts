@@ -1,6 +1,6 @@
 import { showsText } from '../media/paths.ts';
 import type { ProviderId } from '../stt/types.ts';
-import type { Db } from './db.ts';
+import type { Db, Sql } from './db.ts';
 
 export const MEDIA_KINDS = ['image', 'video', 'document', 'sticker', 'voice', 'audio'] as const;
 export type MediaKind = (typeof MEDIA_KINDS)[number];
@@ -98,7 +98,7 @@ interface RawMedia {
 
 /** Every column except the sealed download details. textSql selects the text (all of it, or only its start). */
 function columns(textSql: string): string {
-  return `id, message_id, client_id, kind, status, mime_type, file_name, file_size, seconds, forwarded, page_count, ref_enc IS NOT NULL AS has_ref,
+  return `id, message_id, client_id, kind, status, mime_type, file_name, file_size, seconds, forwarded, page_count, CASE WHEN ref_enc IS NOT NULL THEN 1 ELSE 0 END AS has_ref,
   local_path, sha256, text_kind, ${textSql} AS text, length(text) AS text_chars, note, error_code, attempts, next_attempt_at, drive_file_id,
   requeued_for_text, backlog, created_at, updated_at`;
 }
@@ -140,29 +140,30 @@ function toRow(r: RawMedia): MediaRow {
  * Records a file of a stored message. The row is written only when messageId is a message of clientId (T1-09): every
  * later step files the original, the Drive copy and Files received by the row's client, so a mismatch is refused here.
  */
-export function insertMedia(db: Db, m: NewMedia): number {
-  const r = db
-    .prepare(`INSERT INTO media (message_id, client_id, kind, status, mime_type, file_name, file_size, seconds, forwarded, ref_enc, error_code,
+export async function insertMedia(db: Sql, m: NewMedia): Promise<number> {
+  const r = await db.get<{ id: number }>(
+    `INSERT INTO media (message_id, client_id, kind, status, mime_type, file_name, file_size, seconds, forwarded, ref_enc, error_code,
         created_at, updated_at)
       SELECT id, client_id, @kind, @status, @mimeType, @fileName, @fileSize, @seconds, @forwarded, @refEnc, @errorCode, @createdAt, @createdAt
-      FROM messages WHERE id = @messageId AND client_id = @clientId`)
-    .run({ ...m, forwarded: m.forwarded ? 1 : 0 });
-  if (r.changes === 0) throw new Error(`insertMedia: message ${m.messageId} is not a message of client ${m.clientId}`);
-  return Number(r.lastInsertRowid);
+      FROM messages WHERE id = @messageId AND client_id = @clientId RETURNING id`,
+    { ...m, forwarded: m.forwarded ? 1 : 0 },
+  );
+  if (r === undefined) throw new Error(`insertMedia: message ${m.messageId} is not a message of client ${m.clientId}`);
+  return r.id;
 }
 
-export function messageRowId(db: Db, clientId: number, waId: string): number | undefined {
-  return (db.prepare('SELECT id FROM messages WHERE client_id = ? AND wa_id = ?').get(clientId, waId) as { id: number } | undefined)?.id;
+export async function messageRowId(db: Sql, clientId: number, waId: string): Promise<number | undefined> {
+  return (await db.get<{ id: number }>('SELECT id FROM messages WHERE client_id = ? AND wa_id = ?', [clientId, waId]))?.id;
 }
 
-export function getMedia(db: Db, id: number): MediaRow | undefined {
-  const r = db.prepare(`SELECT ${COLUMNS} FROM media WHERE id = ?`).get(id) as RawMedia | undefined;
+export async function getMedia(db: Sql, id: number): Promise<MediaRow | undefined> {
+  const r = await db.get<RawMedia>(`SELECT ${COLUMNS} FROM media WHERE id = ?`, [id]);
   return r ? toRow(r) : undefined;
 }
 
 /** The sealed download details. Secret: never log or return them anywhere else. */
-export function getMediaRef(db: Db, id: number): Buffer | null {
-  return (db.prepare('SELECT ref_enc FROM media WHERE id = ?').get(id) as { ref_enc: Buffer | null } | undefined)?.ref_enc ?? null;
+export async function getMediaRef(db: Sql, id: number): Promise<Buffer | null> {
+  return (await db.get<{ ref_enc: Buffer | null }>('SELECT ref_enc FROM media WHERE id = ?', [id]))?.ref_enc ?? null;
 }
 
 /**
@@ -172,16 +173,14 @@ export function getMediaRef(db: Db, id: number): Buffer | null {
  * `o.audio` (the media queue's voice lane, Phase 2b Task 10): true lists only voice notes and audio files, false only the
  * other files; absent, every file.
  */
-export function dueMediaIds(db: Db, nowIso: string, limit: number, o: { audio?: boolean } = {}): number[] {
+export async function dueMediaIds(db: Sql, nowIso: string, limit: number, o: { audio?: boolean } = {}): Promise<number[]> {
   const kinds = o.audio === undefined ? '' : o.audio ? "AND m.kind IN ('voice', 'audio')" : "AND m.kind NOT IN ('voice', 'audio')";
   return (
-    db
-      .prepare(`SELECT m.id FROM media m
+    (await db.all<{ id: number }>(`SELECT m.id FROM media m
         JOIN clients c ON c.id = m.client_id AND c.active = 1
         JOIN messages msg ON msg.id = m.message_id
         WHERE m.status = 'pending' AND (m.next_attempt_at IS NULL OR m.next_attempt_at <= ?) ${kinds}
-        ORDER BY m.backlog, msg.ts, m.id LIMIT ?`)
-      .all(nowIso, limit) as { id: number }[]
+        ORDER BY m.backlog, msg.ts, m.id LIMIT ?`, [nowIso, limit]))
   ).map((r) => r.id);
 }
 
@@ -194,17 +193,15 @@ export interface MediaJob {
 }
 
 /** What processing one file needs to know about its message and client. */
-export function mediaJob(db: Db, mediaId: number): MediaJob | undefined {
-  const r = db
-    .prepare(`SELECT m.client_id AS clientId, c.code AS clientCode, msg.wa_id AS waId, msg.ts AS ts, msg.revoked AS revoked
-      FROM media m JOIN messages msg ON msg.id = m.message_id JOIN clients c ON c.id = m.client_id WHERE m.id = ?`)
-    .get(mediaId) as (Omit<MediaJob, 'revoked'> & { revoked: number }) | undefined;
+export async function mediaJob(db: Sql, mediaId: number): Promise<MediaJob | undefined> {
+  const r = await db.get<Omit<MediaJob, 'revoked'> & { revoked: number }>(`SELECT m.client_id AS clientId, c.code AS clientCode, msg.wa_id AS waId, msg.ts AS ts, msg.revoked AS revoked
+      FROM media m JOIN messages msg ON msg.id = m.message_id JOIN clients c ON c.id = m.client_id WHERE m.id = ?`, [mediaId]);
   return r ? { ...r, revoked: r.revoked === 1 } : undefined;
 }
 
 /** The original is on disk: the sealed download details are no longer needed and are wiped. */
-export function markDownloaded(db: Db, id: number, d: { localPath: string; sha256: string; fileSize: number; at: string }): void {
-  db.prepare('UPDATE media SET local_path = @localPath, sha256 = @sha256, file_size = @fileSize, ref_enc = NULL, updated_at = @at WHERE id = @id').run({ id, ...d });
+export async function markDownloaded(db: Sql, id: number, d: { localPath: string; sha256: string; fileSize: number; at: string }): Promise<void> {
+  await db.run('UPDATE media SET local_path = @localPath, sha256 = @sha256, file_size = @fileSize, ref_enc = NULL, updated_at = @at WHERE id = @id', { id, ...d });
 }
 
 /**
@@ -250,8 +247,8 @@ const NOTE_FORGET = `INSERT INTO media_stt_forget (media_id, provider, ref, crea
  * this finish stored the transcript (the file already finished or failed): the provider holds it either way. A copy
  * already noted (the same provider and ref) is noted once.
  */
-export function finishMedia(
-  db: Db,
+export async function finishMedia(
+  db: Sql,
   id: number,
   x: {
     textKind: TextKind | null;
@@ -261,25 +258,25 @@ export function finishMedia(
     at: string;
     forget?: { provider: ProviderId; ref: string } | null;
   },
-): void {
+): Promise<void> {
   const { forget, ...fields } = x;
   const spaced = fields.text === null ? null : fields.text.replaceAll('\u0000', ' ');
   const text = spaced !== null && showsText(spaced) ? spaced : null;
-  db.transaction(() => {
-    const finished = db.prepare(`UPDATE media SET status = 'done', text_kind = @textKind, text = @text, page_count = @pageCount, note = @note, error_code = NULL,
-      next_attempt_at = NULL, ref_enc = NULL, updated_at = @at WHERE id = @id AND status = 'pending'`).run({ id, ...fields, text }).changes;
+  await db.tx(async (q) => {
+    const finished = (await q.run(`UPDATE media SET status = 'done', text_kind = @textKind, text = @text, page_count = @pageCount, note = @note, error_code = NULL,
+      next_attempt_at = NULL, ref_enc = NULL, updated_at = @at WHERE id = @id AND status = 'pending'`, { id, ...fields, text })).changes;
     if (forget) {
       // ON CONFLICT rather than OR IGNORE: a copy already noted is kept, but a ref the CHECK refuses still throws, so the
       // finish is undone instead of a transcript stored with its copy silently never deleted.
-      db.prepare(NOTE_FORGET).run({ id, provider: forget.provider, ref: forget.ref, at: fields.at });
+      await q.run(NOTE_FORGET, { id, provider: forget.provider, ref: forget.ref, at: fields.at });
     }
     if (finished === 0) return; // already finished (or failed): nothing to flag or queue again
     // The flag first: it needs processed_at as it was before the message is queued again.
-    db.prepare(`UPDATE media SET requeued_for_text = 1 WHERE id = ? AND ${REQUEUING_FILE} AND message_id IN
-      (SELECT id FROM messages WHERE revoked = 0 AND (processed_at IS NOT NULL OR requeue_reason IS NOT NULL))`).run(id);
-    db.prepare(`UPDATE messages SET processed_at = NULL, version = version + 1
-      WHERE revoked = 0 AND id = (SELECT message_id FROM media WHERE id = ? AND ${REQUEUING_FILE})`).run(id);
-  }).immediate();
+    await q.run(`UPDATE media SET requeued_for_text = 1 WHERE id = ? AND ${REQUEUING_FILE} AND message_id IN
+      (SELECT id FROM messages WHERE revoked = 0 AND (processed_at IS NOT NULL OR requeue_reason IS NOT NULL))`, [id]);
+    await q.run(`UPDATE messages SET processed_at = NULL, version = version + 1
+      WHERE revoked = 0 AND id = (SELECT message_id FROM media WHERE id = ? AND ${REQUEUING_FILE})`, [id]);
+  });
 }
 
 /**
@@ -287,13 +284,13 @@ export function finishMedia(
  * answer still named (Phase 3's M7), written by the processor when that error ends a run. A copy already noted (the
  * same provider and ref) is noted once; a ref the CHECK refuses throws.
  */
-export function noteMediaForget(db: Db, id: number, f: { provider: ProviderId; ref: string; at: string }): void {
-  db.prepare(NOTE_FORGET).run({ id, ...f });
+export async function noteMediaForget(db: Sql, id: number, f: { provider: ProviderId; ref: string; at: string }): Promise<void> {
+  await db.run(NOTE_FORGET, { id, ...f });
 }
 
 /** A final failure. The sealed details are wiped; an original already saved stays on disk. */
-export function failMedia(db: Db, id: number, f: { status: 'failed' | 'unavailable'; errorCode: string; at: string }): void {
-  db.prepare('UPDATE media SET status = @status, error_code = @errorCode, next_attempt_at = NULL, ref_enc = NULL, updated_at = @at WHERE id = @id').run({ id, ...f });
+export async function failMedia(db: Sql, id: number, f: { status: 'failed' | 'unavailable'; errorCode: string; at: string }): Promise<void> {
+  await db.run('UPDATE media SET status = @status, error_code = @errorCode, next_attempt_at = NULL, ref_enc = NULL, updated_at = @at WHERE id = @id', { id, ...f });
 }
 
 /**
@@ -303,9 +300,9 @@ export function failMedia(db: Db, id: number, f: { status: 'failed' | 'unavailab
  * anything is paid. The error code is kept: the waits of amendment 10d read the last one back. Returns false when the
  * file is no longer pending.
  */
-export function claimMedia(db: Db, id: number, c: { nextAttemptAt: string; at: string }): boolean {
+export async function claimMedia(db: Sql, id: number, c: { nextAttemptAt: string; at: string }): Promise<boolean> {
   return (
-    db.prepare(`UPDATE media SET attempts = attempts + 1, next_attempt_at = @nextAttemptAt, updated_at = @at WHERE id = @id AND status = 'pending'`).run({ id, ...c })
+    (await db.run(`UPDATE media SET attempts = attempts + 1, next_attempt_at = @nextAttemptAt, updated_at = @at WHERE id = @id AND status = 'pending'`, { id, ...c }))
       .changes === 1
   );
 }
@@ -314,12 +311,12 @@ export function claimMedia(db: Db, id: number, c: { nextAttemptAt: string; at: s
  * Try again later. countAttempt is false when nothing was tried (for example the spend cap). `attempts`, when given
  * instead, is stored as it is: the processor passes the count from before its claim, or that count plus one.
  */
-export function deferMedia(
-  db: Db,
+export async function deferMedia(
+  db: Sql,
   id: number,
   d: { errorCode: string; nextAttemptAt: string; at: string } & ({ countAttempt: boolean; attempts?: never } | { attempts: number; countAttempt?: never }),
-): void {
-  db.prepare('UPDATE media SET error_code = @errorCode, next_attempt_at = @nextAttemptAt, attempts = COALESCE(@attempts, attempts + @inc), updated_at = @at WHERE id = @id').run({
+): Promise<void> {
+  await db.run('UPDATE media SET error_code = @errorCode, next_attempt_at = @nextAttemptAt, attempts = COALESCE(@attempts, attempts + @inc), updated_at = @at WHERE id = @id', {
     id,
     errorCode: d.errorCode,
     nextAttemptAt: d.nextAttemptAt,
@@ -334,11 +331,9 @@ export function deferMedia(
  * text holds at most maxChars characters (pass the prompt's per-message cap + 1) and textChars is the full length,
  * so the prompt can say how much was cut.
  */
-export function mediaForMessages(db: Db, messageIds: number[], maxChars: number): Map<number, MediaRow> {
+export async function mediaForMessages(db: Sql, messageIds: number[], maxChars: number): Promise<Map<number, MediaRow>> {
   if (messageIds.length === 0) return new Map();
-  const rows = db
-    .prepare(`SELECT ${columns('substr(text, 1, @maxChars)')} FROM media WHERE message_id IN (SELECT value FROM json_each(@ids))`)
-    .all({ maxChars, ids: JSON.stringify(messageIds) }) as RawMedia[];
+  const rows = await db.all<RawMedia>(`SELECT ${columns('substr(text, 1, @maxChars)')} FROM media WHERE message_id IN (SELECT CAST(value AS INTEGER) FROM json_each(@ids))`, { maxChars, ids: JSON.stringify(messageIds) });
   return new Map(rows.map((r) => [r.message_id, toRow(r)]));
 }
 
@@ -389,14 +384,20 @@ const FAILED_LOCAL_VOICE_FROM = `FROM media m JOIN messages msg ON msg.id = m.me
  * its message is processed and not queued again for an edit or a reaction.
  */
 const REQUEUE_SET = `status = 'pending', attempts = 0, next_attempt_at = NULL, error_code = NULL, note = NULL, created_at = @at, updated_at = @at,
-        backlog = (SELECT msg.processed_at IS NOT NULL AND msg.requeue_reason IS NULL FROM messages msg WHERE msg.id = media.message_id)`;
+        backlog = (SELECT CASE WHEN msg.processed_at IS NOT NULL AND msg.requeue_reason IS NULL THEN 1 ELSE 0 END FROM messages msg WHERE msg.id = media.message_id)`;
+
+/**
+ * An optional filter on one column: the clause and its value only when the value is given. Never `@x IS NULL OR …`:
+ * Postgres cannot type a parameter that only meets IS NULL (S2.5).
+ */
+const optionalFilter = (column: string, name: string, value: number | undefined) =>
+  value == null ? { sql: '', params: {} } : { sql: ` AND ${column} = @${name}`, params: { [name]: value } };
 
 /** The 2a voice notes and audio files `cli transcribe-voice` can transcribe, oldest first; optionally one client's only. */
-export function voiceBacklog(db: Db, o: { clientId?: number } = {}): VoiceBacklogRow[] {
-  return db
-    .prepare(`SELECT m.id, m.client_id AS clientId, m.file_size AS fileSize, m.mime_type AS mimeType ${VOICE_BACKLOG_FROM}
-      AND (@clientId IS NULL OR m.client_id = @clientId) ORDER BY m.id`)
-    .all({ clientId: o.clientId ?? null }) as VoiceBacklogRow[];
+export async function voiceBacklog(db: Sql, o: { clientId?: number } = {}): Promise<VoiceBacklogRow[]> {
+  const client = optionalFilter('m.client_id', 'clientId', o.clientId);
+  return db.all<VoiceBacklogRow>(`SELECT m.id, m.client_id AS clientId, m.file_size AS fileSize, m.mime_type AS mimeType ${VOICE_BACKLOG_FROM}${client.sql}
+      ORDER BY m.id`, client.params);
 }
 
 /**
@@ -410,23 +411,20 @@ export function voiceBacklog(db: Db, o: { clientId?: number } = {}): VoiceBacklo
  * its message deleted for everyone, its client inactive) is left alone. One statement, so the files are queued all
  * together or not at all. Returns how many were queued.
  */
-export function queueVoiceBacklog(db: Db, ids: number[], at: string): number {
+export async function queueVoiceBacklog(db: Sql, ids: number[], at: string): Promise<number> {
   if (ids.length === 0) return 0;
-  return db
-    .prepare(`UPDATE media SET ${REQUEUE_SET}
-      WHERE id IN (SELECT value FROM json_each(@ids)) AND id IN (SELECT m.id ${VOICE_BACKLOG_FROM})`)
-    .run({ ids: JSON.stringify(ids), at }).changes;
+  return (await db.run(`UPDATE media SET ${REQUEUE_SET}
+      WHERE id IN (SELECT CAST(value AS INTEGER) FROM json_each(@ids)) AND id IN (SELECT m.id ${VOICE_BACKLOG_FROM})`, { ids: JSON.stringify(ids), at })).changes;
 }
 
 /**
  * Voice notes and audio files that failed on this computer (the local engine or ffmpeg, never a paid provider), which
  * `cli transcribe-voice --failed` can queue again; oldest first, optionally one client's only. Same shape as the backlog.
  */
-export function failedLocalVoice(db: Db, o: { clientId?: number } = {}): VoiceBacklogRow[] {
-  return db
-    .prepare(`SELECT m.id, m.client_id AS clientId, m.file_size AS fileSize, m.mime_type AS mimeType ${FAILED_LOCAL_VOICE_FROM}
-      AND (@clientId IS NULL OR m.client_id = @clientId) ORDER BY m.id`)
-    .all({ clientId: o.clientId ?? null }) as VoiceBacklogRow[];
+export async function failedLocalVoice(db: Sql, o: { clientId?: number } = {}): Promise<VoiceBacklogRow[]> {
+  const client = optionalFilter('m.client_id', 'clientId', o.clientId);
+  return db.all<VoiceBacklogRow>(`SELECT m.id, m.client_id AS clientId, m.file_size AS fileSize, m.mime_type AS mimeType ${FAILED_LOCAL_VOICE_FROM}${client.sql}
+      ORDER BY m.id`, client.params);
 }
 
 /**
@@ -435,12 +433,10 @@ export function failedLocalVoice(db: Db, o: { clientId?: number } = {}): VoiceBa
  * against FAILED_LOCAL_VOICE_FROM again, so one that changed since it was listed, or that failed at a paid provider, is
  * left alone. One statement. Returns how many were queued.
  */
-export function queueFailedLocalVoice(db: Db, ids: number[], at: string): number {
+export async function queueFailedLocalVoice(db: Sql, ids: number[], at: string): Promise<number> {
   if (ids.length === 0) return 0;
-  return db
-    .prepare(`UPDATE media SET ${REQUEUE_SET}
-      WHERE id IN (SELECT value FROM json_each(@ids)) AND id IN (SELECT m.id ${FAILED_LOCAL_VOICE_FROM})`)
-    .run({ ids: JSON.stringify(ids), at }).changes;
+  return (await db.run(`UPDATE media SET ${REQUEUE_SET}
+      WHERE id IN (SELECT CAST(value AS INTEGER) FROM json_each(@ids)) AND id IN (SELECT m.id ${FAILED_LOCAL_VOICE_FROM})`, { ids: JSON.stringify(ids), at })).changes;
 }
 
 /** A speech provider's stored copy of a voice transcript still to delete (N1). ref is the provider's id for the copy, never content. */
@@ -453,24 +449,24 @@ export interface MediaForgetRow {
 }
 
 /** Copies due for a try at nowIso with fewer than maxAttempts tries, oldest first; optionally one file's only. */
-export function pendingMediaForgets(db: Db, o: { nowIso: string; maxAttempts: number; mediaId?: number }): MediaForgetRow[] {
-  return db
-    .prepare(`SELECT id, media_id AS mediaId, provider, ref, attempts FROM media_stt_forget
-      WHERE attempts < @maxAttempts AND (next_try_at IS NULL OR next_try_at <= @nowIso) AND (@mediaId IS NULL OR media_id = @mediaId) ORDER BY id`)
-    .all({ maxAttempts: o.maxAttempts, nowIso: o.nowIso, mediaId: o.mediaId ?? null }) as MediaForgetRow[];
+export async function pendingMediaForgets(db: Sql, o: { nowIso: string; maxAttempts: number; mediaId?: number }): Promise<MediaForgetRow[]> {
+  const media = optionalFilter('media_id', 'mediaId', o.mediaId);
+  return db.all<MediaForgetRow>(`SELECT id, media_id AS mediaId, provider, ref, attempts FROM media_stt_forget
+      WHERE attempts < @maxAttempts AND (next_try_at IS NULL OR next_try_at <= @nowIso)${media.sql} ORDER BY id`,
+    { maxAttempts: o.maxAttempts, nowIso: o.nowIso, ...media.params });
 }
 
 /**
  * Counts one try and sets when the next may start, before the provider is asked: a try cut off by a crash still counts,
  * and a restart does not try again before nextTryAt.
  */
-export function countMediaForgetAttempt(db: Db, id: number, nextTryAt: string): void {
-  db.prepare('UPDATE media_stt_forget SET attempts = attempts + 1, next_try_at = @nextTryAt WHERE id = @id').run({ id, nextTryAt });
+export async function countMediaForgetAttempt(db: Sql, id: number, nextTryAt: string): Promise<void> {
+  await db.run('UPDATE media_stt_forget SET attempts = attempts + 1, next_try_at = @nextTryAt WHERE id = @id', { id, nextTryAt });
 }
 
 /** The provider has deleted its copy. */
-export function deleteMediaForget(db: Db, id: number): void {
-  db.prepare('DELETE FROM media_stt_forget WHERE id = ?').run(id);
+export async function deleteMediaForget(db: Sql, id: number): Promise<void> {
+  await db.run('DELETE FROM media_stt_forget WHERE id = ?', [id]);
 }
 
 /**
@@ -479,9 +475,9 @@ export function deleteMediaForget(db: Db, id: number): void {
  * this machine, which keeps no copies), so the forget queue skips it. A count only, for `cli status`, as
  * sttForgetsGivenUp is for meetings.
  */
-export function mediaSttForgetsGivenUp(db: Db, o: { maxAttempts: number; provider: ProviderId | 'local' | 'none' }): number {
+export async function mediaSttForgetsGivenUp(db: Sql, o: { maxAttempts: number; provider: ProviderId | 'local' | 'none' }): Promise<number> {
   return (
-    db.prepare('SELECT COUNT(*) AS n FROM media_stt_forget WHERE attempts >= ? OR provider <> ?').get(o.maxAttempts, o.provider) as { n: number }
+    (await db.get<{ n: number }>('SELECT COUNT(*) AS n FROM media_stt_forget WHERE attempts >= ? OR provider <> ?', [o.maxAttempts, o.provider]))!
   ).n;
 }
 
@@ -515,27 +511,25 @@ const UPLOAD_CANDIDATES_FROM = `FROM media m JOIN messages msg ON msg.id = m.mes
  * Saved images and documents from people whose role is 'client', not yet in Drive and due for an attempt.
  * Never the founder's own messages, messages deleted for everyone, or inactive clients.
  */
-export function uploadCandidates(db: Db, nowIso: string, limit: number): UploadCandidate[] {
-  return db
-    .prepare(`SELECT m.id, m.client_id AS clientId, c.name AS clientName, m.kind, m.mime_type AS mimeType, m.file_name AS fileName,
+export async function uploadCandidates(db: Sql, nowIso: string, limit: number): Promise<UploadCandidate[]> {
+  return db.all<UploadCandidate>(`SELECT m.id, m.client_id AS clientId, c.name AS clientName, m.kind, m.mime_type AS mimeType, m.file_name AS fileName,
         m.local_path AS localPath, msg.ts, m.drive_attempts AS driveAttempts
       ${UPLOAD_CANDIDATES_FROM}
-      ORDER BY m.id LIMIT ?`)
-    .all(nowIso, limit) as UploadCandidate[];
+      ORDER BY m.id LIMIT ?`, [nowIso, limit]);
 }
 
 /** Whether one file is still an upload candidate: checked again just before it is uploaded, since a pass can take minutes. */
-export function isUploadCandidate(db: Db, mediaId: number, nowIso: string): boolean {
-  return db.prepare(`SELECT 1 ${UPLOAD_CANDIDATES_FROM} AND m.id = ?`).get(nowIso, mediaId) !== undefined;
+export async function isUploadCandidate(db: Sql, mediaId: number, nowIso: string): Promise<boolean> {
+  return (await db.get(`SELECT 1 ${UPLOAD_CANDIDATES_FROM} AND m.id = ?`, [nowIso, mediaId])) !== undefined;
 }
 
-export function markUploaded(db: Db, id: number, driveFileId: string): void {
-  db.prepare('UPDATE media SET drive_file_id = ?, drive_next_at = NULL WHERE id = ?').run(driveFileId, id);
+export async function markUploaded(db: Sql, id: number, driveFileId: string): Promise<void> {
+  await db.run('UPDATE media SET drive_file_id = ?, drive_next_at = NULL WHERE id = ?', [driveFileId, id]);
 }
 
 /** One failed upload try: counts the attempt. failed: stop trying until the next service start. */
-export function markUploadFailed(db: Db, id: number, f: { failed: boolean; nextAt: string | null }): void {
-  db.prepare('UPDATE media SET drive_attempts = drive_attempts + 1, drive_failed = @failed, drive_next_at = @nextAt WHERE id = @id').run({
+export async function markUploadFailed(db: Sql, id: number, f: { failed: boolean; nextAt: string | null }): Promise<void> {
+  await db.run('UPDATE media SET drive_attempts = drive_attempts + 1, drive_failed = @failed, drive_next_at = @nextAt WHERE id = @id', {
     id,
     failed: f.failed ? 1 : 0,
     nextAt: f.nextAt,
@@ -543,8 +537,8 @@ export function markUploadFailed(db: Db, id: number, f: { failed: boolean; nextA
 }
 
 /** At service start: uploads that gave up get a fresh set of attempts. Returns how many. */
-export function resetUploadFailures(db: Db): number {
-  return db.prepare('UPDATE media SET drive_failed = 0, drive_attempts = 0, drive_next_at = NULL WHERE drive_failed = 1 AND drive_file_id IS NULL').run().changes;
+export async function resetUploadFailures(db: Sql): Promise<number> {
+  return (await db.run('UPDATE media SET drive_failed = 0, drive_attempts = 0, drive_next_at = NULL WHERE drive_failed = 1 AND drive_file_id IS NULL')).changes;
 }
 
 export interface ClientFileRow {
@@ -571,17 +565,15 @@ export interface ClientFileRow {
 export const CLIENT_FILES_LIMIT = 500;
 
 /** Images, documents and videos sent by people whose role is 'client', newest first. View-once media is never listed. */
-export function listClientFiles(db: Db, clientId: number, limit = CLIENT_FILES_LIMIT): ClientFileRow[] {
-  const rows = db
-    .prepare(`SELECT m.id, m.kind, m.status, m.mime_type AS mimeType, m.file_name AS fileName, m.file_size AS fileSize, m.seconds,
+export async function listClientFiles(db: Sql, clientId: number, limit = CLIENT_FILES_LIMIT): Promise<ClientFileRow[]> {
+  const rows = await db.all<Omit<ClientFileRow, 'revoked'> & { revoked: number }>(`SELECT m.id, m.kind, m.status, m.mime_type AS mimeType, m.file_name AS fileName, m.file_size AS fileSize, m.seconds,
         m.page_count AS pageCount, m.text_kind AS textKind, substr(m.text, 1, 400) AS textStart, m.note, m.error_code AS errorCode,
         m.drive_file_id AS driveFileId, msg.ts, msg.revoked, COALESCE(p.name, msg.sender_name) AS sender
       FROM media m JOIN messages msg ON msg.id = m.message_id
       JOIN people p ON p.client_id = m.client_id AND p.jid = msg.sender_jid
       WHERE m.client_id = ? AND p.role = 'client' AND msg.from_me = 0 AND m.kind IN ('image', 'document', 'video')
         AND COALESCE(m.error_code, '') <> 'view_once'
-      ORDER BY msg.ts DESC, m.id DESC LIMIT ?`)
-    .all(clientId, limit) as (Omit<ClientFileRow, 'revoked'> & { revoked: number })[];
+      ORDER BY msg.ts DESC, m.id DESC LIMIT ?`, [clientId, limit]);
   return rows.map((r) => ({ ...r, revoked: r.revoked === 1 }));
 }
 
@@ -618,20 +610,18 @@ export interface MediaStats {
  * Counts for Health and `cli status`. Files of clients no longer on the allow-list are left out: they wait untouched
  * until the client is back (dueMediaIds), and Health forgets a removed client's warnings too.
  */
-export function mediaStats(db: Db, now: Date, startedAt: Date = new Date(0), staleMs = 30 * 60_000): MediaStats {
+export async function mediaStats(db: Sql, now: Date, startedAt: Date = new Date(0), staleMs = 30 * 60_000): Promise<MediaStats> {
   const staleBefore = new Date(now.getTime() - staleMs).toISOString();
-  return db
-    .prepare(`SELECT
-        COALESCE(SUM(m.status = 'pending'), 0) AS pending,
-        COALESCE(SUM(m.status = 'pending' AND m.backlog = 0 AND m.created_at < @staleBefore AND @startedAt < @staleBefore
-          AND COALESCE(m.error_code, '') NOT IN ('spend_cap', 'stt_unavailable')), 0) AS stale,
-        COALESCE(SUM(m.status = 'pending' AND m.error_code = 'spend_cap'), 0) AS spendCap,
-        COALESCE(SUM(m.status = 'failed' AND m.updated_at >= @dayAgo), 0) AS failedRecent,
-        COALESCE(SUM(m.drive_failed = 1 AND EXISTS (SELECT 1 FROM messages msg
+  return (await db.get<MediaStats>(`SELECT
+        COALESCE(SUM(CASE WHEN m.status = 'pending' THEN 1 ELSE 0 END), 0) AS pending,
+        COALESCE(SUM(CASE WHEN m.status = 'pending' AND m.backlog = 0 AND m.created_at < @staleBefore AND @startedAt < @staleBefore
+          AND COALESCE(m.error_code, '') NOT IN ('spend_cap', 'stt_unavailable') THEN 1 ELSE 0 END), 0) AS stale,
+        COALESCE(SUM(CASE WHEN m.status = 'pending' AND m.error_code = 'spend_cap' THEN 1 ELSE 0 END), 0) AS spendCap,
+        COALESCE(SUM(CASE WHEN m.status = 'failed' AND m.updated_at >= @dayAgo THEN 1 ELSE 0 END), 0) AS failedRecent,
+        COALESCE(SUM(CASE WHEN m.drive_failed = 1 AND EXISTS (SELECT 1 FROM messages msg
           JOIN people p ON p.client_id = m.client_id AND p.jid = msg.sender_jid
-          WHERE msg.id = m.message_id AND ${UPLOADABLE})), 0) AS uploadFailed,
-        COALESCE(SUM(m.status = 'pending' AND m.error_code = 'stt_unavailable'), 0) AS sttRefused,
-        COALESCE(SUM(m.kind IN ('voice', 'audio') AND m.status = 'failed' AND m.updated_at >= @dayAgo AND ${LOCAL_FAILURE}), 0) AS voiceFailed
-      FROM media m JOIN clients c ON c.id = m.client_id AND c.active = 1`)
-    .get({ staleBefore, startedAt: startedAt.toISOString(), dayAgo: new Date(now.getTime() - 86_400_000).toISOString() }) as MediaStats;
+          WHERE msg.id = m.message_id AND ${UPLOADABLE}) THEN 1 ELSE 0 END), 0) AS uploadFailed,
+        COALESCE(SUM(CASE WHEN m.status = 'pending' AND m.error_code = 'stt_unavailable' THEN 1 ELSE 0 END), 0) AS sttRefused,
+        COALESCE(SUM(CASE WHEN m.kind IN ('voice', 'audio') AND m.status = 'failed' AND m.updated_at >= @dayAgo AND ${LOCAL_FAILURE} THEN 1 ELSE 0 END), 0) AS voiceFailed
+      FROM media m JOIN clients c ON c.id = m.client_id AND c.active = 1`, { staleBefore, startedAt: startedAt.toISOString(), dayAgo: new Date(now.getTime() - 86_400_000).toISOString() }))!;
 }

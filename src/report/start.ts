@@ -2,7 +2,7 @@ import { maskNumber, reportRecipient, reportSettings, type Env } from '../config
 import { senderSessionDbPath } from '../config/paths.ts';
 import type { Db } from '../store/db.ts';
 import type { Logger } from '../util/logger.ts';
-import { openSenderSession } from '../wa/authState.ts';
+import { openSenderSession, type SessionHome } from '../wa/authState.ts';
 import { SenderGateway, type SenderSocketFactory } from '../wa/senderGateway.ts';
 import type { ReportSender, ReportSettings } from './types.ts';
 
@@ -22,15 +22,17 @@ export interface MorningReportStart {
  * founderNumber: the number the founder-number reader is linked to (main.ts reads it from session.db). A spare-number
  * link to it, or to REPORT_RECIPIENT, never sends ('self_send').
  */
-export function openMorningReport(o: {
+export async function openMorningReport(o: {
   env: Env;
   masterKey: Buffer;
   log: Logger;
   factory: SenderSocketFactory;
   founderNumber?: string | (() => string | undefined);
-}): MorningReportStart {
+  /** Where the sessions live (sessionHomeOf); data/sender-session.db when not given. */
+  sessions?: SessionHome;
+}): Promise<MorningReportStart> {
   const recipient = reportRecipient(o.env);
-  const opened = openSenderSession(senderSessionDbPath(o.env.DATA_DIR), o.masterKey);
+  const opened = await openSenderSession(o.sessions ?? senderSessionDbPath(o.env.DATA_DIR), o.masterKey);
   let authProblem: 'unreadable' | 'unavailable' | undefined;
   if (!opened.ok) {
     authProblem = opened.transient ? 'unavailable' : 'unreadable';
@@ -42,7 +44,7 @@ export function openMorningReport(o: {
   try {
     sender = new SenderGateway({ recipient, founderNumber: o.founderNumber, factory: o.factory, auth, authProblem });
   } catch (err) {
-    if (opened.ok) opened.db.close(); // the caller never receives the handle
+    if (opened.ok) await opened.db.close(); // the caller never receives the handle
     throw err;
   }
   // recipientLast4, not recipient: the logger censors any field named recipient.
@@ -62,9 +64,10 @@ export function senderOpener(o: {
   log: Logger;
   factory: SenderSocketFactory;
   founderNumber?: string | (() => string | undefined);
-}): (recipient: string) => { sender: ReportSender; close: () => void; db: Db | undefined } {
-  return (recipient) => {
-    const r = openMorningReport({ ...o, env: { ...o.env, REPORT_ENABLED: true, REPORT_RECIPIENT: recipient } });
-    return { sender: r.report.sender, close: () => r.senderDb?.close(), db: r.senderDb };
+  sessions?: SessionHome;
+}): (recipient: string) => Promise<{ sender: ReportSender; close: () => Promise<void>; db: Db | undefined }> {
+  return async (recipient) => {
+    const r = await openMorningReport({ ...o, env: { ...o.env, REPORT_ENABLED: true, REPORT_RECIPIENT: recipient } });
+    return { sender: r.report.sender, close: async () => await r.senderDb?.close(), db: r.senderDb };
   };
 }

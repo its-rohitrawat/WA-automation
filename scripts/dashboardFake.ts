@@ -310,11 +310,11 @@ function fakeGroupsApi(state: FakeState) {
  * The web server (not started) with the fake API and sign-in. "Continue with Google" signs straight in and returns to
  * the screen asked for (a /dashboard path only); sign-out needs the fake CSRF token, like the real one.
  */
-export function fakeDashboard(o: { port: number; state: FakeState; log?: Logger }): WebServer {
+export async function fakeDashboard(o: { port: number; state: FakeState; log?: Logger }): Promise<WebServer> {
   const { state } = o;
   const web = createWebServer({ control: {}, env: { DASHBOARD_PORT: o.port }, log: o.log ?? silentLogger(), clock: systemClock });
   // Tasks, Meetings, Activity, Tracker, AI usage, Automations, Audit logs and Settings: the real routes on an in-memory db.
-  mountFakeScreens(web, { signedIn: () => state.signedIn, csrf: FAKE_CSRF });
+  await mountFakeScreens(web, { signedIn: () => state.signedIn, csrf: FAKE_CSRF });
   const guarded = (body: () => unknown) => (ctx: { res: ServerResponse }) => {
     if (!state.signedIn) return sendError(ctx.res, 401, 'unauthenticated', 'Sign in first.');
     sendJson(ctx.res, 200, body());

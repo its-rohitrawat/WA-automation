@@ -63,15 +63,15 @@ export interface GoogleParts {
 }
 
 /** Google for the service: one hub, with Drive and meetings reading their clients from it. Calls Google for nothing. */
-export function buildGoogle(o: {
+export async function buildGoogle(o: {
   db: Db;
   key: Buffer;
   credentials: { desktop?: OAuthCredentials; web?: OAuthCredentials };
   meetingsEnabled: boolean;
   log: Logger;
   hub?: GoogleAuthHub;
-}): GoogleParts {
-  const hub = o.hub ?? new GoogleAuthHub({ db: o.db, key: o.key, credentials: o.credentials, log: o.log });
+}): Promise<GoogleParts> {
+  const hub = o.hub ?? (await GoogleAuthHub.open({ db: o.db, key: o.key, credentials: o.credentials, log: o.log }));
   // Accounts with a stored token that cannot be used, by label and reason only (no token, no email).
   for (const label of hub.labels()) {
     const problem = hub.problem(label);
@@ -79,7 +79,7 @@ export function buildGoogle(o: {
   }
   if (hub.labels().length > 1) o.log.info({ accounts: hub.labels() }, 'several Google accounts');
   const meetings = o.meetingsEnabled ? new LiveMeetingsApi(() => hubMeetingAccounts(o.db, hub), o.log) : undefined;
-  if (meetings) hub.onChange(() => meetings.rebuild());
+  if (meetings) hub.onChange(() => void meetings.rebuild());
   return {
     hub,
     drive: googleDriveApi(hub.getter(MAIN_ACCOUNT)),

@@ -20,12 +20,12 @@ function groupNames(directory: GroupDirectory): Map<string, string> {
 }
 
 /** GET /dashboard/api/clients */
-export function clientsListHandler(deps: ClientsDeps, _ctx: OwnerContext): ApiResult<{ clients: ClientCard[] }> {
-  return ok({ clients: clientCards(deps.db, deps.clock.now(), groupNames(deps.directory), deps.quietMinutes) });
+export async function clientsListHandler(deps: ClientsDeps, _ctx: OwnerContext): Promise<ApiResult<{ clients: ClientCard[] }>> {
+  return ok({ clients: await clientCards(deps.db, deps.clock.now(), groupNames(deps.directory), deps.quietMinutes) });
 }
 
 /** GET /dashboard/api/clients/:code */
-export function clientDetailHandler(deps: ClientsDeps, _ctx: OwnerContext, code: string): ApiResult<{ client: ClientDetail } | ApiError> {
-  const client = typeof code === 'string' && /^[A-Z]{3,4}$/.test(code) ? clientDetail(deps.db, code, deps.clock.now(), groupNames(deps.directory), deps.quietMinutes) : null;
+export async function clientDetailHandler(deps: ClientsDeps, _ctx: OwnerContext, code: string): Promise<ApiResult<{ client: ClientDetail } | ApiError>> {
+  const client = typeof code === 'string' && /^[A-Z]{3,4}$/.test(code) ? await clientDetail(deps.db, code, deps.clock.now(), groupNames(deps.directory), deps.quietMinutes) : null;
   return client ? ok({ client }) : fail(404, 'not_found', 'There is no active client with this code.');
 }

@@ -106,6 +106,11 @@ export class Health {
   readonly #spend: SpendGuard;
   readonly #dataDir: string;
   readonly #freeBytes: (dir: string) => number | null;
+  readonly #onError: (err: unknown) => void;
+  /** Every snapshot write so far, settled (persist() waits for them); and the numbers of the latest asked and landed. */
+  #writes: Promise<void> = Promise.resolve();
+  #asked = 0;
+  #landed = 0;
   #wa: GatewayStatus;
   #downSince: Date | null;
   #failed = new Map<number, string>();
@@ -122,8 +127,15 @@ export class Health {
   /** Setup mode (D3): false while the main Google account has no usable client. */
   #googleConnected = true;
 
-  constructor(o: { db: Db; clock: Clock; spend: SpendGuard; dataDir?: string; freeBytes?: (dir: string) => number | null }) {
+  /**
+   * onError: told when a snapshot write started by a change (not awaited) fails, so it leaves a log line. Unset (tests):
+   * console.error.
+   */
+  constructor(o: {
+    db: Db; clock: Clock; spend: SpendGuard; dataDir?: string; freeBytes?: (dir: string) => number | null; onError?: (err: unknown) => void;
+  }) {
     this.#db = o.db;
+    this.#onError = o.onError ?? ((err) => console.error('health snapshot not saved', err));
     this.#clock = o.clock;
     this.#spend = o.spend;
     this.#dataDir = o.dataDir ?? '.';
@@ -136,14 +148,14 @@ export class Health {
   /** Setup mode (D3): whether the main Google account is connected (main.ts sets it at start and on each reconnect). */
   setGoogleConnected(ok: boolean): void {
     this.#googleConnected = ok;
-    this.persist();
+    this.#persistSoon();
   }
 
   setWhatsApp(s: GatewayStatus): void {
     this.#wa = s;
     if (s.state === 'open') this.#downSince = null;
     else this.#downSince ??= new Date(s.since);
-    this.persist();
+    this.#persistSoon();
   }
 
   recordOutcome(clientId: number, o: ReconcileOutcome): void {
@@ -158,7 +170,7 @@ export class Health {
       else this.#failed.delete(clientId);
     }
     if (o.status === 'ok') this.#lastSuccess = this.#clock.now();
-    this.persist();
+    this.#persistSoon();
   }
 
   /** Stores the count of incoming messages that could not be saved; the next persist() records it. */
@@ -194,14 +206,14 @@ export class Health {
   markPublishFailed(f: { step: 'build' | 'drive'; auth: boolean }): void {
     this.#publishFailedSince ??= this.#clock.now();
     this.#publishAuthFailed = f.auth;
-    this.persist();
+    this.#persistSoon();
   }
 
   markPublished(): void {
     this.#lastPublished = this.#clock.now();
     this.#publishFailedSince = null;
     this.#publishAuthFailed = false;
-    this.persist();
+    this.#persistSoon();
   }
 
   #hasPaused(now: Date): boolean {
@@ -370,8 +382,35 @@ export class Health {
     };
   }
 
-  persist(): void {
-    setKv(this.#db, 'health', JSON.stringify(this.snapshot()));
+  /** A change's snapshot write, not awaited; a failure goes to onError. */
+  #persistSoon(): void {
+    this.persist().catch((err: unknown) => this.#onError(err));
+  }
+
+  /**
+   * Stores the snapshot. Each write starts at once (so on SQLite's one connection it is in order with what follows, as
+   * before) and is numbered. On Postgres two writes on the pool's connections can commit out of order: a write that
+   * lands after a newer one has landed stored an older snapshot, so the newest snapshot is written again at once.
+   * Resolves once this write (and any rewrite it made) and every write before it are in; the stored snapshot is then
+   * the newest. A failed write is reported to its caller only; the writes after it still run. Between a late write
+   * landing and its rewrite, a reader can briefly see the previous snapshot: a test waits for the value it expects
+   * (or for persist()), never just for some write.
+   */
+  persist(): Promise<void> {
+    const write = this.#write();
+    const earlier = this.#writes;
+    this.#writes = Promise.all([earlier, write.catch(() => undefined)]).then(() => undefined);
+    return Promise.all([earlier, write]).then(() => undefined);
+  }
+
+  /** One write of the snapshot as it is now; one that lands after a newer one has writes the newest again. */
+  #write(): Promise<void> {
+    const n = ++this.#asked;
+    return setKv(this.#db, 'health', JSON.stringify(this.snapshot())).then(() => {
+      if (n < this.#landed) return this.#write(); // an older snapshot landed last: the newest goes in again
+      this.#landed = n;
+      return undefined;
+    });
   }
 }
 
@@ -421,8 +460,8 @@ const isReportHealth = (r: unknown): r is ReportHealth => {
 
 const isVoiceProblem = (p: unknown): p is VoiceProblem => typeof p === 'string' && Object.hasOwn(VOICE_PROBLEM_LINES, p);
 
-export function readHealthSnapshot(db: Db): HealthSnapshot | undefined {
-  const v = getKv(db, 'health');
+export async function readHealthSnapshot(db: Db): Promise<HealthSnapshot | undefined> {
+  const v = await getKv(db, 'health');
   if (!v) return undefined;
   try {
     const o = JSON.parse(v) as Partial<HealthSnapshot> | null;

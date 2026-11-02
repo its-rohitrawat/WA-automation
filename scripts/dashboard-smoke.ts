@@ -35,7 +35,7 @@ let round = 0;
 let timeRound = 0;
 
 const state: FakeState = { signedIn: false, empty: false };
-const web = fakeDashboard({ port: 0, state });
+const web = await fakeDashboard({ port: 0, state });
 
 const failures: string[] = [];
 const fail = (where: string, what: string) => failures.push(`${where}: ${what}`);

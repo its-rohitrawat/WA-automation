@@ -1,5 +1,5 @@
 import { loadTrackerView, type HealthLine } from '../output/view.ts';
-import { tx, type Db } from '../store/db.ts';
+import type { Db } from '../store/db.ts';
 import { getKv, setKv } from '../store/kv.ts';
 import {
   claimReport, closeOldRetries, finishReport, markInterruptedReports, parseReportRequest, REPORT_REQUEST_KEY, REPORT_REQUEST_MAX_AGE_MS, reportFor,
@@ -232,8 +232,8 @@ export class ReportScheduler {
   }
 
   /** At service start: a row still 'sending' was cut off by a crash or a stop mid-send, so its outcome is unknown. */
-  recover(now: Date = this.#o.clock.now()): void {
-    const count = markInterruptedReports(this.#o.db, now.toISOString());
+  async recover(now: Date = this.#o.clock.now()): Promise<void> {
+    const count = await markInterruptedReports(this.#o.db, now.toISOString());
     this.#recovered = true; // only after the rows are marked (tests/report/scheduler.test.ts)
     if (count > 0) this.#o.log.warn({ count }, 'morning report was cut off mid-send; marked unknown, not retried');
   }
@@ -245,7 +245,7 @@ export class ReportScheduler {
       // The recovery at service start failed (for example the database was locked). Until it succeeds, a row cut off
       // mid-send would read 'sending now' all day and hide a report that may already have gone out, so send nothing.
       try {
-        this.recover(now);
+        await this.recover(now);
       } catch (err) {
         this.#o.log.error({ err }, 'morning report recovery failed again; nothing is sent until it succeeds');
         return;
@@ -267,7 +267,7 @@ export class ReportScheduler {
   }
 
   /** Today's line for Health. Never throws: a settings getter that fails gives a plain line. */
-  health(now: Date = this.#o.clock.now()): ReportHealth {
+  async health(now: Date = this.#o.clock.now()): Promise<ReportHealth> {
     const recipientMasked = this.#sender.maskedRecipient();
     let settings: ReportSettings;
     try {
@@ -277,7 +277,7 @@ export class ReportScheduler {
       return { text: 'Morning report: settings could not be read', warning: null, recipientMasked };
     }
     if (!settings.enabled) return { text: 'Morning report: off', warning: null, recipientMasked };
-    return { ...describeReport(reportFor(this.#o.db, istDate(now)), now, settings, this.#sender.status().state), recipientMasked };
+    return { ...describeReport(await reportFor(this.#o.db, istDate(now)), now, settings, this.#sender.status().state), recipientMasked };
   }
 
   /**
@@ -326,11 +326,11 @@ export class ReportScheduler {
       const at = now.toISOString();
       // Taking the request, checking it and the forced claim are one transaction, so a request written meanwhile is
       // never wiped unread, and the row cannot change between the check and the claim. The send comes after it.
-      const step = tx(db, (): 'send' | 'done' | 'schedule' => {
-        const requested = getKv(db, REPORT_REQUEST_KEY);
-        if (requested) setKv(db, REPORT_REQUEST_KEY, ''); // a request is used once, whatever happens next
+      const step = await db.tx(async (q): Promise<'send' | 'done' | 'schedule'> => {
+        const requested = await getKv(q, REPORT_REQUEST_KEY);
+        if (requested) await setKv(q, REPORT_REQUEST_KEY, ''); // a request is used once, whatever happens next
         if (!settings.enabled) return 'done';
-        closeOldRetries(db, date, at);
+        await closeOldRetries(q, date, at);
         if (!requested) return 'schedule';
         // A request lives 5 minutes. An older one (left behind by a service that was stopping, then started much later)
         // or one without its time is dropped: the owner asked for a report then, not now.
@@ -341,17 +341,17 @@ export class ReportScheduler {
         }
         // Honoured only while today's row is exactly what the owner confirmed: a send that started after the
         // confirmation and ended unknown changes the row, and must never be followed by a second report.
-        if (request.confirmed !== reportRequestValue(date, reportFor(db, date))) {
+        if (request.confirmed !== reportRequestValue(date, await reportFor(q, date))) {
           log.info({ date }, 'send-now request ignored: it is not for today, or today changed since it was confirmed');
           return 'schedule';
         }
         // A stale 'sending' row is a send whose outcome could not be recorded (no send is in flight here: tick returns
         // while one is). Status shows it as unknown, so it becomes unknown first and the request can take it, as it
         // would take any unknown row the owner confirmed.
-        if (isStaleSending(reportFor(db, date), now) && finishReport(db, date, 'unknown', 'not_recorded', at)) {
+        if (isStaleSending(await reportFor(q, date), now) && (await finishReport(q, date, 'unknown', 'not_recorded', at))) {
           log.warn({ date }, 'morning report outcome was never recorded; marked unknown before the send-now request');
         }
-        if (claimReport(db, date, at, { force: true })) return 'send';
+        if (await claimReport(q, date, at, { force: true })) return 'send';
         log.info({ date }, 'send-now request ignored: today is already sent or being sent');
         return 'done';
       });
@@ -359,22 +359,22 @@ export class ReportScheduler {
       if (step !== 'schedule') return;
       // On a day that is not a report day the scheduled path creates nothing: no claim, no row, no skipped row. A row
       // that exists on such a day was made by a send-now request, and keeps the usual retry and deadline rules.
-      if (!isReportDay(date, settings.days) && !reportFor(db, date)) return;
+      if (!isReportDay(date, settings.days) && !(await reportFor(db, date))) return;
       const hm = istTime(now);
       if (hm < settings.time) return;
       if (hm >= settings.deadline) {
-        const row = reportFor(db, date);
+        const row = await reportFor(db, date);
         // No send is in flight here (tick returns while one is), so a stale 'sending' row is a send whose outcome could
         // not be recorded. It may have gone out: unknown, never skipped and never retried.
         if (isStaleSending(row, now)) {
-          if (finishReport(db, date, 'unknown', 'not_recorded', at)) log.warn({ date }, 'morning report outcome was never recorded; marked unknown, not retried');
+          if (await finishReport(db, date, 'unknown', 'not_recorded', at)) log.warn({ date }, 'morning report outcome was never recorded; marked unknown, not retried');
           return;
         }
         const reason = row?.detail ?? 'not_running';
-        if ((!row || row.status === 'retry') && skipReport(db, date, reason, at)) log.warn({ date, reason }, 'morning report skipped today');
+        if ((!row || row.status === 'retry') && (await skipReport(db, date, reason, at))) log.warn({ date, reason }, 'morning report skipped today');
         return;
       }
-      if (claimReport(db, date, at)) await this.#send(date, now);
+      if (await claimReport(db, date, at)) await this.#send(date, now);
     } catch (err) {
       log.error({ err }, 'morning report tick failed');
     }
@@ -389,15 +389,15 @@ export class ReportScheduler {
     } catch (err) {
       if (err instanceof ReportBuildError) {
         log.warn({ code: err.code }, 'morning report could not be built');
-        this.#retry(date, err.code);
+        await this.#retry(date, err.code);
       } else {
         log.error({ err }, 'morning report could not be built');
-        this.#retry(date, 'build_failed');
+        await this.#retry(date, 'build_failed');
       }
       return;
     }
     if (this.#stopped) {
-      this.#retry(date, 'stopped'); // stop() arrived during the build: nothing has been sent yet, so start no send
+      await this.#retry(date, 'stopped'); // stop() arrived during the build: nothing has been sent yet, so start no send
       return;
     }
     let result: SendResult;
@@ -409,28 +409,28 @@ export class ReportScheduler {
     }
     const at = this.#o.clock.now().toISOString();
     if (result.status === 'sent') {
-      finishReport(db, date, 'sent', result.messageIds.join(','), at);
+      await finishReport(db, date, 'sent', result.messageIds.join(','), at);
       log.info({ date }, 'morning report sent');
     } else if (result.status === 'unknown') {
-      finishReport(db, date, 'unknown', result.code, at);
+      await finishReport(db, date, 'unknown', result.code, at);
       log.warn({ date, code: result.code }, 'morning report outcome unknown; not retried automatically');
     } else {
-      this.#retry(date, result.code);
+      await this.#retry(date, result.code);
     }
   }
 
-  #retry(date: string, code: string): void {
+  async #retry(date: string, code: string): Promise<void> {
     const now = this.#o.clock.now();
-    const next = new Date(now.getTime() + retryWaitMs(reportFor(this.#o.db, date)?.attempts ?? 1)).toISOString();
-    retryReport(this.#o.db, date, code, next, now.toISOString());
+    const next = new Date(now.getTime() + retryWaitMs((await reportFor(this.#o.db, date))?.attempts ?? 1)).toISOString();
+    await retryReport(this.#o.db, date, code, next, now.toISOString());
     this.#o.log.warn({ date, code, nextAttemptAt: next }, 'morning report not sent; will try again');
   }
 
   /** Throws ReportBuildError('no_tracker_link') while the tracker is not on Drive: the text has nothing to link to. */
   async #build(now: Date): Promise<ReportPayload> {
-    const link = trackerLink(this.#o.db);
+    const link = await trackerLink(this.#o.db);
     if (!link) throw new ReportBuildError('no_tracker_link');
-    const view = loadTrackerView(this.#o.db, now, this.#o.healthLine());
+    const view = await loadTrackerView(this.#o.db, now, this.#o.healthLine());
     return { text: buildShortMorningText(view, view.today, link) };
   }
 }

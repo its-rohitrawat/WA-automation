@@ -6,7 +6,7 @@ import type { SpendGuard } from '../spend/spendGuard.ts';
 import { finishBatch, startBatch } from '../store/batches.ts';
 import type { PriorityConfig } from '../config/prioritySettings.ts';
 import { getClient, setClientSentiment, setPhase, setStatus, type ClientRow } from '../store/clients.ts';
-import { tx, type Db } from '../store/db.ts';
+import type { Db, Sql } from '../store/db.ts';
 import { mediaForMessages } from '../store/media.ts';
 import { finishMeeting } from '../store/meetings.ts';
 import {
@@ -227,15 +227,15 @@ export class Reconciler {
     const { db, spend, prices, clock, log } = this.#o;
     // Any outcome but 'waiting' ends a wait (it is added back below), including a run that throws.
     const wasWaiting = this.#waiting.delete(clientId);
-    const client = getClient(db, clientId);
+    const client = await getClient(db, clientId);
     if (!client.active) return { status: 'noop' };
-    const queued = listUnprocessed(db, clientId);
+    const queued = await listUnprocessed(db, clientId);
     if (queued.length === 0) return { status: 'noop' };
     const now = clock.now();
     // §6.1: a shared file is read before the AI sees its message. Messages from the first file still being read onward
     // wait for a later run; the media queue tells the debouncer when that file is done, or the app tick re-runs it once
     // the wait runs out. Blocking needs no text (maxChars 0).
-    const queuedMedia = mediaForMessages(db, queued.map((m) => m.id), 0);
+    const queuedMedia = await mediaForMessages(db, queued.map((m) => m.id), 0);
     const batch = readyPrefix(queued, queuedMedia, now, this.#startedAt, { voiceOn: this.#o.voiceTranscriptionOn ?? true });
     if (batch.length === 0) {
       this.#waiting.add(clientId);
@@ -254,12 +254,12 @@ export class Reconciler {
     // Context comes from before the first new or reprocessed message, so a reprocess window does not see later chat.
     // Re-checks (edits, reactions, files read late) of old messages are skipped here: they must not pull the context back in time.
     const firstNew = batch.find((m) => !isRecheck(m));
-    const recent = listRecentProcessed(db, clientId, 30, firstNew?.ts);
-    const people = listPeople(db, clientId);
-    const openTasks = listTasks(db, clientId, ['open', 'maybe_done']);
-    const decisions = listDecisions(db, clientId, 20);
-    const reactions = reactionsFor(db, clientId, [...recent, ...batch].map((m) => m.waId));
-    const media = mediaForPrompt(db, batch, recent);
+    const recent = await listRecentProcessed(db, clientId, 30, firstNew?.ts);
+    const people = await listPeople(db, clientId);
+    const openTasks = await listTasks(db, clientId, ['open', 'maybe_done']);
+    const decisions = await listDecisions(db, clientId, 20);
+    const reactions = await reactionsFor(db, clientId, [...recent, ...batch].map((m) => m.waId));
+    const media = await mediaForPrompt(db, batch, recent);
     const mediaText = mediaPromptTexts(media, batch, recent);
     const user = buildUserContent({
       client, people, openTasks, decisions, recent, batch, reactions, today: istDate(now), mediaText, fileRechecks,
@@ -274,9 +274,9 @@ export class Reconciler {
     if (!spend.canSpend(estimate)) return this.#spendBlocked(clientId, estimate);
 
     // Job C, P2: only an edit or a reaction made during the call may label a message queued again, never one from before
-    // this run. Nothing has awaited since the batch was listed, and the version check keeps any touch made since.
-    clearTouches(db, batch.map((m) => ({ id: m.id, version: m.version })));
-    const batchId = startBatch(db, clientId, batch.length, now.toISOString());
+    // this run. The version check keeps any touch made since the batch was listed (the media reads above await).
+    await clearTouches(db, batch.map((m) => ({ id: m.id, version: m.version })));
+    const batchId = await startBatch(db, clientId, batch.length, now.toISOString());
     let result: { output: AiOutput; invalidOps: number };
     try {
       result = await this.#callWithRetry(system, user, `batch ${batchId}`, estimate, { sentiment: rules.sentiment });
@@ -284,7 +284,7 @@ export class Reconciler {
       // A retry that cannot reserve is not an AI error: a pause when the cap is the reason, busy when holds are.
       const blocked = e instanceof SpendCapReachedError ? this.#spendBlocked(clientId, estimate) : undefined;
       const errorCode = blocked?.status === 'busy' ? 'spend_busy' : errorCodeOf(e);
-      finishBatch(db, batchId, { status: 'failed', errorCode, accepted: null, rejected: null, at: clock.now().toISOString() });
+      await finishBatch(db, batchId, { status: 'failed', errorCode, accepted: null, rejected: null, at: clock.now().toISOString() });
       if (blocked) return blocked;
       log.warn({ clientId, batchId, errorCode }, 'reconcile failed; messages stay queued');
       return { status: 'failed', errorCode };
@@ -303,27 +303,27 @@ export class Reconciler {
     const appliedAt = clock.now();
     let applied: { accepted: AiOp[]; rejected: Rejection[]; requeued: number };
     try {
-      applied = tx(db, () => {
+      applied = await db.tx(async (q) => {
         // The call can take minutes and a human can correct the tracker meanwhile, so validate against the
-        // client, tasks and people as they are now. Nothing can interleave inside this synchronous transaction.
-        const fresh = getClient(db, clientId);
-        const state = this.#validationState(fresh, clientId, { batchIds, contextIds, messageTs, editedIds, source: 'whatsapp' });
+        // client, tasks and people as they are now. Nothing else runs on the database inside this transaction.
+        const fresh = await getClient(q, clientId);
+        const state = await this.#validationState(q, fresh, clientId, { batchIds, contextIds, messageTs, editedIds, source: 'whatsapp' });
         const { accepted, rejected } = validateOps(result.output.ops, state);
-        for (const op of accepted) this.#apply(fresh, op, evidence, appliedAt, rules);
+        for (const op of accepted) await this.#apply(q, fresh, op, evidence, appliedAt, rules);
         // fileUnread: the prompt showed the file as still being read. If it was read during the call, the message stays
         // queued as a "file now read" re-check. fileShown: the prompt showed the file's text as a "file now read"
         // re-check, so a message queued again for an edit or a reaction does not show it as one again (amendment 12h).
         const seen = batch.map((m) => ({
           id: m.id, version: m.version, fileUnread: queuedMedia.get(m.id)?.status === 'pending', fileShown: fileRechecks.has(m.id),
         }));
-        const requeued = markProcessedIfUnchanged(db, seen, appliedAt.toISOString());
-        flagRevokedSources(db, clientId); // a source message deleted during the call
-        finishBatch(db, batchId, { status: 'ok', errorCode: null, accepted: accepted.length, rejected: rejected.length, at: appliedAt.toISOString() });
+        const requeued = await markProcessedIfUnchanged(q, seen, appliedAt.toISOString());
+        await flagRevokedSources(q, clientId); // a source message deleted during the call
+        await finishBatch(q, batchId, { status: 'ok', errorCode: null, accepted: accepted.length, rejected: rejected.length, at: appliedAt.toISOString() });
         return { accepted, rejected, requeued };
       });
     } catch (err) {
       // The transaction rolled back: nothing was applied and the messages stay queued.
-      finishBatch(db, batchId, { status: 'failed', errorCode: 'apply_failed', accepted: null, rejected: null, at: clock.now().toISOString() });
+      await finishBatch(db, batchId, { status: 'failed', errorCode: 'apply_failed', accepted: null, rejected: null, at: clock.now().toISOString() });
       log.error({ clientId, batchId, err }, 'applying operations failed; messages stay queued');
       return { status: 'failed', errorCode: 'apply_failed' };
     }
@@ -345,11 +345,11 @@ export class Reconciler {
     const { db, clock } = this.#o;
     const items = meetingItems(meeting.id, meeting.summary, meeting.segments, meeting.startedAt);
     if (items.length === 0) {
-      finishMeeting(db, meeting.id, { at: clock.now().toISOString() });
+      await finishMeeting(db, meeting.id, { at: clock.now().toISOString() });
       return { status: 'done', accepted: 0, rejected: 0 };
     }
-    if (!getClient(db, clientId).active) {
-      finishMeeting(db, meeting.id, { note: 'client_inactive', at: clock.now().toISOString() });
+    if (!(await getClient(db, clientId)).active) {
+      await finishMeeting(db, meeting.id, { note: 'client_inactive', at: clock.now().toISOString() });
       return { status: 'done', accepted: 0, rejected: 0, note: 'client_inactive' };
     }
     const exclusive = this.#o.exclusive ?? (<T>(_id: number, fn: () => Promise<T>): Promise<T | 'busy'> => fn());
@@ -363,21 +363,21 @@ export class Reconciler {
 
   async #trackMeeting(clientId: number, meeting: MeetingForTracker, items: MeetingItem[]): Promise<MeetingTrackOutcome> {
     const { db, spend, prices, clock, log } = this.#o;
-    const client = getClient(db, clientId);
+    const client = await getClient(db, clientId);
     const now = clock.now();
     // Only processed messages: one still queued is the next WhatsApp run's evidence, and that run sees this one's tasks.
-    const recent = listRecentProcessed(db, clientId, 30);
-    const reactions = reactionsFor(db, clientId, recent.map((m) => m.waId));
+    const recent = await listRecentProcessed(db, clientId, 30);
+    const reactions = await reactionsFor(db, clientId, recent.map((m) => m.waId));
     const user = buildUserContent({
       client,
-      people: listPeople(db, clientId),
-      openTasks: listTasks(db, clientId, ['open', 'maybe_done']),
-      decisions: listDecisions(db, clientId, 20),
+      people: await listPeople(db, clientId),
+      openTasks: await listTasks(db, clientId, ['open', 'maybe_done']),
+      decisions: await listDecisions(db, clientId, 20),
       recent,
       batch: [],
       reactions,
       today: istDate(now),
-      mediaText: mediaPromptTexts(mediaForPrompt(db, [], recent), [], recent),
+      mediaText: mediaPromptTexts(await mediaForPrompt(db, [], recent), [], recent),
       meetingLines: meetingItemLines(items, meeting.startedAt, meeting.title),
     });
 
@@ -401,9 +401,9 @@ export class Reconciler {
     const appliedAt = clock.now();
     let applied: { accepted: AiOp[]; rejected: Rejection[] };
     try {
-      applied = tx(db, () => {
-        const fresh = getClient(db, clientId);
-        const state = this.#validationState(fresh, clientId, {
+      applied = await db.tx(async (q) => {
+        const fresh = await getClient(q, clientId);
+        const state = await this.#validationState(q, fresh, clientId, {
           batchIds: new Set(items.map((it) => it.id)),
           contextIds: new Set(recent.map((m) => m.waId)),
           messageTs,
@@ -411,8 +411,8 @@ export class Reconciler {
           source: 'meeting',
         });
         const { accepted, rejected } = validateOps(result.output.ops, state);
-        for (const op of accepted) this.#apply(fresh, op, evidence, appliedAt, rules);
-        finishMeeting(db, meeting.id, { at: appliedAt.toISOString() });
+        for (const op of accepted) await this.#apply(q, fresh, op, evidence, appliedAt, rules);
+        await finishMeeting(q, meeting.id, { at: appliedAt.toISOString() });
         return { accepted, rejected };
       });
     } catch (err) {
@@ -447,24 +447,24 @@ export class Reconciler {
    * The validator's view, read inside the apply transaction: the client, its open tasks, people and replay sources as
    * they are now, plus what this run's AI saw. Shared by WhatsApp and meeting runs.
    */
-  #validationState(
+  async #validationState(
+    q: Sql,
     fresh: ClientRow,
     clientId: number,
     run: Pick<ValidationState, 'batchIds' | 'contextIds' | 'messageTs' | 'editedIds' | 'source'>,
-  ): ValidationState {
-    const { db } = this.#o;
+  ): Promise<ValidationState> {
     return {
       clientCode: fresh.code,
       phases: fresh.phases,
       phaseLocked: fresh.phaseLocked,
-      tasksByCode: new Map(listTasks(db, clientId, ['open', 'maybe_done']).map((t) => [t.code, t])),
+      tasksByCode: new Map((await listTasks(q, clientId, ['open', 'maybe_done'])).map((t) => [t.code, t])),
       batchIds: run.batchIds,
       contextIds: run.contextIds,
       messageTs: run.messageTs,
-      peopleByJid: new Map(listPeople(db, clientId).map((p) => [p.jid, p])),
-      taskSourceIds: taskSourceIds(db, clientId),
-      reminderSourceIds: reminderSourceIds(db, clientId),
-      decisionSourceIds: decisionSourceIds(db, clientId),
+      peopleByJid: new Map((await listPeople(q, clientId)).map((p) => [p.jid, p])),
+      taskSourceIds: await taskSourceIds(q, clientId),
+      reminderSourceIds: await reminderSourceIds(q, clientId),
+      decisionSourceIds: await decisionSourceIds(q, clientId),
       editedIds: run.editedIds,
       source: run.source,
     };
@@ -522,7 +522,8 @@ export class Reconciler {
     return next && next.level !== t.priority ? next : null;
   }
 
-  #apply(client: ClientRow, op: AiOp, evidence: Map<string, Evidence>, at: Date, rules: RunRules): void {
+  /** Applies one validated op on the run's transaction handle q. */
+  async #apply(q: Sql, client: ClientRow, op: AiOp, evidence: Map<string, Evidence>, at: Date, rules: RunRules): Promise<void> {
     const { db } = this.#o;
     const nowIso = at.toISOString();
     const cited = op.sourceMessageIds.map((id) => evidence.get(id)).filter((e): e is Evidence => e !== undefined);
@@ -541,16 +542,16 @@ export class Reconciler {
     // "file now read" re-check alone is not (amendment 12h): the file is dated like the message that shared it.
     const lastDate = sources.some((e) => e.kind === 'message' && e.recheck) ? istDate(at) : dateOf(last);
     const event = (taskId: number | null, detail: object) =>
-      recordEvent(db, { taskId, clientId: client.id, actor: 'ai', op: op.op, detail, reason: op.reason, sourceIds: op.sourceMessageIds, at: nowIso });
-    const taskFor = (code: string | null) => {
-      const t = code ? getTaskByCode(db, code) : undefined;
+      recordEvent(q, { taskId, clientId: client.id, actor: 'ai', op: op.op, detail, reason: op.reason, sourceIds: op.sourceMessageIds, at: nowIso });
+    const taskFor = async (code: string | null) => {
+      const t = code ? await getTaskByCode(q, code) : undefined;
       if (!t) throw new Error('validated task disappeared'); // cannot happen inside the transaction
       return t;
     };
 
     switch (op.op) {
       case 'add_task': {
-        const t = createTask(db, {
+        const t = await createTask(q, {
           clientId: client.id,
           side: op.side!,
           title: op.title!,
@@ -571,12 +572,12 @@ export class Reconciler {
           origin: item ? 'meeting' : 'whatsapp',
           meetingId: item?.meetingId ?? null,
         }, nowIso);
-        if (op.status) setTaskStatus(db, t.id, op.status, lastDate, nowIso, 'ai');
-        event(t.id, { code: t.code, title: t.title, side: t.side, status: op.status ?? 'open' });
+        if (op.status) await setTaskStatus(q, t.id, op.status, lastDate, nowIso, 'ai');
+        await event(t.id, { code: t.code, title: t.title, side: t.side, status: op.status ?? 'open' });
         return;
       }
       case 'update_task': {
-        const t = taskFor(op.taskCode);
+        const t = await taskFor(op.taskCode);
         const fields: Partial<Record<TaskField, string | null>> = {};
         for (const f of TASK_FIELDS) {
           const v = op[f];
@@ -584,41 +585,41 @@ export class Reconciler {
         }
         const change = this.#priorityChange(t, op.priority, kw);
         if (change) fields.priority = change.level;
-        updateTaskFields(db, t.id, fields, nowIso, 'ai', change?.keyword);
-        if (sentiment) setTaskSentiment(db, t.id, sentiment, nowIso);
-        event(t.id, sentiment ? { ...fields, sentiment } : fields);
+        await updateTaskFields(q, t.id, fields, nowIso, 'ai', change?.keyword);
+        if (sentiment) await setTaskSentiment(q, t.id, sentiment, nowIso);
+        await event(t.id, sentiment ? { ...fields, sentiment } : fields);
         return;
       }
       case 'close_task': {
-        const t = taskFor(op.taskCode);
+        const t = await taskFor(op.taskCode);
         // A task cannot close before it was raised. A file-only re-check dates the close by the day its message was sent
         // (amendment 12h), which can be before the day a later message raised the task. logReminder clamps the same way:
         // the last reminder date never moves back.
-        setTaskStatus(db, t.id, 'done', lastDate < t.raisedOn ? t.raisedOn : lastDate, nowIso, 'ai');
-        event(t.id, { status: 'done' });
+        await setTaskStatus(q, t.id, 'done', lastDate < t.raisedOn ? t.raisedOn : lastDate, nowIso, 'ai');
+        await event(t.id, { status: 'done' });
         return;
       }
       case 'mark_maybe_done': {
-        const t = taskFor(op.taskCode);
-        setTaskStatus(db, t.id, 'maybe_done', lastDate, nowIso, 'ai');
-        event(t.id, { status: 'maybe_done' });
+        const t = await taskFor(op.taskCode);
+        await setTaskStatus(q, t.id, 'maybe_done', lastDate, nowIso, 'ai');
+        await event(t.id, { status: 'maybe_done' });
         return;
       }
       case 'reopen_task': {
-        const t = taskFor(op.taskCode);
-        setTaskStatus(db, t.id, 'open', lastDate, nowIso, 'ai');
-        event(t.id, { status: 'open' });
+        const t = await taskFor(op.taskCode);
+        await setTaskStatus(q, t.id, 'open', lastDate, nowIso, 'ai');
+        await event(t.id, { status: 'open' });
         return;
       }
       case 'log_reminder': {
-        const t = taskFor(op.taskCode);
-        logReminder(db, t.id, lastDate, nowIso);
-        event(t.id, { reminder: lastDate });
+        const t = await taskFor(op.taskCode);
+        await logReminder(q, t.id, lastDate, nowIso);
+        await event(t.id, { reminder: lastDate });
         // A chase with a keyword in it raises the task's priority, as a separate change in its history.
         const change = this.#priorityChange(t, null, kw);
         if (change) {
-          updateTaskFields(db, t.id, { priority: change.level }, nowIso, 'ai', change.keyword);
-          recordEvent(db, {
+          await updateTaskFields(q, t.id, { priority: change.level }, nowIso, 'ai', change.keyword);
+          await recordEvent(q, {
             taskId: t.id, clientId: client.id, actor: 'ai', op: 'update_task', detail: { priority: change.level }, reason: 'priority keyword',
             sourceIds: op.sourceMessageIds, at: nowIso,
           });
@@ -626,24 +627,24 @@ export class Reconciler {
         return;
       }
       case 'add_decision':
-        addDecision(db, {
+        await addDecision(q, {
           clientId: client.id, text: op.text!, decidedOn: dateOf(first), source: item ? 'meeting' : 'whatsapp', sourceWaId: firstMessage?.waId ?? null,
           meetingId: item?.meetingId ?? null,
         }, nowIso);
-        event(null, { decision: op.text });
+        await event(null, { decision: op.text });
         return;
       case 'set_phase':
-        setPhase(db, client.id, op.phase!, 'ai');
-        event(null, { phase: op.phase });
+        await setPhase(q, client.id, op.phase!, 'ai');
+        await event(null, { phase: op.phase });
         return;
       case 'set_status':
-        setStatus(db, client.id, op.text!, nowIso);
-        if (sentiment) setClientSentiment(db, client.id, sentiment, nowIso);
-        event(null, sentiment ? { status: op.text, sentiment } : { status: op.text });
+        await setStatus(q, client.id, op.text!, nowIso);
+        if (sentiment) await setClientSentiment(q, client.id, sentiment, nowIso);
+        await event(null, sentiment ? { status: op.text, sentiment } : { status: op.text });
         return;
       case 'set_person_role':
-        setRole(db, client.id, op.personJid!, op.role!, 'ai');
-        event(null, { personJid: op.personJid, role: op.role });
+        await setRole(q, client.id, op.personJid!, op.role!, 'ai');
+        await event(null, { personJid: op.personJid, role: op.role });
         return;
     }
   }

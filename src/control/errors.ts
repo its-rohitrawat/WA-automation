@@ -1,3 +1,5 @@
+import type { Sql } from '../store/db.ts';
+
 /**
  * A refusal the dashboard shows the owner as it is. The message is fixed text with codes, ids, field names and allowed
  * values only: never message text, a token or a raw error. status: what the web layer answers (400 a bad URL parameter,
@@ -25,7 +27,7 @@ export interface AuditEntry {
 }
 
 /**
- * Writes one audit row. It must be synchronous and write through the same database connection as the action: the
- * actions call it inside their transaction, so a failed write rolls the change back with it.
+ * Writes one audit row inside the action's transaction, through its handle `q`: the row commits or rolls back with the
+ * change, and a failed write rolls the change back with it.
  */
-export type Audit = (entry: AuditEntry) => void;
+export type Audit = (q: Sql, entry: AuditEntry) => Promise<void>;
