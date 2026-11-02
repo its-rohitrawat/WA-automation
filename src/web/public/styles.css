@@ -547,8 +547,13 @@ button[disabled] { cursor: not-allowed; opacity: .55; }
 @media (prefers-reduced-motion: reduce) { .ccard.busy::before, .cstat .dot, .drawer .status::before, .drawer .status .dot { animation: none; } }
 /* A card's title wraps instead of running under the state pill. */
 .conn .top-row .grow-1 { min-width: 0; } .conn h3 { overflow-wrap: anywhere; }
-/* A Google card's title is its email: one line, cut with an ellipsis, never mid-word; the whole email is its tooltip (final review, item 11). */
-.conn[data-email] h3 { overflow-wrap: normal; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Cards with long text in their title (owner follow-up, 2 Nov): a Google card's whole email, a phone's name and
+   WhatsApp's name for it. The title takes its own line the card's full width, under the icon and the state. An email is
+   never cut: it wraps between its pieces, after the @ and before a dot (never at a hyphen, which would read as part of
+   it), and inside a piece only when that piece alone is wider than the card; the email is its tooltip too. */
+.conn-stack .top-row { flex-wrap: wrap; } .conn-stack .top-row .grow-1 { order: 1; flex: 1 0 100%; } .conn-stack .top-row .pill { margin-left: auto; }
+.conn .em-part { display: inline-block; max-width: 100%; }
+.conn .wa-name { overflow-wrap: anywhere; }
 
 /* Connections dialogs and setup mode (D3) */
 /* Centred without a transform, so the open animation's scale never fights the centring. */

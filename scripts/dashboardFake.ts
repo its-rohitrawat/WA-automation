@@ -153,18 +153,21 @@ interface FakePhone {
   number: string | null;
   status: string | null;
   groups: number;
+  /** WhatsApp's own name for the account: none while not linked, as the agent says. */
+  accountName: string | null;
 }
 
 /**
  * The fake's ONE list of reading phones, made fresh for each fake (Connections changes it in memory, and Manage groups
- * reads the same list, so the screens agree): three, the third unlinked; or phone 1 alone, as before more phones.
+ * reads the same list, so the screens agree): three, the third unlinked; or phone 1 alone, as before more phones. Phone
+ * 2's WhatsApp name has markup in it (the page must show it as text) and is long enough to wrap on a phone.
  */
 function fakePhones(n: 1 | 3): FakePhone[] {
-  if (n === 1) return [{ id: 1, label: 'Phone 1', state: 'active', number: '…4321', status: 'open', groups: 3 }];
+  if (n === 1) return [{ id: 1, label: 'Phone 1', state: 'active', number: '…4321', status: 'open', groups: 3, accountName: 'Sharma Traders' }];
   return [
-    { id: 1, label: 'Office', state: 'active', number: '…4321', status: 'open', groups: 5 },
-    { id: 2, label: 'Rahul <b>phone', state: 'active', number: '…7788', status: 'open', groups: 2 },
-    { id: 3, label: 'Old phone', state: 'unlinked', number: null, status: null, groups: 1 },
+    { id: 1, label: 'Office', state: 'active', number: '…4321', status: 'open', groups: 5, accountName: 'Sharma Traders' },
+    { id: 2, label: 'Rahul <b>phone', state: 'active', number: '…7788', status: 'open', groups: 2, accountName: 'Rahul <b>Kapoor</b> (Front desk, Andheri West)' },
+    { id: 3, label: 'Old phone', state: 'unlinked', number: null, status: null, groups: 1, accountName: null },
   ];
 }
 
@@ -430,7 +433,7 @@ export async function fakeDashboard(o: { port: number; state: FakeState; log?: L
     if (!label || label.length > 40) return sendError(res, 422, 'invalid', "A phone's name is one line of 1 to 40 characters.");
     const id = [2, 3, 4, 5].find((n) => !phones.some((p) => p.id === n));
     if (id === undefined) return sendError(res, 409, 'conflict', 'A workspace can have at most 5 phones. Remove one first.');
-    const phone = { id, label, state: 'active' as const, number: null, status: 'not_linked', groups: 0 };
+    const phone = { id, label, state: 'active' as const, number: null, status: 'not_linked', groups: 0, accountName: null };
     phones.push(phone);
     sendJson(res, 200, { phone });
   });
@@ -442,7 +445,7 @@ export async function fakeDashboard(o: { port: number; state: FakeState; log?: L
       const body = (await readJson(req)) as { label?: unknown; confirm?: unknown };
       if (action === 'rename') p.label = String(body.label ?? '').trim() || p.label;
       else if (body.confirm !== true) return sendError(res, 400, 'invalid', 'Choose a phone, and confirm.');
-      else if (action === 'unlink') Object.assign(p, { state: 'unlinked', number: null, status: null });
+      else if (action === 'unlink') Object.assign(p, { state: 'unlinked', number: null, status: null, accountName: null });
       else phones.splice(phones.indexOf(p), 1);
       sendJson(res, 200, { phone: p, loggedOut: true });
     });

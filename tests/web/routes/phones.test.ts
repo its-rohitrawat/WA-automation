@@ -8,8 +8,8 @@ import { PhoneRoutes, type PhoneRoutesDeps, type PhoneRow } from '../../../src/w
 
 const owner: OwnerContext = { actor: 'owner@studio.in', sessionId: 'session-a', requestId: 'aaaaaaaaaaaa' };
 const ROWS: PhoneRow[] = [
-  { id: 1, label: 'Phone 1', state: 'active', number: '…0001', status: 'open', groups: 3 },
-  { id: 2, label: 'Front desk', state: 'unlinked', number: null, status: null, groups: 1 },
+  { id: 1, label: 'Phone 1', state: 'active', number: '…0001', status: 'open', groups: 3, accountName: 'Rohit Rawat' },
+  { id: 2, label: 'Front desk', state: 'unlinked', number: null, status: null, groups: 1, accountName: null },
 ];
 const entry = (id: 1 | 2 | 3, label = `Phone ${id}`) => ({ id, label, state: 'active' as const, addedAt: null });
 

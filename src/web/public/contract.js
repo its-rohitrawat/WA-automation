@@ -447,11 +447,23 @@ export function readMembers(raw) {
 
 // ---------- Reading phones (lane C, change 7) ----------
 
-/** @typedef {{ id: number, label: string, state: 'active' | 'unlinked', number: string | null, status: string | null, groups: number }} PhoneRow */
+/** @typedef {{ id: number, label: string, state: 'active' | 'unlinked', number: string | null, status: string | null, groups: number, accountName: string | null }} PhoneRow */
+
+/**
+ * WhatsApp's own name for a phone's account: the account holder's text, so one line of at most 60 characters with no
+ * control or invisible characters (the agent sends it so; read so again here). Null when there is none. Shown with esc().
+ * @param {unknown} v
+ */
+const accountName = (v) => {
+  if (typeof v !== 'string') return null;
+  const one = v.replace(/[\p{Cc}\p{Zl}\p{Zp}]+/gu, ' ').replace(/\p{Cf}+/gu, '').replace(/\s+/g, ' ').trim();
+  return cut(one, 60).trim() || null;
+};
 
 /**
  * GET /dashboard/api/whatsapp/phones ({ phones, max }, src/web/routes/whatsapp.ts): each reading phone with its label (owner
- * text), its state, its number already masked by the agent, its gateway's state and its approved groups.
+ * text), its state, its number already masked by the agent, its gateway's state, its approved groups and WhatsApp's own
+ * name for its account.
  * @param {unknown} raw @returns {{ phones: PhoneRow[], max: number }}
  */
 export function readPhones(raw) {
@@ -461,7 +473,7 @@ export function readPhones(raw) {
       const r = obj(p);
       return {
         id: num(r.id), label: str(r.label), state: /** @type {'active' | 'unlinked'} */ (r.state === 'unlinked' ? 'unlinked' : 'active'),
-        number: str(r.number) || null, status: str(r.status) || null, groups: num(r.groups),
+        number: str(r.number) || null, status: str(r.status) || null, groups: num(r.groups), accountName: accountName(r.accountName),
       };
     })
     .filter((p) => Number.isInteger(p.id) && p.id >= 1 && p.id <= 5 && p.label !== '');

@@ -34,6 +34,11 @@ interface Slot {
   switchable: SwitchableGateway;
   /** The number it is linked to, read at start and after each link; undefined when not linked. */
   number: string | undefined;
+  /**
+   * The auth its gateway was last built on (at start, or by a link): Baileys updates its creds in place, so creds.me is
+   * WhatsApp's current word on the account. Undefined for a phone not linked at start, until a link builds one.
+   */
+  auth: EncryptedAuth | undefined;
 }
 
 export interface WorkspacePhonesDeps {
@@ -88,6 +93,28 @@ export interface WorkspacePhones {
 
 const digitsOf = (auth: EncryptedAuth | undefined): string | undefined => auth?.state.creds.me?.id?.split(/[:@]/)[0];
 
+const ACCOUNT_NAME_MAX = 60;
+/** More digits than this and a "name" could be a phone number: never shown (a label refuses the same, wa/phoneList.ts). */
+const ACCOUNT_NAME_DIGITS_MAX = 6;
+
+/**
+ * WhatsApp's own name for a linked account (owner follow-up, 2 Nov): its profile name as Baileys keeps it in creds.me,
+ * else the name WhatsApp shows others (notify). It is the account holder's text, so it comes out as one line of plain text
+ * of at most 60 characters: control and line-break characters become spaces, invisible format characters (zero-width,
+ * direction) are dropped. Null when not known: none, blank, Baileys' "~" (a pairing-code link before WhatsApp says the
+ * name), or text with more than 6 digits, which could be a phone number.
+ */
+export function accountNameOf(me: { name?: string; notify?: string } | undefined): string | null {
+  for (const raw of [me?.name, me?.notify]) {
+    if (typeof raw !== 'string') continue;
+    const one = raw.replace(/[\p{Cc}\p{Zl}\p{Zp}]+/gu, ' ').replace(/\p{Cf}+/gu, '').replace(/\s+/g, ' ').trim();
+    if (one === '' || one === '~') continue;
+    if ((one.match(/\p{Nd}/gu) ?? []).length > ACCOUNT_NAME_DIGITS_MAX) return null;
+    return Array.from(one).slice(0, ACCOUNT_NAME_MAX).join('').trim();
+  }
+  return null;
+}
+
 export async function workspacePhones(d: WorkspacePhonesDeps): Promise<WorkspacePhones> {
   let configs = d.configs;
   const groupsOn = (id: PhoneId) => configs.filter((c) => phoneOfConfig(c) === id).length;
@@ -113,7 +140,7 @@ export async function workspacePhones(d: WorkspacePhonesDeps): Promise<Workspace
       const p = d.phone1;
       const linked = p.linked && active;
       return {
-        id, name: 'founder', sessionDb: p.sessionDb, ownsDb: false, allow, number: linked ? digitsOf(p.auth) : undefined,
+        id, name: 'founder', sessionDb: p.sessionDb, ownsDb: false, allow, number: linked ? digitsOf(p.auth) : undefined, auth: linked ? p.auth : undefined,
         switchable: founderGateway({ linked, build: () => d.buildGateway(allow, p.auth) }),
       };
     }
@@ -135,7 +162,7 @@ export async function workspacePhones(d: WorkspacePhonesDeps): Promise<Workspace
     }
     const linked = active && !fresh && auth?.hasSession === true;
     return {
-      id, name, sessionDb, ownsDb: true, allow, number: linked ? digitsOf(auth) : undefined,
+      id, name, sessionDb, ownsDb: true, allow, number: linked ? digitsOf(auth) : undefined, auth: linked ? auth : undefined,
       switchable: founderGateway({ linked, build: () => d.buildGateway(allow, auth!) }),
     };
   }
@@ -155,7 +182,11 @@ export async function workspacePhones(d: WorkspacePhonesDeps): Promise<Workspace
   function linkDriver(s: Slot): LinkDriver {
     const inner = founderLinkDriver({
       sessionDb: s.sessionDb, trackerDb: d.db, key: phoneSessionKey(d.key, s.name), switchable: s.switchable, log: d.log,
-      buildGateway: (auth, onQr) => d.buildGateway(s.allow, auth, onQr),
+      // The last gateway built is the one kept (the link's, or the old link's again after a cancel): its creds name it.
+      buildGateway: (auth, onQr) => {
+        s.auth = auth;
+        return d.buildGateway(s.allow, auth, onQr);
+      },
       resetKey: s.id === 1 ? 'session_reset_at' : `session_reset_at:${s.name}`,
       refuse: async (n) => {
         if ([...slots.values()].some((o) => o.id !== s.id && o.number === n)) return 'number_in_use';
@@ -202,6 +233,8 @@ export async function workspacePhones(d: WorkspacePhonesDeps): Promise<Workspace
         return {
           id: p.id, label: p.label, state: p.state, number: s?.number ? maskNumber(s.number) : null,
           status: p.state === 'active' ? (live.get(p.id) ?? null) : null, groups: groupsOn(p.id),
+          // Only while linked, as the number: an unlinked phone's creds are not its account any more.
+          accountName: s?.number ? accountNameOf(s.auth?.state.creds.me) : null,
         };
       });
     },

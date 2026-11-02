@@ -109,7 +109,7 @@ describe('the reading phones’ routes (lane C, change 7): mounted with their de
   const PHONES = '/dashboard/api/whatsapp/phones';
   const phoneDeps = (calls: string[]): Partial<AgentRoutesDeps> => ({
     phones: {
-      list: () => [{ id: 1, label: 'Phone 1', state: 'active', number: '…0001', status: 'open', groups: 2 }],
+      list: () => [{ id: 1, label: 'Phone 1', state: 'active', number: '…0001', status: 'open', groups: 2, accountName: null }],
       add: async (label) => (calls.push(`add ${String(label)}`), { id: 2, label: String(label), state: 'active', addedAt: NOW }),
       rename: async (id, label) => (calls.push(`rename ${id}`), { id, label: String(label), state: 'active', addedAt: NOW }),
       unlink: async (id) => (calls.push(`unlink ${id}`), { phone: { id, label: 'x', state: 'unlinked', addedAt: NOW }, loggedOut: true }),

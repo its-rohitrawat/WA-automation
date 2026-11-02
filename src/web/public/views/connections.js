@@ -23,7 +23,10 @@ const targetOf = (id) => /** @type {'founder' | 'phone2' | 'phone3' | 'phone4' |
 const modalHead = (/** @type {string} */ eyebrow, /** @type {string} */ title) =>
   `<div class="m-head"><div><span class="eyebrow">${esc(eyebrow)}</span><h2>${esc(title)}</h2></div><button class="icon-btn" type="button" data-close aria-label="Close">${icon('close', 18)}</button></div>`;
 
-/** One phone's card. Its label is owner text and its number already masked by the agent: both through esc(). @param {PhoneRow} p */
+/**
+ * One phone's card. Its label is owner text, WhatsApp's name for the account is the account holder's, and its number is
+ * already masked by the agent: all through esc(). @param {PhoneRow} p
+ */
 function phoneCard(p) {
   const [pill, word] = p.state === 'unlinked' ? /** @type {[keyof typeof PILL, string]} */ (['off', 'Unlinked']) : (PHONE_STATE[p.status ?? ''] ?? ['off', 'Not linked']);
   const linked = p.state === 'active' && p.status !== 'not_linked' && p.status !== null;
@@ -34,8 +37,8 @@ function phoneCard(p) {
     act('rename', 'edit', 'Rename'),
     p.id !== 1 && !linked && p.groups === 0 ? act('remove', 'trash', 'Remove') : '',
   ].join('');
-  return `<article class="card conn" data-conn="phone-${p.id}"><div class="top-row"><div class="badge">${icon('bubble', 21)}</div>
-      <div class="grow-1"><h3>${esc(p.label)}</h3><div class="sub">Phone ${p.id}${p.id === 1 ? ' · main' : ''} · reads the groups approved on it</div></div>
+  return `<article class="card conn conn-stack" data-conn="phone-${p.id}"><div class="top-row"><div class="badge">${icon('bubble', 21)}</div>
+      <div class="grow-1"><h3>${esc(p.label)}</h3>${p.accountName ? `<div class="sub wa-name">WhatsApp name: ${esc(p.accountName)}</div>` : ''}<div class="sub">Phone ${p.id}${p.id === 1 ? ' · main' : ''} · reads the groups approved on it</div></div>
       <span class="pill ${PILL[pill]}"><i></i>${esc(word)}</span></div>
     <dl class="kv"><dt>Number</dt><dd>${esc(p.number ?? '—')}</dd><dt>Groups</dt><dd>${esc(`${p.groups} approved`)}</dd></dl>
     ${p.state === 'unlinked' && p.groups > 0 ? `<div class="note">${icon('info', 16)}<span>Its groups are not read while it is unlinked. Link it again, or move them to another phone in Groups.</span></div>` : ''}
@@ -136,13 +139,21 @@ export function renderConnections(cards, error, phones = null) {
   return (phones ? renderPhones(phones) : '') + otherConnections(shown);
 }
 
+/**
+ * A Google card's email, whole, in pieces that wrap after the @ and before each dot (owner follow-up, 2 Nov): each piece
+ * stays on one line (styles.css .em-part, not at a hyphen either) unless it alone is wider than the card. Each through esc().
+ * @param {string} email
+ */
+const emailBreaks = (email) => email.replace(/@/g, '@\n').replace(/\./g, '\n.').split('\n').filter(Boolean)
+  .map((part) => `<span class="em-part">${esc(part)}</span>`).join('<wbr>');
+
 /** @param {Card[]} cards */
 function otherConnections(cards) {
   if (!cards.length) return '<p class="empty-note">No connections to show yet.</p>';
   const card = (/** @type {Card} */ c) => {
     const kind = /** @type {keyof typeof ICON} */ (c.kind);
-    return `<article class="card conn" data-conn="${esc(c.id)}"${c.email ? ` data-email="${esc(c.email)}"` : ''}${c.meetings ? ' data-meetings="1"' : ''}><div class="top-row"><div class="badge">${icon(ICON[kind] ?? 'plug', 21)}</div>
-        <div class="grow-1"><h3${c.email ? ` title="${esc(c.title)}"` : ''}>${esc(c.title)}</h3><div class="sub">${esc(c.subtitle)}</div></div>
+    return `<article class="card conn${c.email ? ' conn-stack' : ''}" data-conn="${esc(c.id)}"${c.email ? ` data-email="${esc(c.email)}"` : ''}${c.meetings ? ' data-meetings="1"' : ''}><div class="top-row"><div class="badge">${icon(ICON[kind] ?? 'plug', 21)}</div>
+        <div class="grow-1"><h3${c.email ? ` title="${esc(c.title)}"` : ''}>${c.email ? emailBreaks(c.email) : esc(c.title)}</h3><div class="sub">${esc(c.subtitle)}</div></div>
         <span class="pill ${PILL[c.state]}"><i></i>${esc(c.stateLabel || DEFAULT_LABEL[c.state])}</span></div>
       <dl class="kv">${c.rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>
       ${c.note ? `<div class="note">${icon('info', 16)}<span>${esc(c.note)}</span></div>` : ''}

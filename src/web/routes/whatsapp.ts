@@ -207,6 +207,8 @@ export interface PhoneRow {
   status: string | null;
   /** Approved groups on this phone. */
   groups: number;
+  /** WhatsApp's own name for the linked account (runtime/phones.ts accountNameOf): never a number; null when not known or not linked. */
+  accountName: string | null;
 }
 
 export interface PhoneRoutesDeps {

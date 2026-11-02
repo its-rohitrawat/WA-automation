@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { AuditEntry } from '../../src/control/errors.ts';
-import { workspacePhones } from '../../src/runtime/phones.ts';
+import { accountNameOf, workspacePhones } from '../../src/runtime/phones.ts';
 import type { Db, Sql } from '../../src/store/db.ts';
 import { getKv } from '../../src/store/kv.ts';
 import { manualClock } from '../../src/util/clock.ts';
@@ -29,10 +29,12 @@ afterEach(async () => {
 
 /**
  * A gateway that records the allow-list and auth it was built with; open once started. A link's gateway (one given a QR
- * callback) opens as if `scanAs` scanned it, or never opens with `linkHangs`. endLink answers as `endLink` says.
+ * callback) opens as if `scanAs` scanned it (WhatsApp's name for the account: `scanName`, else "x"), or never opens with
+ * `linkHangs`. endLink answers as `endLink` says.
  */
 interface FakeOptions {
   scanAs?: string;
+  scanName?: string;
   linkHangs?: boolean;
   endLink?: () => Promise<boolean>;
 }
@@ -57,7 +59,7 @@ function fakeBuild(o: FakeOptions = {}) {
         if (onQr && o.linkHangs) return set('connecting');
         if (!onQr || !o.scanAs) return set('open');
         // As WhatsApp does: the scanned number is saved, then the link opens.
-        auth.state.creds.me = { id: `${o.scanAs}:9@s.whatsapp.net`, name: 'x' };
+        auth.state.creds.me = { id: `${o.scanAs}:9@s.whatsapp.net`, name: o.scanName ?? 'x' };
         void auth.saveCreds().then(() => set('open'));
       },
       stop: async () => set('stopped'), listGroups: async () => [], failedCount: () => 0, droppedCount: () => 0,
@@ -179,8 +181,8 @@ describe('a workspace’s phones in its runtime', () => {
     await t.phones.routes.rename(2, 'Sales desk', OWNER);
     expect(t.phones.set.phones()[1]!.label).toBe('Sales desk');
     expect(t.phones.routes.list()).toEqual([
-      { id: 1, label: 'Phone 1', state: 'active', number: expect.stringMatching(/0001$/), status: 'stopped', groups: 1 },
-      { id: 2, label: 'Sales desk', state: 'active', number: null, status: 'not_linked', groups: 0 },
+      { id: 1, label: 'Phone 1', state: 'active', number: expect.stringMatching(/0001$/), status: 'stopped', groups: 1, accountName: 'x' },
+      { id: 2, label: 'Sales desk', state: 'active', number: null, status: 'not_linked', groups: 0, accountName: null },
     ]);
     expect(JSON.stringify(t.phones.routes.list())).not.toContain('919800000001');
     const r = await t.phones.routes.unlink(2, OWNER);
@@ -248,6 +250,48 @@ describe('a workspace’s phones in its runtime', () => {
     t.phones.setConfigs([{ ...SHARMA, phone: 2 }]);
     expect(t.built[0]!.allow.has(SHARMA.groupId)).toBe(false);
     expect(t.phones.set.phoneOf(SHARMA.groupId)).toBe(2);
+  });
+});
+
+describe('WhatsApp’s own name for each phone (owner follow-up, 2 Nov)', () => {
+  /** As Baileys does when WhatsApp says the account's name (a creds.update): a new `me` on the same creds. */
+  const rename = (auth: EncryptedAuth, me: { name?: string; notify?: string }) => {
+    const c = auth.state.creds;
+    c.me = { id: c.me!.id, ...me };
+  };
+
+  it('lists the name WhatsApp keeps for each linked phone, as it changes, and none once a phone is unlinked', async () => {
+    const t = await setup({ beforeOpen: phone2Linked });
+    const names = () => t.phones.routes.list().map((p) => p.accountName);
+    expect(names()).toEqual(['x', 'x']); // the name each saved link carries
+    rename(t.built[0]!.auth, { name: 'Rohit Rawat' });
+    rename(t.built[1]!.auth, { notify: 'Front desk team' }); // no profile name: the name WhatsApp shows others
+    expect(names()).toEqual(['Rohit Rawat', 'Front desk team']);
+    expect(JSON.stringify(t.phones.routes.list())).not.toMatch(/919800000001|919800000002/); // never the number
+    await t.phones.routes.unlink(2, OWNER);
+    expect(names()).toEqual(['Rohit Rawat', null]);
+  });
+
+  it('a phone just added has none; once linked, the name of the account that scanned it', async () => {
+    const t = await setup({ scanAs: '919800000022', scanName: 'Sales <b>team</b>' });
+    await t.phones.routes.add('Sales', OWNER);
+    expect(t.phones.routes.list()[1]!.accountName).toBeNull();
+    expect(await t.phones.driver('phone2')!.run(hooks, new AbortController().signal)).toMatchObject({ ok: true });
+    expect(t.phones.routes.list()[1]!.accountName).toBe('Sales <b>team</b>'); // text: the page escapes it
+  });
+
+  it('the name is untrusted text: one line, no control or invisible characters, at most 60 characters, never a number', () => {
+    expect(accountNameOf({ name: 'Rohit\u200B Ra\u202Ewat\u0007\n' })).toBe('Rohit Rawat');
+    expect(accountNameOf({ name: 'Front\u0000\u0085desk' })).toBe('Front desk');
+    expect(accountNameOf({ name: 'A'.repeat(70) })).toBe('A'.repeat(60));
+    expect(accountNameOf({ name: `${'A'.repeat(59)}😀😀` })).toBe(`${'A'.repeat(59)}😀`); // never half an emoji
+    expect(accountNameOf({ name: '  Desk  ', notify: 'Other' })).toBe('Desk');
+    expect(accountNameOf({ notify: 'Desk' })).toBe('Desk');
+    // Unknown: nothing, blank, Baileys' "~" (a pairing-code link before WhatsApp says the name), or a phone number.
+    for (const me of [undefined, {}, { name: '' }, { name: ' \u200B ' }, { name: '~' }, { name: '+91 98000 00002' }, { name: 'Desk 1234567' }, { name: 7 as unknown as string }]) {
+      expect(accountNameOf(me), JSON.stringify(me)).toBeNull();
+    }
+    expect(accountNameOf({ name: 'Desk 123456' })).toBe('Desk 123456'); // up to 6 digits is a name
   });
 });
 
