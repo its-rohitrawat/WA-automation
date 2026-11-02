@@ -139,6 +139,11 @@ export interface GatewayLike {
    * Delete chat, after the owner confirmed it.
    */
   chatDeleteSocket?(groupId: string): ChatDeleteSocket | null;
+  /**
+   * Whether this group's own phone is open: several reading phones (src/wa/phoneSet.ts, lane C). Without it, one
+   * gateway: its status says.
+   */
+  isOpenFor?(groupId: string): boolean;
 }
 
 export type Scheduler = (fn: () => void, ms: number) => { cancel(): void };

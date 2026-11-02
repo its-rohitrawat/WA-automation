@@ -469,7 +469,11 @@ export async function createApp(d: AppDeps): Promise<App> {
   if (fetchHistory && onHistory) {
     backfill = new HistoryBackfill({
       db: d.db, clock: d.clock, log: d.log, ingest: handleEvent, spendPaused: () => spend.isPaused(),
-      gateway: { status: () => d.gateway.status(), fetchHistory: fetchHistory.bind(d.gateway), onHistory: onHistory.bind(d.gateway) },
+      gateway: {
+        status: () => d.gateway.status(), fetchHistory: fetchHistory.bind(d.gateway), onHistory: onHistory.bind(d.gateway),
+        // Several reading phones (lane C): a group waits for its own phone only.
+        ...(d.gateway.isOpenFor ? { isOpenFor: d.gateway.isOpenFor.bind(d.gateway) } : {}),
+      },
       onFinished: ({ clientId, found, stopped }) => {
         if (stopped) return; // removed from the allow-list: reloadClients has already cancelled its work
         debouncer.ensure(clientId); // its held messages are reconciled now
