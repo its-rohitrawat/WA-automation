@@ -104,7 +104,7 @@ class FakeGateway implements GatewayLike {
   }
 }
 
-const cfg = (groupId: string, code: string, phone?: number): ClientConfig & { phone?: number } => ({
+const cfg = (groupId: string, code: string, phone?: 1 | 2 | 3 | 4 | 5): ClientConfig => ({
   groupId, name: code, code, phases: ['One'], emailDomains: [], meetingKeywords: [], ...(phone === undefined ? {} : { phone }),
 });
 
