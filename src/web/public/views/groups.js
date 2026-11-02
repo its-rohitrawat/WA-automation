@@ -9,7 +9,8 @@ import { readBulk, readGroups } from '../contract.js';
 import { $, $$, esc, gsap, icon, reduceMotion, toast } from '../dom.js';
 import { when } from '../format.js';
 import { closeDrawer, openDrawer, openDrawerElement } from './drawer.js';
-import { NAME_MAX, fieldProblem } from './rules.js';
+import { addWords, keywordAdder, keywordChips } from './priorityPanel.js';
+import { MAX_KEYWORDS, NAME_MAX, fieldProblem, matchable } from './rules.js';
 import { confirmDialog } from './ui.js';
 
 const BATCH = 60;
@@ -38,7 +39,7 @@ export function resetGroups() {
   known.clear();
 }
 
-addEventListener('beforeunload', (e) => {
+globalThis.addEventListener?.('beforeunload', (e) => {
   if (pending.size > 0) e.preventDefault();
 });
 
@@ -68,6 +69,16 @@ const clientPart = (name) => (name.split(/\s+[x×–-]\s+/i)[0]?.trim() || name.
 /** "iyer, dental website" → ['iyer', 'dental website']. @param {string} text */
 const list = (text) => text.split(',').map((s) => s.trim()).filter(Boolean);
 
+/** Adds typed meeting keywords to a client's list (pasting "a, b" adds both; repeats ignored). @param {string[]} words @param {string} text */
+const addMeetingWords = (words, text) => addWords(words, text, {
+  max: MAX_KEYWORDS,
+  full: `At most ${MAX_KEYWORDS} meeting keywords.`,
+  check: (k) => (k.length < 3 || !matchable(k) ? `The keyword "${k}" needs at least 3 letters.` : ''),
+});
+
+/** The meeting keywords as chips. @param {string[]} words */
+const meetingChips = (words) => keywordChips(words, (i) => `data-word-remove="${i}"`, { empty: 'No meeting keywords yet', label: 'Meeting keywords' });
+
 /** @param {string[]} a @param {string[]} b */
 const sameList = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
 
@@ -76,6 +87,18 @@ const selectable = (row) => !row.approved && !row.ignored && !isApproved(row);
 
 /** "1 group", "4 groups". @param {number} n */
 const groupsWord = (n) => `${n} group${n === 1 ? '' : 's'}`;
+
+/**
+ * The Select all box for `ticked` of `total` tickable groups: none (empty, with how many there are), some (the mixed
+ * state, "3 of 12 selected"), or all ("All 12 selected").
+ * @param {number} ticked @param {number} total
+ */
+export function selectAllState(ticked, total) {
+  const k = Math.max(0, Math.min(ticked, total));
+  if (total <= 0 || k === 0) return { checked: false, indeterminate: false, count: groupsWord(Math.max(0, total)) };
+  if (k === total) return { checked: true, indeterminate: false, count: total === 1 ? 'Selected' : `All ${total} selected` };
+  return { checked: false, indeterminate: true, count: `${k} of ${total} selected` };
+}
 
 /**
  * Mounts the screen. @param {import('./registry.js').ScreenCtx} ctx @param {string} toolbar the Clients/Manage groups tabs
@@ -265,11 +288,15 @@ export function mountGroups(ctx, toolbar) {
       <button class="btn btn-ghost btn-sm" type="button" data-unignore="${esc(row.key)}" aria-label="Show ${esc(row.name)} again"${bulkBusy ? ' disabled' : ''}>Show again</button></div>`;
   }
 
-  /** The Select all box over the untracked groups shown (every one, not only the rows drawn so far). */
+  /**
+   * The Select all row over the untracked groups shown (every one, not only the rows drawn so far), its box in the
+   * same column as the rows' boxes, and its count. drawSelection sets its state.
+   */
   function selectAll() {
     const n = tickable().length;
     if (n === 0) return '';
-    return `<label class="g-all"><input type="checkbox" id="g-all"${bulkBusy ? ' disabled' : ''}><span>Select all</span></label>`;
+    return `<div class="g-allbar"><label class="g-all"><span class="g-all-box"><input class="g-check" type="checkbox" id="g-all"${bulkBusy ? ' disabled' : ''}></span><span>Select all</span></label>
+      <span class="g-all-count" id="g-all-count" aria-live="polite">${esc(groupsWord(n))}</span></div>`;
   }
 
   /**
@@ -323,8 +350,7 @@ export function mountGroups(ctx, toolbar) {
       return;
     }
     if (phone.matches) {
-      const head = selectAll();
-      box.innerHTML = `${more}${head ? `<div class="g-phone-head">${head}</div>` : ''}<div class="card phone-list g-phone"></div>`;
+      box.innerHTML = `${more}<div class="card phone-list g-phone">${selectAll()}</div>`;
       batched($('.g-phone', box), all, phoneRow, q ? 'No group matches this search.' : 'No groups to show.', Math.max(0, ...before));
       drawSelection();
       return;
@@ -332,8 +358,8 @@ export function mountGroups(ctx, toolbar) {
     const on = all.filter(isApproved);
     const off = all.filter((r) => !isApproved(r));
     box.innerHTML = `${more}<div class="boards">
-      <section class="card board" data-zone="off" aria-label="Not tracked"><div class="card-head"><h3>All WhatsApp groups</h3><div class="row-gap">${selectAll()}<span class="mono muted-note">${off.length}</span></div></div><div class="g-board-rows"></div></section>
-      <section class="card board on" data-zone="on" aria-label="Tracked"><div class="card-head"><h3>Agent works with</h3><span class="mono muted-note">${on.length}</span></div><div class="g-board-rows"></div><div class="empty g-drop">Drop a group here to start tracking it.</div></section></div>`;
+      <section class="card board" data-zone="off" aria-label="Not tracked"><div class="card-head"><h3>All WhatsApp groups</h3><span class="g-head-count">${off.length}</span></div>${selectAll()}<div class="g-board-rows"></div></section>
+      <section class="card board on" data-zone="on" aria-label="Tracked"><div class="card-head"><h3>Agent works with</h3><span class="g-head-count">${on.length}</span></div><div class="g-board-rows"></div><div class="empty g-drop">Drop a group here to start tracking it.</div></section></div>`;
     const [offBox, onBox] = $$('.g-board-rows', box);
     batched(offBox, off, boardRow, q ? 'No untracked group matches this search.' : 'Every group is tracked.', before[0] ?? 0);
     batched(onBox, on, boardRow, q ? 'No tracked group matches this search.' : 'No group is tracked yet.', before[1] ?? 0);
@@ -350,9 +376,13 @@ export function mountGroups(ctx, toolbar) {
     }
     const all = /** @type {HTMLInputElement | null} */ (view.querySelector('#g-all'));
     if (all) {
-      const n = tickable().length;
-      all.checked = n > 0 && selected.size === n;
-      all.indeterminate = selected.size > 0 && selected.size < n;
+      const ok = tickable();
+      const st = selectAllState(ok.filter((r) => selected.has(r.key)).length, ok.length);
+      all.checked = st.checked;
+      all.indeterminate = st.indeterminate;
+      all.closest('.g-allbar')?.classList.toggle('on', st.checked || st.indeterminate);
+      const count = view.querySelector('#g-all-count');
+      if (count) count.textContent = st.count;
     }
     drawSelbar();
   }
@@ -485,6 +515,8 @@ export function mountGroups(ctx, toolbar) {
     const startName = (change && change.kind !== 'unapprove' ? change.name : client?.name || clientPart(row.name)).slice(0, NAME_MAX);
     const startCode = change?.kind === 'approve' ? change.code : client?.code ?? '';
     const startWords = change && change.kind !== 'unapprove' ? change.meetingKeywords : client?.meetingKeywords ?? [];
+    /** The keywords being edited (the chips): saved into the change with Add client or Keep changes. */
+    const words = [...startWords];
     const startDomains = change && change.kind !== 'unapprove' ? change.emailDomains : client?.emailDomains ?? [];
     const d = openDrawer(`<div class="dr-head"><div><span class="eyebrow">${editing ? 'Edit client' : 'Track this group'}</span><h2>${esc(row.name)}</h2></div>
         <button class="icon-btn" type="button" data-close aria-label="Close">${icon('close', 18)}</button></div>
@@ -498,9 +530,11 @@ export function mountGroups(ctx, toolbar) {
           ? `${editing ? 'This client' : 'This group was a client before, so it'} keeps its code: every task number starts with it, like <b class="mono">${esc(startCode)}-001</b>.`
           : `3–4 capital letters. Every task number for this client starts with it, like <b class="mono" id="g-eg">${esc(startCode || 'SHA')}-001</b>. It can't be changed once the client has tasks.`}</p>
         <details${startWords.length || startDomains.length ? ' open' : ''}><summary class="g-more-toggle">More: meeting matching</summary>
-          <label class="h4 g-label" for="g-words">Meeting keywords</label><div class="field"><input id="g-words" class="grow-1" autocomplete="off" placeholder="iyer, dental website" value="${esc(startWords.join(', '))}"></div>
+          <label class="h4 g-label" for="g-words">Meeting keywords</label>
+          ${keywordAdder({ input: 'id="g-words"', button: 'data-word-add', value: '', maxlength: 400, buttonLabel: 'Add meeting keyword', placeholder: 'dental website' })}
+          <div id="g-word-chips">${meetingChips(words)}</div><p class="field-err g-word-err" id="g-word-err" role="alert" hidden></p>
           <label class="h4 g-label" for="g-domains">Client email domains</label><div class="field"><input id="g-domains" class="grow-1" autocomplete="off" placeholder="iyerdental.in" value="${esc(startDomains.join(', '))}"></div>
-          <p class="muted-note">Separate several with commas. A meeting is matched to this client when its title has a keyword or a guest's email is on one of these domains.</p></details>
+          <p class="muted-note">Add keywords one at a time, with Add or Enter (pasting "iyer, dental website" adds both). Separate domains with commas. A meeting is matched to this client when its title has a keyword or a guest's email is on one of these domains.</p></details>
         ${editing ? '' : `<div class="note">${icon('info', 16)}<span>From now on the agent reads this group's new messages, and its earlier ones up to 7 days back, as far as WhatsApp provides.</span></div>`}
       </form>
       <div class="dr-foot"><button class="btn btn-ghost" type="button" data-close>Cancel</button><button class="btn btn-primary" type="submit" form="g-form">${editing ? 'Keep changes' : 'Add client'}</button></div>`);
@@ -541,10 +575,49 @@ export function mountGroups(ctx, toolbar) {
     });
     if (!startCode) void suggest();
 
+    // Meeting keywords: Add (or Enter) puts what is typed in as chips; each chip's button takes it out again.
+    const wordBox = /** @type {HTMLInputElement} */ ($('#g-words', d));
+    const drawWords = () => {
+      $('#g-word-chips', d).innerHTML = meetingChips(words);
+    };
+    const wordErr = $('#g-word-err', d);
+    /** The reason a keyword was not added, under the chips ('' hides it). @param {string} msg */
+    const showWordError = (msg) => {
+      wordErr.textContent = msg;
+      wordErr.hidden = !msg;
+    };
+    const addTypedWords = () => {
+      const problem = addMeetingWords(words, wordBox.value);
+      drawWords();
+      showWordError(problem);
+      if (!problem) wordBox.value = '';
+      return problem;
+    };
+    wordBox.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' || e.isComposing) return;
+      e.preventDefault(); // Enter adds the keyword; it does not submit the form
+      addTypedWords();
+    });
+    d.addEventListener('click', (e) => {
+      const t = /** @type {Element} */ (e.target);
+      if (t.closest('[data-word-add]')) {
+        addTypedWords();
+        wordBox.focus();
+        return;
+      }
+      const remove = /** @type {HTMLElement | null} */ (t.closest('[data-word-remove]'));
+      if (!remove) return;
+      words.splice(Number(remove.dataset.wordRemove), 1);
+      drawWords();
+      showWordError('');
+      wordBox.focus();
+    });
+
     $('#g-form', d).addEventListener('submit', (e) => {
       e.preventDefault();
       const n = name.value.trim();
-      const words = list(/** @type {HTMLInputElement} */ ($('#g-words', d)).value);
+      // A keyword typed and not added yet still counts, so nothing typed is lost.
+      if (wordBox.value.trim() && addTypedWords()) return void wordBox.focus();
       const domains = list(/** @type {HTMLInputElement} */ ($('#g-domains', d)).value).map((x) => x.toLowerCase());
       const problem = fieldProblem({ name: n, keywords: words, domains });
       if (problem) return showError(problem);
@@ -552,13 +625,13 @@ export function mountGroups(ctx, toolbar) {
         const before = client ? { name: client.name, words: client.meetingKeywords, domains: client.emailDomains } : null;
         // Unchanged fields drop the change (and an unsaved removal: the group stays tracked as it was).
         if (before && before.name === n && sameList(before.words, words) && sameList(before.domains, domains)) pending.delete(row.key);
-        else pending.set(row.key, { kind: 'edit', name: n, emailDomains: domains, meetingKeywords: words });
+        else pending.set(row.key, { kind: 'edit', name: n, emailDomains: domains, meetingKeywords: [...words] });
       } else {
         const c = code.value.trim();
         if (!CODE.test(c)) return showError('The code is 3 or 4 capital letters, like SHA.');
         const clash = locked ? undefined : codeOwner(c, row.key);
         if (clash) return showError(`${c} is already ${clash}. Choose another code.`);
-        pending.set(row.key, { kind: 'approve', name: n, code: c, emailDomains: domains, meetingKeywords: words });
+        pending.set(row.key, { kind: 'approve', name: n, code: c, emailDomains: domains, meetingKeywords: [...words] });
       }
       closeDrawer();
       draw();

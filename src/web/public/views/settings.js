@@ -6,6 +6,7 @@ import { $, esc, icon, toast } from '../dom.js';
 import { initials, when } from '../format.js';
 import { addTyped, draftOf, renderPriority, sameKeywords } from './priorityPanel.js';
 import { confirmDialog, errorText, failed, listen, loading, pill } from './ui.js';
+import { TASK_PRIORITIES } from './workLib.js';
 
 /** @typedef {import('./registry.js').ScreenCtx} ScreenCtx */
 /** @typedef {import('./priorityPanel.js').PriorityView} PriorityView */
@@ -49,20 +50,13 @@ export function mountSettings(ctx) {
   /** What is still in each level's box (kept when it could not be added, so nothing typed is lost). @type {Record<string, string>} */
   let typed = {};
   let busy = false;
-  /** Set while the screen is redrawn: the boxes removed then fire focusout, which must not add anything. */
-  let drawing = false;
   /** "Allow sending from the dashboard" (Open chat), or null when the agent did not say. */
   let sending = /** @type {boolean | null} */ (null);
 
   const draw = () => {
     if (!ctx.live() || !session) return;
     const section = pri && draft ? renderPriority(pri, draft, { dirty: !sameKeywords(draft, pri.keywords), problem, typed }) : '';
-    drawing = true;
-    try {
-      ctx.redraw(render(session, ($('#me-name')?.textContent ?? '').trim(), section, sending));
-    } finally {
-      drawing = false;
-    }
+    ctx.redraw(render(session, ($('#me-name')?.textContent ?? '').trim(), section, sending));
   };
   const load = async () => {
     try {
@@ -93,13 +87,32 @@ export function mountSettings(ctx) {
       busy = false;
     }
   };
-  /** Adds what is typed in a level's box; the box is emptied once it is in. @param {HTMLInputElement} el */
-  const addFrom = (el) => {
-    if (!pri || !draft || !el.value.trim()) return;
-    const level = el.dataset.kwInput ?? '';
+  /** The level's box, or null. @param {string} level */
+  const boxOf = (level) => /** @type {HTMLInputElement | null} */ (TASK_PRIORITIES.includes(level) ? $(`[data-kw-input="${level}"]`, ctx.view) : null);
+  /**
+   * Adds what is typed in a level's box (split at commas, repeats ignored); the box is emptied once it is in, and keeps
+   * the focus for the next keyword. A refusal keeps the text, with the reason under the lists.
+   * @param {string} level
+   */
+  const addFrom = (level) => {
+    const el = boxOf(level);
+    if (!pri || !draft || !el || !el.value.trim()) return;
     problem = addTyped(draft, level, el.value, pri.limits);
     typed = { ...typed, [level]: problem ? el.value : '' };
     draw();
+    boxOf(level)?.focus();
+  };
+  /** Adds what is still in every box, before a save. @returns {boolean} false when one was refused (shown, not saved) */
+  const addLeftovers = () => {
+    if (!pri || !draft) return false;
+    for (const level of TASK_PRIORITIES) {
+      const text = typed[level] ?? '';
+      if (!text.trim()) continue;
+      problem = addTyped(draft, level, text, pri.limits);
+      typed = { ...typed, [level]: problem ? text : '' };
+      if (problem) return false;
+    }
+    return true;
   };
 
   ctx.redraw(loading('Loading your settings…'));
@@ -107,19 +120,23 @@ export function mountSettings(ctx) {
   return listen(ctx.view, {
     keydown: (e) => {
       const el = /** @type {HTMLInputElement} */ (e.target);
-      const ke = /** @type {KeyboardEvent} */ (e);
-      if (!el.matches?.('[data-kw-input]') || (ke.key !== 'Enter' && ke.key !== ',')) return;
+      if (!el.matches?.('[data-kw-input]') || /** @type {KeyboardEvent} */ (e).key !== 'Enter' || /** @type {KeyboardEvent} */ (e).isComposing) return;
       e.preventDefault();
-      addFrom(el);
+      addFrom(el.dataset.kwInput ?? '');
     },
-    focusout: (e) => {
-      // A keyword typed and left in the box still counts, so Save never drops it.
+    input: (e) => {
+      // What is typed is kept (a redraw keeps it), and counts as a change: Save adds it first.
       const el = /** @type {HTMLInputElement} */ (e.target);
-      if (!drawing && el.matches?.('[data-kw-input]') && el.value.trim()) addFrom(el);
+      if (!el.matches?.('[data-kw-input]') || !pri || !draft) return;
+      typed = { ...typed, [el.dataset.kwInput ?? '']: el.value };
+      const save = /** @type {HTMLButtonElement | null} */ ($('[data-kw-save]', ctx.view));
+      if (save) save.disabled = sameKeywords(draft, pri.keywords) && !Object.values(typed).some((v) => v.trim() !== '');
     },
     click: async (e) => {
       const t = /** @type {Element} */ (e.target);
       if (t.closest('[data-retry]')) return void load();
+      const add = /** @type {HTMLElement | null} */ (t.closest('[data-kw-add]'));
+      if (add) return addFrom(add.dataset.kwAdd ?? '');
       const remove = /** @type {HTMLElement | null} */ (t.closest('[data-kw-remove]'));
       if (remove && draft) {
         const list = draft[/** @type {keyof Keywords} */ (remove.dataset.kwRemove ?? '')];
@@ -134,6 +151,7 @@ export function mountSettings(ctx) {
         return draw();
       }
       if (t.closest('[data-kw-save]') && draft) {
+        if (!addLeftovers()) return draw();
         if (await savePriority({ key: 'priorityKeywords', value: draft })) {
           draft = draftOf(/** @type {PriorityView} */ (pri).keywords);
           problem = null;
