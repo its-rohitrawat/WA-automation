@@ -173,7 +173,16 @@ describe('the one send from the founder’s WhatsApp (Open chat, 29 Oct 2026)', 
 
   it('only the dashboard’s chat route sends, and only the gateways hand out the socket', () => {
     expect(sources().filter((s) => /\bsendGroupText\(/.test(s.text)).map((s) => s.file).sort()).toEqual(['wa/groupSend.ts', 'web/routes/chat.ts']);
-    expect(sources().filter((s) => /\bgroupSocket\(/.test(s.text)).map((s) => s.file).sort()).toEqual(['runtime/customerRuntime.ts', 'wa/gateway.ts', 'wa/switchableGateway.ts']);
+    expect(sources().filter((s) => /\bgroupSocket\(/.test(s.text)).map((s) => s.file).sort()).toEqual(['runtime/customerRuntime.ts', 'wa/gateway.ts', 'wa/phoneSet.ts', 'wa/switchableGateway.ts']);
+  });
+
+  it('the phone set only passes on the group’s own phone’s socket: it makes none and sends nothing (lane C)', () => {
+    const text = readFileSync(join(SRC, 'wa', 'phoneSet.ts'), 'utf8');
+    expect(text).not.toMatch(/asGroupSendSocket|sendMessage|relayMessage|\bsock\b/);
+    // Exactly one place gives a socket: the approved group's own phone's gateway, or nothing.
+    const gives = text.match(/^.*\.groupSocket\?\.\(.*$/gm) ?? [];
+    expect(gives.map((l) => l.trim())).toEqual(['return this.#memberFor(groupId)?.gateway.groupSocket?.(groupId) ?? null;']);
+    expect(text).toContain('#memberFor(groupId: string): Member | undefined {\n    const id = this.#phoneOf.get(groupId);'.replace(/\n/g, text.includes('\r\n') ? '\r\n' : '\n'));
   });
 
   it('the chat route checks the setting, the client and the limits, and claims the row before it sends', () => {
