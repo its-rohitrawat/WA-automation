@@ -171,6 +171,10 @@ describe('router', () => {
       showScreens({ role: 'founder', assistant: true });
       expect(parsePath('/dashboard/assistant')).toEqual({ screen: 'assistant', sub: null });
       expect(pathFor('assistant')).toBe('/dashboard/assistant');
+      // A stored chat's address (piece 2): its id only, nothing else.
+      expect(parsePath('/dashboard/assistant/42')).toEqual({ screen: 'assistant', sub: '42' });
+      expect(parsePath(pathFor('assistant', '42'))).toEqual({ screen: 'assistant', sub: '42' });
+      for (const bad of ['0', '-1', 'x', '4e2', '1234567890123456', '__proto__']) expect(parsePath(`/dashboard/assistant/${bad}`), bad).toEqual({ screen: 'assistant', sub: null });
       showScreens({ role: 'founder' });
       expect(parsePath('/dashboard/assistant')).toEqual({ screen: 'overview', sub: null });
     } finally {

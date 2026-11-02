@@ -1,0 +1,64 @@
+import { describe, expect, it } from 'vitest';
+// Browser module; its JSDoc types are checked by tsconfig.web.json, so the import is untyped here.
+// @ts-expect-error -- browser module (see above)
+import { chatGroup, entryHtml, entryOf, listHtml } from '../../src/web/public/views/assistant.js';
+
+// The assistant's page (November release, changes 1 and 8): the chat list's groups, and that every word from the agent
+// (titles, questions, answers, cards, links) reaches the page escaped.
+
+const NOW = new Date('2026-11-02T10:00:00.000Z'); // 15:30 IST, Monday 2 November
+
+describe('the chat list', () => {
+  it('groups chats by when they were last used, in India time: Today, Yesterday, Previous 7 days, Older', () => {
+    expect(chatGroup('2026-11-02T00:00:00.000Z', NOW)).toBe('Today'); // 05:30 IST on the 2nd
+    expect(chatGroup('2026-11-01T19:00:00.000Z', NOW)).toBe('Today'); // 00:30 IST on the 2nd
+    expect(chatGroup('2026-11-01T18:00:00.000Z', NOW)).toBe('Yesterday'); // 23:30 IST on the 1st
+    expect(chatGroup('2026-10-27T10:00:00.000Z', NOW)).toBe('Previous 7 days');
+    expect(chatGroup('2026-10-26T10:00:00.000Z', NOW)).toBe('Previous 7 days'); // 7 days before
+    expect(chatGroup('2026-10-25T10:00:00.000Z', NOW)).toBe('Older'); // 8 days before
+    expect(chatGroup('', NOW)).toBe('Older');
+    expect(chatGroup('not a date', NOW)).toBe('Older');
+  });
+
+  it('escapes every title, marks the open chat, and says so when there is none', () => {
+    const html: string = listHtml([
+      { id: 7, title: '<img src=x onerror=alert(1)>', updatedAt: new Date().toISOString(), running: true },
+      { id: 3, title: 'Plain "quoted"', updatedAt: '2020-01-01T00:00:00.000Z', running: false },
+    ], 7);
+    expect(html).not.toContain('<img');
+    expect(html).toContain('&lt;img src=x onerror=alert(1)&gt;');
+    expect(html).toContain('aria-label="Rename &lt;img src=x onerror=alert(1)&gt;"');
+    expect(html).toContain('href="/dashboard/assistant/7" data-chat="7" aria-current="page"');
+    expect(html).toContain('class="asst-live"');
+    expect(html).toContain('>Older<');
+    expect(listHtml([], null)).toContain('Your chats show here.');
+  });
+});
+
+describe('a stored chat on the page', () => {
+  it('draws a question and an answer as escaped text, with **bold** the only mark kept', () => {
+    expect(entryHtml(entryOf({ role: 'user', body: '<script>x</script>' }), 0)).toBe('<div class="asst-msg me">&lt;script&gt;x&lt;/script&gt;</div>');
+    const answer: string = entryHtml(entryOf({ role: 'assistant', body: 'Hi <b>there</b> **11 open**', status: 'done', costUsd: 0.02, note: null, cards: [], links: [] }), 1);
+    expect(answer).toContain('Hi &lt;b&gt;there&lt;/b&gt; <b>11 open</b>');
+    expect(answer).toContain('≈ $0.02');
+  });
+
+  it('a card is live only while this session can confirm it; confirmed, cancelled and expired cards have no buttons', () => {
+    const card = (c: object) => entryHtml(entryOf({ role: 'assistant', body: 'x', status: 'done', cards: [{ id: 'c1', title: '<i>T</i>', lines: ['<u>l</u>'], expiresAt: '2026-11-02T10:10:00.000Z', state: 'waiting', ...c }], links: [] }), 1);
+    expect(card({ live: true })).toContain('data-confirm');
+    expect(card({ live: true })).toContain('&lt;i&gt;T&lt;/i&gt;');
+    expect(card({ live: true })).toContain('<li>&lt;u&gt;l&lt;/u&gt;</li>');
+    expect(card({ live: false })).toContain('Not confirmed. Nothing changed.');
+    expect(card({ state: 'confirmed', said: '<b>ACM-006</b> added.' })).toContain('&lt;b&gt;ACM-006&lt;/b&gt; added.');
+    expect(card({ state: 'cancelled' })).toContain('Cancelled. Nothing changed.');
+    for (const c of [{ live: false }, { state: 'confirmed' }, { state: 'cancelled' }]) expect(card(c)).not.toContain('data-confirm');
+  });
+
+  it('a screen link keeps only a plain query string; a running answer shows its dots; an interrupted one says so', () => {
+    const links = entryHtml(entryOf({ role: 'assistant', body: 'x', status: 'done', links: [{ screen: 'tasks', search: '?status=overdue', label: '<b>tasks</b>' }, { screen: 'tasks', search: 'javascript:alert(1)', label: 'x' }], cards: [] }), 2);
+    expect(links).toContain('Open &lt;b&gt;tasks&lt;/b&gt;');
+    expect(entryOf({ role: 'assistant', body: '', links: [{ screen: 'tasks', search: '"><script>', label: 'x' }] }).links[0].search).toBe('');
+    expect(entryHtml(entryOf({ role: 'assistant', body: 'Part one', status: 'running' }), 3)).toContain('class="asst-step"');
+    expect(entryHtml(entryOf({ role: 'assistant', body: 'Part one', status: 'interrupted' }), 3)).toContain('cut off when the agent restarted');
+  });
+});

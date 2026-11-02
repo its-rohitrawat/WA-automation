@@ -84,16 +84,21 @@ export function showScreens(s) {
   for (const [group, items] of navFor(s)) for (const [id, label, ic] of items) SCREENS.set(id, { group, label, icon: ic });
 }
 
+/** A stored chat's id in the assistant's address (/dashboard/assistant/<id>): a positive whole number. */
+const CHAT_ID = /^[1-9]\d{0,14}$/;
+
 /**
- * The screen (and optional sub-screen) an address asks for; overview for /dashboard and anything unknown.
+ * The screen (and optional sub-screen) an address asks for; overview for /dashboard and anything unknown. The sub is
+ * 'groups' for /dashboard/clients/groups, and a chat's id for /dashboard/assistant/<id>.
  * @param {string} pathname
  * @returns {{ screen: string, sub: string | null }}
  */
 export function parsePath(pathname) {
   const parts = pathname.replace(/^\/dashboard\/?/, '').split('/').filter(Boolean);
   const screen = parts[0] && SCREENS.has(parts[0]) ? parts[0] : 'overview';
-  const sub = screen === 'clients' && parts[1] === 'groups' ? 'groups' : null;
-  return { screen, sub };
+  if (screen === 'clients') return { screen, sub: parts[1] === 'groups' ? 'groups' : null };
+  if (screen === 'assistant') return { screen, sub: CHAT_ID.test(parts[1] ?? '') ? /** @type {string} */ (parts[1]) : null };
+  return { screen, sub: null };
 }
 
 /** @param {string} screen @param {string | null} [sub] */

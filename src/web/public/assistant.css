@@ -1,6 +1,7 @@
-/* The AI assistant (views/assistant.js): its page, and the "Ask the assistant" button at the foot of the side menu. The
-   theme's tokens only, so it follows light and dark; the conversation and the composer keep to a readable column on wide
-   screens; motion only without reduced motion. */
+/* The AI assistant (views/assistant.js): its page (the chat list, the conversation and the composer), and the "Ask the
+   assistant" button at the foot of the side menu. The theme's tokens only, so it follows light and dark; the
+   conversation and the composer keep to a readable column on wide screens; on a phone the chat list is a drawer; motion
+   only without reduced motion. */
 
 /* The side menu's button: above Collapse; only its icon when the menu is collapsed. */
 .side-ask { margin-top: 10px; display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 12px;
@@ -15,11 +16,32 @@
 
 /* The page: the conversation fills the height under the top bar, and scrolls on its own. */
 .view[data-screen="assistant"] { max-width: none; padding-bottom: 0; }
-.asst-page { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; height: calc(100dvh - 93px); min-height: 420px; }
+.asst-page { position: relative; display: grid; grid-template-columns: 264px minmax(0, 1fr); gap: 16px; height: calc(100dvh - 93px); min-height: 420px; }
+
+/* The chat list. */
+.asst-side { display: flex; flex-direction: column; min-height: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 18px; overflow: hidden; }
+.asst-side-head { display: flex; gap: 8px; align-items: center; padding: 12px; border-bottom: 1px solid var(--line); }
+.asst-newchat { flex: 1; display: inline-flex; gap: 8px; align-items: center; justify-content: center; }
+.asst-side-close, .asst-drawer-btn, .asst-scrim { display: none; }
+.asst-chats { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 8px 16px; }
+.asst-chats-group { display: grid; gap: 2px; margin-top: 10px; }
+.asst-chats-group .eyebrow { padding: 4px 10px 6px; }
+.asst-chats-empty { margin: 14px 10px; color: var(--muted); font-size: 13px; }
+.asst-chat { display: flex; align-items: center; gap: 2px; border-radius: 10px; }
+.asst-chat a { flex: 1; min-width: 0; display: flex; gap: 8px; align-items: center; padding: 8px 10px; border-radius: 10px; color: var(--text); font-size: 13.5px; text-decoration: none; }
+.asst-chat a span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.asst-chat.on, .asst-chat.on a { background: rgba(37,211,102,.12); }
+.asst-chat a:focus-visible, .asst-row-btn:focus-visible, .asst-rename:focus-visible { outline: 2px solid var(--link); outline-offset: -2px; }
+.asst-row-btn { flex: none; width: 30px; height: 30px; display: grid; place-items: center; border: 0; border-radius: 8px; background: none; color: var(--faint); cursor: pointer; opacity: 0; }
+.asst-chat:hover .asst-row-btn, .asst-chat:focus-within .asst-row-btn, .asst-chat.on .asst-row-btn { opacity: 1; }
+.asst-row-btn:hover { color: var(--text); background: var(--panel-2); }
+.asst-live { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--green); }
+.asst-rename { flex: 1; min-width: 0; height: 34px; padding: 0 10px; border-radius: 10px; border: 1px solid var(--line-2); background: var(--panel-2); color: var(--text); font: 400 13.5px var(--font); }
+@media (hover: none) { .asst-row-btn { opacity: 1; } }
 .asst-main { display: flex; flex-direction: column; min-height: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 18px; overflow: hidden; }
-.asst-bar { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 14px 20px; border-bottom: 1px solid var(--line); }
-.asst-title { margin: 6px 0 0; font-size: 17px; letter-spacing: -0.02em; }
-.asst-bar .btn { display: inline-flex; gap: 6px; align-items: center; }
+.asst-bar { display: flex; align-items: center; gap: 12px; padding: 14px 20px; border-bottom: 1px solid var(--line); }
+.asst-bar-title { min-width: 0; }
+.asst-title { margin: 6px 0 0; font-size: 17px; letter-spacing: -0.02em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .asst-log { flex: 1; min-height: 0; overflow-y: auto; padding: 20px; }
 .asst-log:focus-visible { outline: 2px solid var(--link); outline-offset: -2px; }
 .asst-col { max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
@@ -59,15 +81,27 @@
 .asst-foot { margin: 6px auto 0; color: var(--faint); font-size: 11.5px; }
 
 @media (max-width: 960px) {
-  .asst-page { height: calc(100dvh - 82px); }
+  .asst-page { height: calc(100dvh - 82px); grid-template-columns: minmax(0, 1fr); gap: 0; }
   .view[data-screen="assistant"] { padding-left: 0; padding-right: 0; padding-top: 0; }
   .asst-main { border-radius: 0; border-left: 0; border-right: 0; }
   .asst-log { padding: 16px; }
   .asst-dock { padding: 10px 12px max(10px, env(safe-area-inset-bottom)); }
+  /* The chat list as a drawer over the conversation. */
+  .asst-drawer-btn, .asst-side-close { display: grid; }
+  .asst-side { position: absolute; z-index: 6; top: 0; bottom: 0; left: 0; width: min(300px, 86vw); border-radius: 0 18px 18px 0;
+    border-left: 0; visibility: hidden; transform: translateX(-100%); box-shadow: 30px 0 60px -20px rgba(0,0,0,.5); }
+  .asst-page.side-open .asst-side { visibility: visible; transform: none; }
+  .asst-scrim { position: absolute; z-index: 5; inset: 0; background: rgba(0,0,0,.35); }
+  .asst-page.side-open .asst-scrim { display: block; }
+  .asst-scrim[hidden] { display: none !important; }
 }
 
 @media (prefers-reduced-motion: no-preference) {
   .side-ask { transition: background-color 160ms ease, border-color 160ms ease, transform 140ms var(--ease-out); }
+  .asst-row-btn { transition: opacity 120ms ease, background-color 120ms ease; }
+  .asst-side { transition: transform 260ms var(--ease-drawer), visibility 0s linear 260ms; }
+  .asst-page.side-open .asst-side { transition: transform 260ms var(--ease-drawer), visibility 0s; }
+  .asst-live { animation: asst-dot 1.2s ease-in-out infinite; }
   .side-ask:active { transform: scale(0.98); }
   .asst-step i { animation: asst-dot 1.2s ease-in-out infinite; }
   .asst-step i:nth-child(2) { animation-delay: .15s; } .asst-step i:nth-child(3) { animation-delay: .3s; }

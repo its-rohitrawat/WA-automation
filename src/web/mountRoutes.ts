@@ -215,8 +215,9 @@ export function mountAgentRoutes(m: DashboardMount, d: AgentRoutesDeps): void {
     send(ctx.res, await actionHandler(ctx.params.name!, actions, ownerOf(ctx, s)));
   });
 
-  // The AI assistant: answers, opens screens, and drafts changes that run only on the owner's Confirm. A session that
-  // ends takes its chat and its waiting cards with it.
+  // The AI assistant: answers, points to screens, and drafts changes that run only on the owner's Confirm. Its chats are
+  // the workspace's, kept in this runtime's own database (src/store/assistantChats.ts); a session that ends takes only
+  // its waiting cards with it.
   if (d.assistant) {
     const pending = new PendingActions(d.clock);
     const assistant = new Assistant({

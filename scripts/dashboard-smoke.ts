@@ -253,6 +253,49 @@ async function main() {
         await p.waitForURL('**/dashboard/tasks?status=overdue', { timeout: WAIT_MS }).catch(() => fail(where, `the link did not open the overdue tasks: ${p.url()}`));
         if ((await p.locator('.asst-page').count()) !== 0) fail(where, 'the assistant page stayed behind the next screen');
 
+        // The chats kept for the workspace (piece 2): back on the page, the list holds this round's chats; open one,
+        // rename it, and delete it after the confirm. On a phone the list is a drawer.
+        where = `assistant chats ${tag}`;
+        if (vp.name === 'phone') {
+          await p.locator('#mnav').click();
+          await p.waitForTimeout(400);
+        }
+        await p.locator('#side-ask').click();
+        await p.waitForURL('**/dashboard/assistant', { timeout: WAIT_MS });
+        const openList = async () => {
+          if (vp.name !== 'phone') return;
+          await p.locator('.asst-page [data-drawer]').click();
+          await p.locator('.asst-page.side-open .asst-side').waitFor({ timeout: 5_000 }).catch(() => fail(where, 'the chat drawer did not open'));
+          await p.waitForTimeout(350);
+        };
+        await openList();
+        await p.locator('.asst-chats .asst-chat').first().waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'no past chats listed'));
+        if ((await p.locator('.asst-chats .asst-chats-group .eyebrow', { hasText: 'Today' }).count()) !== 1) fail(where, 'the chats are not grouped under Today');
+        await p.screenshot({ path: join(OUT, `assistant-list-${tag}.png`) });
+        const row = p.locator('.asst-chats .asst-chat').first();
+        await row.locator('a[data-chat]').click();
+        await p.waitForURL(/\/dashboard\/assistant\/\d+$/, { timeout: WAIT_MS }).catch(() => fail(where, `the chat did not open: ${p.url()}`));
+        await p.locator('.asst-page .asst-msg.me').first().waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'the past chat has no messages'));
+        if (vp.name === 'phone' && (await p.locator('.asst-page.side-open').count()) !== 0) fail(where, 'the drawer stayed open after picking a chat');
+        await openList();
+        const opened = p.locator('.asst-chats .asst-chat.on');
+        await opened.locator('[data-rename]').click();
+        await p.locator('.asst-chats .asst-rename').fill('Renamed in the smoke test');
+        await p.keyboard.press('Enter');
+        await p.locator('.asst-chats .asst-chat', { hasText: 'Renamed in the smoke test' }).waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'the rename did not show'));
+        if ((await p.locator('.asst-page .asst-title', { hasText: 'Renamed in the smoke test' }).count()) !== 1) fail(where, 'the open chat\'s title did not follow the rename');
+        const before = await p.locator('.asst-chats .asst-chat').count();
+        await p.locator('.asst-chats .asst-chat', { hasText: 'Renamed in the smoke test' }).locator('[data-delete]').click();
+        await p.locator('.modal [data-yes]').click();
+        await p.waitForURL('**/dashboard/assistant', { timeout: WAIT_MS }).catch(() => fail(where, `deleting the open chat did not start a new one: ${p.url()}`));
+        await openList();
+        await p.waitForTimeout(300);
+        if ((await p.locator('.asst-chats .asst-chat', { hasText: 'Renamed in the smoke test' }).count()) !== 0) fail(where, 'the deleted chat is still listed');
+        if ((await p.locator('.asst-chats .asst-chat').count()) !== before - 1) fail(where, 'the delete removed more or less than one chat');
+        const chatsSideways = await p.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+        if (chatsSideways > 1) fail(where, `scrolls sideways by ${chatsSideways}px`);
+        if (vp.name === 'phone') await p.keyboard.press('Escape');
+
         where = `connections ${tag}`;
         if (vp.name === 'phone') {
           await p.locator('#mnav').click();
