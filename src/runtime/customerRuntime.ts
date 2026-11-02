@@ -31,7 +31,8 @@ import { founderMailer, oauthGmailTransport } from '../platform/gmailSender.ts';
 import { briefingSettings, spareDriver, spareLinked } from '../report/dashboardReport.ts';
 import { LiveReport } from '../report/liveReport.ts';
 import { openMorningReport, senderOpener } from '../report/start.ts';
-import { buildGoogle, founderGateway, googleCredentials, planStartup, WHATSAPP_NOT_LINKED_EXIT } from '../setupMode.ts';
+import { buildGoogle, googleCredentials, planStartup, WHATSAPP_NOT_LINKED_EXIT } from '../setupMode.ts';
+import { workspacePhones, type WorkspacePhones } from './phones.ts';
 import type { GlobalSpend } from '../spend/globalSpend.ts';
 import { pricesFromEnv } from '../spend/pricing.ts';
 import type { Prices } from '../spend/pricing.ts';
@@ -49,7 +50,7 @@ import { buildVoiceDeps } from '../voiceDeps.ts';
 import { AllowList } from '../wa/allowlist.ts';
 import { FounderNumberWatch, openPhoneSession, readFounderNumber, sessionHomeOf, useEncryptedAuthState } from '../wa/authState.ts';
 import { baileysSocketFactory, WhatsAppGateway, type SocketFactory } from '../wa/gateway.ts';
-import { founderLinkDriver, LinkSessions } from '../wa/linkSession.ts';
+import { LinkSessions } from '../wa/linkSession.ts';
 import { customerSpare } from './customerSpare.ts';
 import { baileysSenderSocketFactory, linkedNumber, type SenderSocketFactory } from '../wa/senderGateway.ts';
 import { AuditLog, type AuditInput } from '../web/audit.ts';
@@ -219,9 +220,12 @@ export async function buildCustomerRuntime(
   const env = sttEnvFor(d.env, t.founder);
   let sessionDb: Db | undefined;
   let senderDb: Db | undefined;
+  /** The workspace's reading phones (lane C): phones 2 to 5's sessions are closed with the runtime's own. */
+  let phones: WorkspacePhones | undefined;
   /** Spare-number session files a dashboard link opened and handed to a new sender: closed after app.stop(). */
   const adoptedDbs: Db[] = [];
   const closeOwn = async () => {
+    await phones?.close();
     // Each close waits for its database's queue to empty; one that fails never stops the next (best effort).
     for (const [name, x] of [...adoptedDbs.map((a) => ['adopted', a] as const), ['session', sessionDb] as const, ['sender', senderDb] as const]) {
       if (!x) continue;
@@ -298,8 +302,11 @@ export async function buildCustomerRuntime(
     let report: AppReportDeps | undefined;
     // The founder reader's number at each check, so a relink from the dashboard is followed (falls back to the number
     // linked at start when the file cannot be read: refusing that one too is the safe side).
-    const founderNumber = () =>
-      (!t.founder ? undefined : founderWatch ? founderWatch.current() : readFounderNumber(sessionDbPath(env.DATA_DIR), key)) ?? linkedNumber(auth);
+    // With several reading phones (lane C, change 7): every one's number; the spare refuses each of them.
+    const founderNumber = (): string[] => {
+      const one = (!t.founder ? undefined : founderWatch ? founderWatch.current() : readFounderNumber(sessionDbPath(env.DATA_DIR), key)) ?? linkedNumber(auth);
+      return [...new Set([...(one === undefined ? [] : [one]), ...(phones?.numbers() ?? [])])];
+    };
     const senderFactory = d.waSockets?.sender ?? baileysSenderSocketFactory(silentLogger());
     // With the dashboard: the briefing's settings are changed on its Automations screen (tracker.db; .env gives the
     // defaults), and LiveReport opens the spare number's sender only once it is on with a number (tested). Off: as before.
@@ -343,14 +350,23 @@ export async function buildCustomerRuntime(
     const sentText = (waId: string, groupId: string) => sentTextFor(outboxDb, waId, groupId);
     // The WhatsApp sockets: Baileys; a test gives fakes (RuntimeDeps.waSockets), so no test ever reaches WhatsApp.
     const gatewaySockets = () => d.waSockets?.gateway ?? baileysSocketFactory(silentLogger(), sentText);
-    // The founder's gateway inside its holder, so a relink from the dashboard replaces it in place. None in setup mode.
-    const gateway = founderGateway({
-      linked: plan.whatsapp === 'linked',
-      build: () => new WhatsAppGateway({
-        allow, factory: gatewaySockets(), auth: auth.state, saveCreds: auth.saveCreds,
+    // The workspace's reading phones (lane C, change 7; src/runtime/phones.ts): phone 1 is the session and auth opened
+    // above, so it starts exactly as before (no relink); phones 2 to 5 come from its phone list. Each phone's gateway sits
+    // in its own holder, so a relink from the dashboard replaces it in place; none in setup mode. The app gets the set.
+    phones = await workspacePhones({
+      db, sessions, key, clock: systemClock, log, configs,
+      phone1: { sessionDb, auth, linked: plan.whatsapp === 'linked' },
+      buildGateway: (phoneAllow, phoneAuth, onQr) => new WhatsAppGateway({
+        allow: phoneAllow, factory: gatewaySockets(), auth: phoneAuth.state, saveCreds: phoneAuth.saveCreds, ...(onQr ? { onQr } : {}),
+        // A customer's gateway runs its handlers and timers guarded (S4.6 B): a throw restarts that customer alone.
         ...(!t.founder && t.crashed ? { tenantId: t.id, report: (_id: string, e: unknown) => t.crashed!(e) } : {}),
       }),
+      // Phone changes are audited in their own transaction, in the dashboard's audit log (made below; none without it).
+      audit: async (q, e) => {
+        if (auditLog) await auditLog.record(e, q);
+      },
     });
+    const gateway = phones.set;
     // One start time for every wait that counts from the service start: the reconciler's wait for a file, the
     // processor's 24 hours of waits for Claude, and Health's long-wait count (amendments 10f, 12a, 15a, 15f).
     const startedAt = systemClock.now();
@@ -418,6 +434,7 @@ export async function buildCustomerRuntime(
       env.GROUPS_FILE,
       async (next) => {
         await app.reloadClients(next);
+        phones!.setConfigs(next); // each phone reads the groups approved on it
         currentConfigs = next;
         log.info({ groups: next.length }, 'allow-list reloaded');
       },
@@ -491,16 +508,11 @@ export async function buildCustomerRuntime(
         linking: (on) => (spareLinking = on),
         log,
       }) : undefined;
-      const founder = founderLinkDriver({
-        sessionDb, trackerDb: db, key, switchable: gateway, log,
-        buildGateway: (a, onQr) => new WhatsAppGateway({
-          allow, factory: gatewaySockets(), auth: a.state, saveCreds: a.saveCreds, ...(onQr ? { onQr } : {}),
-          // A customer's gateway runs its handlers and timers guarded (S4.6 B): a throw restarts that customer alone.
-          ...(!t.founder && t.crashed ? { tenantId: t.id, report: (_id: string, e: unknown) => t.crashed!(e) } : {}),
-        }),
-      });
+      // Each reading phone's link (src/runtime/phones.ts): phone 1's relinks it in place as before; phones 2 to 5 only
+      // once added. The spare's as before.
+      const readingPhones = phones!;
       links = new LinkSessions({
-        drivers: { ...(founder ? { founder } : {}), ...(spare ? { spare } : {}) }, log,
+        drivers: (target) => (target === 'spare' ? spare : readingPhones.driver(target)), log,
         audit: (event, actor) => auditOutside(audit)({ actor, event, kind: 'connection', detail: '' }),
       });
       // The 30-day uptime strip: a row whenever up changes, and the daily retention of both logs.
@@ -553,6 +565,7 @@ export async function buildCustomerRuntime(
               ? fileGroupsStore(env.GROUPS_FILE, { db: trackerStore })
               : dbGroupsStore({ db: trackerStore, log, onChange: async (next) => {
                 await app.reloadClients(next);
+                readingPhones.setConfigs(next); // each phone reads the groups approved on it
                 currentConfigs = next;
               } }),
             groupKey: makeGroupKey(deriveSubkey(key, GROUP_KEY_INFO)), log, clock: systemClock,
@@ -562,7 +575,9 @@ export async function buildCustomerRuntime(
           // while the owner has it switched on in Settings.
           chat: {
             db: trackerStore, configs: () => currentConfigs, sendingOn: () => store.get().dashboardSend,
-            connected: () => gateway.status().state === 'open', groupSocket: (groupId) => gateway.groupSocket(groupId),
+            // Per group: its own phone is open (a group on a phone that is down is not connected, even with another up).
+            connected: (groupId?: string) => readingPhones.connected(groupId),
+            groupSocket: (groupId) => gateway.groupSocket(groupId),
             groupMembers: (groupId) => gateway.groupMembers(groupId),
             directory, log, clock: systemClock,
           },
@@ -618,7 +633,7 @@ export async function buildCustomerRuntime(
       agentRoutes,
       platform: platformDb !== undefined && agentRoutes !== undefined,
       facts: () => ({
-        whatsappLinked: gateway.status().state !== 'not_linked',
+        whatsappLinked: phones!.set.phones().some((p) => p.status.state !== 'not_linked'),
         spareLinked: ownSpare?.linked() ?? false, // a customer's own spare (the founder's is the briefing's)
         driveConnected: google.connected(),
         groupsApproved: currentConfigs.length,

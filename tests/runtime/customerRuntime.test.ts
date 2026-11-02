@@ -13,6 +13,10 @@ import type { Db } from '../../src/store/db.ts';
 import { silentLogger } from '../../src/util/logger.ts';
 import { istDate } from '../../src/util/time.ts';
 import { onSqlite, seededDb, SHARMA } from '../helpers/db.ts';
+import { getKv } from '../../src/store/kv.ts';
+import { openPhoneSession, phoneNumberIn, sessionHomeOf, useEncryptedAuthState } from '../../src/wa/authState.ts';
+import { PHONES_KV_KEY } from '../../src/wa/phoneList.ts';
+import { FakeSocket } from '../helpers/fakeSocket.ts';
 import { openTestPlatformDb } from '../helpers/pg.ts';
 
 // One customer's runtime (S4.4), with no network: the dashboard is on and nothing is linked (setup mode), so no
@@ -73,6 +77,37 @@ describe('startFounderRuntime', () => {
     await expect(buildCustomerRuntime({ id: FOUNDER, founder: true }, { ...shared, db, configs: [{ ...SHARMA, code: 'NEW' }] }))
       .rejects.toThrow(/Client codes are permanent/);
     expect(await db.all('SELECT code FROM clients ORDER BY id')).toEqual([{ code: 'SHA' }, { code: 'MEH' }]);
+  });
+});
+
+describe('several phones (lane C, change 7): with one phone the founder starts exactly as today', () => {
+  it('phone 1 alone, on its saved session: one socket, linked, no relink, nothing written for phones (this engine)', async () => {
+    const db = await seededDb();
+    opened.push(db);
+    // The engine under test: on SQLite data/session.db; under test:pg the founder's wa_auth rows.
+    const shared = fakeShared(onSqlite ? {} : {
+      DB_ENGINE: 'postgres', DATABASE_URL: 'postgres://wa_app:placeholder@127.0.0.1:5432/wa_agent',
+      DATABASE_PLATFORM_URL: 'postgres://wa_platform:placeholder@127.0.0.1:5432/wa_agent',
+    });
+    const home = sessionHomeOf(shared.env, db);
+    const saved = await openPhoneSession(home, 'founder');
+    const first = await useEncryptedAuthState(saved, shared.key);
+    first.state.creds.me = { id: '919800000001:3@s.whatsapp.net', name: 'Founder' };
+    await first.saveCreds();
+    await saved.close();
+    const sockets: FakeSocket[] = [];
+    const rt = await buildCustomerRuntime({ id: FOUNDER, founder: true }, {
+      ...shared, db, configs: [SHARMA],
+      waSockets: { gateway: () => (sockets.push(new FakeSocket()), sockets.at(-1)!) },
+    });
+    rt.start();
+    expect(sockets).toHaveLength(1); // phone 1's gateway, and nothing else
+    sockets[0]!.emit('connection.update', { connection: 'open' });
+    expect(rt.facts().whatsappLinked).toBe(true);
+    await rt.stop();
+    expect(await phoneNumberIn(home, shared.key, 'founder')).toBe('919800000001'); // the same link
+    expect(await getKv(db, 'session_reset_at')).toBeUndefined(); // no relink happened
+    expect(await getKv(db, PHONES_KV_KEY)).toBeUndefined(); // no phone list written
   });
 });
 

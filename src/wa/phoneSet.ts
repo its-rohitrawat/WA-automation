@@ -98,6 +98,14 @@ export class PhoneSet implements GatewayLike {
     }
   }
 
+  /** A phone's new name (the phone list renamed it): its status and phones() show it from now on. */
+  rename(id: PhoneId, label: string): void {
+    const m = this.#members.get(id);
+    if (!m) return;
+    m.label = label;
+    this.#statusChanged();
+  }
+
   /** The approved groups changed (or at start): each phone's allow-list becomes the groups approved on it. */
   setConfigs(configs: readonly ClientConfig[]): void {
     this.#configs = configs;

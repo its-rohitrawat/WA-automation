@@ -23,6 +23,10 @@ import { silentLogger } from '../../src/util/logger.ts';
 import { MEHTA, onSqlite, seededDb, SHARMA } from '../helpers/db.ts';
 import { platformTestDb } from '../helpers/platformTestDb.ts';
 import { dbGroupsStore } from '../../src/config/groupsStore.ts';
+import { getKv } from '../../src/store/kv.ts';
+import { PgSessionDb, phoneNumberIn, useEncryptedAuthState } from '../../src/wa/authState.ts';
+import { PHONES_KV_KEY } from '../../src/wa/phoneList.ts';
+import { FakeSocket } from '../helpers/fakeSocket.ts';
 
 // A customer's FULL runtime (Phase B 2 and 3). The stores are laid out as on the Mac: on SQLite an in-memory store
 // stands in for the platform tables (and the founder's tracker) and one for each customer's own Db, with wa_auth as
@@ -81,8 +85,11 @@ async function stores(): Promise<{ platformDb: Db; founderDb: Db; customerDbOf: 
   return { platformDb: t.db, founderDb: t.customerDb(FOUNDER_TENANT_ID), customerDbOf };
 }
 
-/** `noStateKey`: the Supervisor gets no Google state key. Returns `built`: each customer runtime's deps, by customer id. */
-async function setup(o: { keyFor: ('a' | 'b')[]; noStateKey?: boolean }) {
+/**
+ * `noStateKey`: the Supervisor gets no Google state key. `fakeSockets`: each customer's reading gateways get these fake
+ * sockets (a linked phone then reaches no WhatsApp). Returns `built`: each customer runtime's deps, by customer id.
+ */
+async function setup(o: { keyFor: ('a' | 'b')[]; noStateKey?: boolean; fakeSockets?: FakeSocket[] }) {
   dir = mkdtempSync(join(tmpdir(), 'wa-full-'));
   const groups = join(dir, 'allowed-groups.json');
   writeFileSync(groups, '[]');
@@ -124,10 +131,36 @@ async function setup(o: { keyFor: ('a' | 'b')[]; noStateKey?: boolean }) {
   ps = platformSupervisor({
     env, log: silentLogger(), clock: manualClock(AT), platformDb, master, customerDb: (id) => dbs[id]!, keyTester: async () => 'ok', rssMb: () => 100, tickMs: 3_600_000,
     ...(o.noStateKey ? {} : { oauthStateKey: stateKey }),
-    build: async (t, deps) => (built.set(t.id, deps), buildCustomerRuntime(t, deps)),
+    build: async (t, deps) => {
+      built.set(t.id, deps);
+      const sockets = o.fakeSockets;
+      return buildCustomerRuntime(t, sockets ? { ...deps, waSockets: { gateway: () => (sockets.push(new FakeSocket()), sockets.at(-1)!) } } : deps);
+    },
   });
   return { ps, ids, dbs, read, before, tenantKeys, dir, stateKey, built, founderDb, master };
 }
+
+describe('several phones (lane C, change 7): a customer with one phone starts exactly as before', () => {
+  it('its saved phone 1 alone, on its own rows and data key: one socket, linked, no relink, nothing written for phones', async () => {
+    const sockets: FakeSocket[] = [];
+    const { ps, ids, dbs, tenantKeys } = await setup({ keyFor: ['a'], fakeSockets: sockets });
+    // Customer A's phone 1, linked before the release: its wa_auth rows under its own data key.
+    const dataKey = await tenantKeys.dataKey(ids.a);
+    const saved = new PgSessionDb(dbs[ids.a]!, 'founder');
+    const first = await useEncryptedAuthState(saved, dataKey);
+    first.state.creds.me = { id: '919800000077:3@s.whatsapp.net', name: 'Acme' };
+    await first.saveCreds();
+    await ps.start();
+    expect(ps.supervisor.state(ids.a)).toBe('running');
+    expect(sockets).toHaveLength(1); // its phone 1, nothing else; B has no key and no link
+    sockets[0]!.emit('connection.update', { connection: 'open' });
+    expect(ps.supervisor.facts(ids.a)?.whatsappLinked).toBe(true);
+    await ps.stop();
+    expect(await phoneNumberIn({ engine: 'postgres', db: dbs[ids.a]! }, dataKey, 'founder')).toBe('919800000077'); // the same link
+    expect(await getKv(dbs[ids.a]!, 'session_reset_at')).toBeUndefined(); // no relink
+    expect(await getKv(dbs[ids.a]!, PHONES_KV_KEY)).toBeUndefined(); // no phone list written
+  });
+});
 
 describe('a customer’s full runtime (Phase B 2 and 3)', () => {
   it('an active customer with its own key runs its full runtime: its groups, its key, no WhatsApp socket while unlinked, no Drive', async () => {
