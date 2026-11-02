@@ -201,7 +201,9 @@ describe('assistant API', () => {
     }
     for (const chatId of [theirs, 0, -1, 'x', 1.5]) expect((await h.post('/dashboard/api/assistant/ask', { body: { chatId, question: 'hi' } })).status, String(chatId)).toBe(404);
     expect(ai instanceof ProposingAi ? ai.calls : 0).toBe(calls);
-    expect((await one.h.get(`/dashboard/api/assistant/chats/${theirs}`)).json).toMatchObject({ chat: { title: 'Theirs' } });
+    // Its own workspace still has it (a session made now: on Postgres the second boot ended this owner's earlier ones).
+    const own = await one.h.sessions.create(OWNER);
+    expect((await one.h.get(`/dashboard/api/assistant/chats/${theirs}`, { cookie: own.id })).json).toMatchObject({ chat: { title: 'Theirs' } });
   });
 
   it('an answer goes on and is saved after the browser stops reading; Stop on another visit ends it', async () => {
