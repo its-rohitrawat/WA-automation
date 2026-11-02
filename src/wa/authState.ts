@@ -1,5 +1,6 @@
 import { createHmac, hkdfSync } from 'node:crypto';
 import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { BufferJSON, initAuthCreds, proto } from 'baileys';
 import type { AuthenticationCreds, AuthenticationState, SignalDataSet, SignalDataTypeMap } from 'baileys';
 import { decrypt, encrypt } from '../crypto/envelope.ts';
@@ -46,7 +47,48 @@ export function openSessionDb(file: string): Db {
 // data/sender-session.db (the spare's), each with an auth and an auth_backup table. Postgres: the customer's wa_auth
 // table, one phone's rows per PgSessionDb, slot 'live' for auth and 'backup' for auth_backup. Same rows, same codec.
 
-export type Phone = 'founder' | 'spare';
+// Reading phones (lane C, change 7): a workspace reads its groups through up to five phones. Phone 1 is today's phone
+// under its old name ('founder'), file and key, so it needs no relink. Phones 2 to 5 are 'phone2' to 'phone5', each
+// sealed with its own subkey of the workspace key (phoneSessionKey). The spare stays apart.
+
+/** A reading phone's number in its workspace. */
+export type PhoneId = 1 | 2 | 3 | 4 | 5;
+/** The most reading phones a workspace may have. */
+export const MAX_PHONES = 5;
+export type ReadingPhone = 'founder' | 'phone2' | 'phone3' | 'phone4' | 'phone5';
+export type Phone = ReadingPhone | 'spare';
+const READING: readonly ReadingPhone[] = ['founder', 'phone2', 'phone3', 'phone4', 'phone5'];
+const PHONES: readonly string[] = [...READING, 'spare'];
+
+/** A reading phone's session name: 1 is 'founder', 2 to 5 are 'phone2' to 'phone5'. Anything else throws. */
+export function phoneName(id: number): ReadingPhone {
+  if (!Number.isInteger(id) || id < 1 || id > MAX_PHONES) throw new Error('a reading phone is numbered 1 to 5');
+  return READING[id - 1]!;
+}
+
+/** The number of a reading phone's session name. */
+export function phoneIdOf(phone: ReadingPhone): PhoneId {
+  const i = READING.indexOf(phone);
+  if (i < 0) throw new Error('not a reading phone');
+  return (i + 1) as PhoneId;
+}
+
+/**
+ * The key a reading phone's session is sealed with: phone 1 the workspace key itself (as before, so no relink), phones
+ * 2 to 5 each a subkey of it. sessionCodec binds neither the phone nor the slot, so without this two phones would share
+ * row names, and a row copied from one phone would open as another's.
+ */
+export function phoneSessionKey(workspaceKey: Buffer, phone: ReadingPhone): Buffer {
+  return phone === 'founder' ? workspaceKey : deriveSubkey(workspaceKey, `wa-session phone ${phoneIdOf(phone)}`);
+}
+
+/** A phone's session file on SQLite: session.db (phone 1), session-<n>.db (phones 2 to 5), sender-session.db (spare). */
+export function sessionFileOf(dataDir: string, phone: Phone): string {
+  if (phone === 'founder') return sessionDbPath(dataDir);
+  if (phone === 'spare') return senderSessionDbPath(dataDir);
+  return join(dataDir, `session-${phoneIdOf(phone)}.db`);
+}
+
 export type SessionHome = { engine: 'sqlite'; dataDir: string } | { engine: 'postgres'; db: Db };
 
 /** The sessions' home for this engine: the data folder's files, or wa_auth on the customer's Db (the tracker's). */
@@ -64,7 +106,8 @@ export class PgSessionDb implements Db {
   readonly phone: Phone;
   readonly #onChange: (() => void) | undefined;
   constructor(base: Db, phone: Phone, o: { onChange?: () => void } = {}) {
-    if (phone !== 'founder' && phone !== 'spare') throw new Error('a session belongs to the founder or the spare phone');
+    // The name goes into its SQL as a literal (authSql): only these fixed names, never anything a caller made.
+    if (!PHONES.includes(phone)) throw new Error('a session belongs to a reading phone (founder, phone2 to phone5) or the spare');
     this.#base = base;
     this.phone = phone;
     this.#onChange = o.onChange;
@@ -129,7 +172,7 @@ function authSql(db: Db) {
  * with the same restore before it is handed out.
  */
 export async function openPhoneSession(home: SessionHome, phone: Phone, o: { onChange?: () => void } = {}): Promise<Db> {
-  if (home.engine === 'sqlite') return openSessionDb(phone === 'founder' ? sessionDbPath(home.dataDir) : senderSessionDbPath(home.dataDir));
+  if (home.engine === 'sqlite') return openSessionDb(sessionFileOf(home.dataDir, phone));
   const db = new PgSessionDb(home.db, phone, o);
   await restoreBackup(db);
   return db;
@@ -137,7 +180,7 @@ export async function openPhoneSession(home: SessionHome, phone: Phone, o: { onC
 
 /** Whether a phone has a saved session at all, without creating one: its file, or any of its wa_auth rows. */
 export async function sessionStored(home: SessionHome, phone: Phone): Promise<boolean> {
-  if (home.engine === 'sqlite') return existsSync(phone === 'founder' ? sessionDbPath(home.dataDir) : senderSessionDbPath(home.dataDir));
+  if (home.engine === 'sqlite') return existsSync(sessionFileOf(home.dataDir, phone));
   return (await home.db.get('SELECT 1 FROM wa_auth WHERE phone = ? LIMIT 1', [phone])) !== undefined;
 }
 
@@ -332,11 +375,20 @@ export function readFounderNumber(file: string, key: Buffer): string | undefined
  * read, writes nothing and gives undefined for no link or a row this key cannot open.
  */
 export async function founderNumberIn(home: SessionHome, key: Buffer): Promise<string | undefined> {
-  if (home.engine === 'sqlite') return readFounderNumber(sessionDbPath(home.dataDir), key);
+  return phoneNumberIn(home, key, 'founder');
+}
+
+/**
+ * The number a reading phone's saved link belongs to, on either engine, sealed as that phone is (phoneSessionKey of the
+ * workspace key). Writes nothing; undefined for no link or a row this key cannot open.
+ */
+export async function phoneNumberIn(home: SessionHome, workspaceKey: Buffer, phone: ReadingPhone): Promise<string | undefined> {
+  const key = phoneSessionKey(workspaceKey, phone);
+  if (home.engine === 'sqlite') return readFounderNumber(sessionFileOf(home.dataDir, phone), key);
   try {
     const { rowId, open } = sessionCodec(key);
     const id = rowId('creds');
-    const v = (await home.db.get<{ v: Buffer }>(authSql(new PgSessionDb(home.db, 'founder')).get, [id]))?.v;
+    const v = (await home.db.get<{ v: Buffer }>(authSql(new PgSessionDb(home.db, phone)).get, [id]))?.v;
     if (!v) return undefined;
     const me = (open(id, v) as AuthenticationCreds | null)?.me?.id;
     return me ? me.split(/[:@]/)[0] : undefined;

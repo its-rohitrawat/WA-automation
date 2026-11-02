@@ -127,7 +127,7 @@ describe('wa_auth sessions', () => {
 
   it('PgSessionDb names a phone, takes no multi-statement SQL, and reports each committed write only', async () => {
     const h = await home();
-    expect(() => new PgSessionDb(h.db, 'other' as 'founder')).toThrow(/founder or the spare/);
+    expect(() => new PgSessionDb(h.db, 'other' as 'founder')).toThrow(/a reading phone \(founder, phone2 to phone5\) or the spare/);
     let changes = 0;
     const db = new PgSessionDb(h.db, 'founder', { onChange: () => changes++ });
     await expect(db.exec()).rejects.toThrow(/multi-statement/);
