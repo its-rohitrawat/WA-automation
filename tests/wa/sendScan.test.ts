@@ -31,6 +31,16 @@ const PG_ENGINE = ['store/engine/pg.ts', 'store/engine/pgModule.d.ts'];
 const SEND_NAMES_BUT_QUERY = new RegExp(`\\b(sendMessage|${OUTBOUND_NAMES.filter((n) => n !== 'query').join('|')})\\b`);
 
 /**
+ * Delete chat (November release, owner decision 2 Nov 2026): src/wa/chatDelete.ts is excused from the one word chatModify,
+ * and from nothing else. It deletes one approved group's chat on the founder's phone, once (checked below).
+ */
+const CHAT_DELETE = 'wa/chatDelete.ts';
+const SEND_NAMES_BUT_CHAT_MODIFY = new RegExp(`\\b(sendMessage|${OUTBOUND_NAMES.filter((n) => n !== 'chatModify').join('|')})\\b`);
+
+/** The pattern a file is held to: every send name, less the one word its exception allows. */
+const heldTo = (file: string) => (PG_ENGINE.includes(file) ? SEND_NAMES_BUT_QUERY : file === CHAT_DELETE ? SEND_NAMES_BUT_CHAT_MODIFY : SEND_NAMES);
+
+/**
  * The dashboard's sign-out route is a URL path (spec section 8), not a Baileys call: that one exact string literal is
  * removed before the scan, and only in the dashboard's auth routes.
  */
@@ -53,9 +63,9 @@ describe('who may send on WhatsApp', () => {
     expect(files).toEqual(expect.arrayContaining(['wa/gateway.ts', 'wa/senderGateway.ts', 'app.ts']));
   });
 
-  it('no module except src/wa/senderGateway.ts and src/wa/groupSend.ts names a Baileys send method', () => {
+  it('no module except src/wa/senderGateway.ts and src/wa/groupSend.ts names a Baileys send method (src/wa/chatDelete.ts: chatModify alone)', () => {
     const offenders = sources()
-      .filter((s) => s.file !== 'wa/senderGateway.ts' && s.file !== 'wa/groupSend.ts' && (PG_ENGINE.includes(s.file) ? SEND_NAMES_BUT_QUERY : SEND_NAMES).test(s.text))
+      .filter((s) => s.file !== 'wa/senderGateway.ts' && s.file !== 'wa/groupSend.ts' && heldTo(s.file).test(s.text))
       .map((s) => s.file);
     expect(offenders).toEqual([]);
   });
@@ -174,5 +184,48 @@ describe('the one send from the founder’s WhatsApp (Open chat, 29 Oct 2026)', 
       expect(text.indexOf(before), before).toBeGreaterThan(-1);
       expect(text.indexOf(before), before).toBeLessThan(send);
     }
+  });
+});
+
+describe('the one change Delete chat makes on the founder’s WhatsApp (November release, 2 Nov 2026)', () => {
+  const chatDelete = () => readFileSync(join(SRC, 'wa', 'chatDelete.ts'), 'utf8');
+
+  it('chatModify is named only in src/wa/chatDelete.ts, called once there, and that file names no other outbound method', () => {
+    expect(sources().filter((s) => /\bchatModify\b/.test(s.text)).map((s) => s.file)).toEqual([CHAT_DELETE]);
+    const text = chatDelete();
+    expect(text.match(/\.chatModify\(/g)).toHaveLength(1);
+    // The interface, the check that a socket has it, and the one call. Nothing else.
+    expect(text.match(/\bchatModify\b/g)).toHaveLength(3);
+    expect(text).not.toMatch(SEND_NAMES_BUT_CHAT_MODIFY);
+  });
+
+  it('it is a whole-chat delete, asked after the group check and the founder gateway’s own check', () => {
+    const text = chatDelete();
+    const body = text.slice(text.indexOf('export async function deleteGroupChat('));
+    const call = body.indexOf('sock.chatModify(');
+    expect(call).toBeGreaterThan(-1);
+    for (const before of ['if (!GROUP_JID.test(groupId)', 'const sock = source(groupId);', 'if (!sock) return']) {
+      expect(body.indexOf(before), before).toBeGreaterThan(-1);
+      expect(body.indexOf(before), before).toBeLessThan(call);
+    }
+    expect(body.slice(call)).toMatch(/^sock\.chatModify\(\{ delete: true, lastMessages: \[last\] \}, groupId\)/);
+  });
+
+  it('the founder gateway gives its delete socket only for an approved group while open, right before handing it over', () => {
+    const text = readFileSync(join(SRC, 'wa', 'gateway.ts'), 'utf8');
+    const give = text.indexOf('return asChatDeleteSocket(sock);');
+    expect(give).toBeGreaterThan(-1);
+    expect(text.match(/asChatDeleteSocket\(/g)).toHaveLength(1);
+    const guard = text.lastIndexOf("if (this.#stopped || !sock || this.#status.state !== 'open' || !this.#opts.allow.has(groupId)) return null;", give);
+    expect(guard).toBeGreaterThan(-1);
+    expect(give - guard).toBeLessThan(200);
+  });
+
+  it('only the dashboard’s chat route deletes, and only the gateways and the runtime hand out the socket', () => {
+    // Subsets until the route calls it (lane B, piece B4); then these become exact, as the send's are.
+    for (const f of sources().filter((s) => /\bdeleteGroupChat\(/.test(s.text)).map((s) => s.file)) expect([CHAT_DELETE, 'web/routes/chat.ts']).toContain(f);
+    const givers = sources().filter((s) => /\bchatDeleteSocket\(/.test(s.text)).map((s) => s.file);
+    for (const f of givers) expect(['runtime/customerRuntime.ts', 'wa/gateway.ts', 'wa/switchableGateway.ts']).toContain(f);
+    expect(givers).toEqual(expect.arrayContaining(['wa/gateway.ts', 'wa/switchableGateway.ts']));
   });
 });

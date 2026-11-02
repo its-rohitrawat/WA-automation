@@ -5,17 +5,22 @@ import { guarded, type CrashReport } from '../runtime/context.ts';
 import { systemClock, type Clock } from '../util/clock.ts';
 import type { AllowList } from './allowlist.ts';
 import { backoffMs } from './backoff.ts';
+import { asChatDeleteSocket, type ChatDeleteSocket } from './chatDelete.ts';
+import { MEMBERS_CACHE_MS, MEMBERS_READ_MS, membersOf, type GroupMember } from './groupMembers.ts';
 import { asGroupSendSocket, type GroupSendSocket } from './groupSend.ts';
 import { normalizeMessage, normalizeReaction, normalizeUpdate, type NormalizedEvent } from './normalize.ts';
 
 /**
  * The subset of a Baileys socket the gateway uses. Deliberately has no send-type methods. fetchMessageHistory is the
  * one request it makes: it asks the founder's own phone (Baileys addresses it to the account's own number, as a peer
- * request) for earlier messages of one chat. Nothing reaches any chat or any other person.
+ * request) for earlier messages of one chat. Nothing reaches any chat or any other person. groupMetadata, like
+ * groupFetchAllParticipating, only reads group data (one group's members, for Open chat).
  */
 export interface SocketLike {
   ev: { on<T extends keyof BaileysEventMap>(event: T, listener: (arg: BaileysEventMap[T]) => void): void };
   groupFetchAllParticipating(): Promise<{ [jid: string]: GroupMetadata }>;
+  /** Optional: a socket without it reads no members. */
+  groupMetadata?(jid: string): Promise<GroupMetadata>;
   fetchMessageHistory(count: number, oldestMsgKey: { remoteJid: string; fromMe: boolean; id: string }, oldestMsgTimestamp: number): Promise<string>;
   end(error: Error | undefined): Promise<void> | void;
 }
@@ -124,6 +129,16 @@ export interface GatewayLike {
    * Open chat, after the owner confirmed the message.
    */
   groupSocket?(groupId: string): GroupSendSocket | null;
+  /**
+   * The members of an allowed group while open, from WhatsApp's group data (src/wa/groupMembers.ts); null when it cannot
+   * ask. A read: Open chat's group info and tagging.
+   */
+  groupMembers?(groupId: string): Promise<GroupMember[] | null>;
+  /**
+   * The socket for src/wa/chatDelete.ts, for an allowed group while open; null otherwise. Used only by the dashboard's
+   * Delete chat, after the owner confirmed it.
+   */
+  chatDeleteSocket?(groupId: string): ChatDeleteSocket | null;
 }
 
 export type Scheduler = (fn: () => void, ms: number) => { cancel(): void };
@@ -159,6 +174,8 @@ const unguarded: Guard = (fn) => fn;
 export class WhatsAppGateway implements GatewayLike {
   readonly #opts: GatewayOptions;
   readonly #emitter = new EventEmitter();
+  /** Each approved group's members as last read, and when (groupMembers). */
+  readonly #members = new Map<string, { at: number; members: GroupMember[] }>();
   /** Baileys only reads cachedGroupMetadata on the send path, which this passive client never uses. Kept for completeness. */
   readonly #groupCache = new Map<string, GroupMetadata>();
   readonly #clock: Clock;
@@ -222,6 +239,39 @@ export class WhatsAppGateway implements GatewayLike {
     // The allow-list again here: a group that is not approved never gets a socket.
     if (this.#stopped || !sock || this.#status.state !== 'open' || !this.#opts.allow.has(groupId)) return null;
     return asGroupSendSocket(sock);
+  }
+
+  /** An approved group's members, read from WhatsApp's group data at most every 5 minutes; null when it cannot ask. */
+  async groupMembers(groupId: string): Promise<GroupMember[] | null> {
+    const sock = this.#sock;
+    // The same guard as the sockets: a group that is not approved is never asked about, and nothing kept is given.
+    if (this.#stopped || !sock || this.#status.state !== 'open' || !this.#opts.allow.has(groupId)) return null;
+    const now = this.#clock.now().getTime();
+    const kept = this.#members.get(groupId);
+    if (kept && now - kept.at < MEMBERS_CACHE_MS) return kept.members;
+    if (typeof sock.groupMetadata !== 'function') return null;
+    let timer: { cancel(): void } | undefined;
+    const timeout = new Promise<null>((resolve) => {
+      timer = this.#schedule(() => resolve(null), MEMBERS_READ_MS);
+    });
+    try {
+      const meta = await Promise.race([sock.groupMetadata(groupId), timeout]);
+      if (!meta) return null;
+      const members = membersOf(meta);
+      this.#members.set(groupId, { at: now, members });
+      return members;
+    } catch {
+      return null; // never the error: it can carry the group's id
+    } finally {
+      timer?.cancel();
+    }
+  }
+
+  chatDeleteSocket(groupId: string): ChatDeleteSocket | null {
+    const sock = this.#sock;
+    // The allow-list again here: a group that is not approved never gets a socket.
+    if (this.#stopped || !sock || this.#status.state !== 'open' || !this.#opts.allow.has(groupId)) return null;
+    return asChatDeleteSocket(sock);
   }
 
   status(): GatewayStatus {
