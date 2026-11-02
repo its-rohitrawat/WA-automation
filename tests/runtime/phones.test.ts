@@ -38,9 +38,14 @@ function fakeBuild() {
       state = s;
       for (const fn of statusFns) fn(status());
     };
+    const n = built.length; // which build this is: the sockets say so
+    const own = (groupId: string) => state === 'open' && allow.has(groupId);
     const gateway: GatewayLike = {
       onEvent: () => undefined, onStatus: (fn) => void statusFns.push(fn), onHistory: () => undefined, status,
       start: () => set('open'), stop: async () => set('stopped'), listGroups: async () => [], failedCount: () => 0, droppedCount: () => 0,
+      groupSocket: (groupId) => (own(groupId) ? ({ send: `build ${n}` } as never) : null),
+      groupMembers: async (groupId) => (own(groupId) ? ([{ from: `build ${n}` }] as never) : null),
+      chatDeleteSocket: (groupId) => (own(groupId) ? ({ delete: `build ${n}` } as never) : null),
     };
     built.push({ allow, auth, gateway });
     return gateway;
@@ -174,6 +179,33 @@ describe('a workspace’s phones in its runtime', () => {
     expect(t.phones.connected(MEHTA_GROUP)).toBe(false); // its own phone is down, though phone 1 is up
     expect(t.phones.connected('120363000000000009@g.us')).toBe(false); // approved nowhere
     expect(t.phones.connected()).toBe(true); // without a group: any phone open
+    await t.phones.set.stop();
+  });
+
+  it('Open chat’s send, members and Delete chat go through the group’s own phone, never another (the runtime’s chat deps)', async () => {
+    const MEHTA_GROUP = '120363000000000002@g.us';
+    const t = await setup({
+      beforeOpen: async ({ db, home, key }) => {
+        await linkedSession(home, key, 'phone2', '919800000002');
+        await db.run('INSERT INTO kv (k, v) VALUES (?, ?)', [PHONES_KV_KEY, JSON.stringify({ phones: [
+          { id: 1, label: 'Phone 1', state: 'active', addedAt: null }, { id: 2, label: 'Front desk', state: 'active', addedAt: AT },
+        ] })]);
+      },
+    });
+    t.phones.setConfigs([SHARMA, { ...SHARMA, groupId: MEHTA_GROUP, code: 'MEH', phone: 2 }]);
+    t.phones.set.start();
+    const chat = t.phones.chat;
+    // Build 0 is phone 1's gateway, build 1 phone 2's.
+    expect(chat.chatDeleteSocket(MEHTA_GROUP)).toEqual({ delete: 'build 1' });
+    expect(chat.chatDeleteSocket(SHARMA.groupId)).toEqual({ delete: 'build 0' });
+    expect(chat.groupSocket(MEHTA_GROUP)).toEqual({ send: 'build 1' });
+    expect(await chat.groupMembers(MEHTA_GROUP)).toEqual([{ from: 'build 1' }]);
+    // Phone 2 down: its group gets nothing (phone 1 is up, but it is not that group's phone).
+    await t.built[1]!.gateway.stop();
+    expect(chat.connected(MEHTA_GROUP)).toBe(false);
+    expect(chat.chatDeleteSocket(MEHTA_GROUP)).toBeNull();
+    expect(chat.groupSocket(MEHTA_GROUP)).toBeNull();
+    expect(await chat.groupMembers(MEHTA_GROUP)).toBeNull();
     await t.phones.set.stop();
   });
 

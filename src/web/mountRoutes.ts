@@ -24,7 +24,7 @@ import { CALLBACK_PATH, GoogleConnectRoutes, type GoogleConnectDeps } from './ro
 import { groupsApplyHandler, groupsBulkHandler, groupsListHandler, suggestCodeHandler, type GroupsDeps } from './routes/groups.ts';
 import { mountPlatformRoutes, mountSignupRoutes, type PlatformRouteDeps, type SignupDeps } from './routes/platform.ts';
 import { actionSession, readBody } from './routes/respond.ts';
-import { WhatsAppLinkRoutes } from './routes/whatsapp.ts';
+import { PhoneRoutes, WhatsAppLinkRoutes, type PhoneRoutesDeps } from './routes/whatsapp.ts';
 import { registerWorkApi } from './routes/work.ts';
 import type { RequestContext } from './router.ts';
 import { hashToken } from './sessions.ts';
@@ -69,6 +69,8 @@ export interface AgentRoutesDeps {
   google: Omit<GoogleConnectDeps, 'audit'>;
   actions: Omit<ActionDeps, 'audit'>;
   links: LinkSessions;
+  /** The workspace's reading phones (lane C, change 7): list, add, rename, unlink, remove. Absent: no phone routes. */
+  phones?: PhoneRoutesDeps;
   /** The AI assistant (DASHBOARD_ASSISTANT): its Claude client, the agent's spend guard and the prices. None: no assistant. */
   assistant?: { ai: AssistantAi; paid: App['paidCalls']; prices: Prices };
   /** The platform screens (SaaS S5): invites, customers, onboarding. Absent: no platform routes. */
@@ -239,4 +241,14 @@ export function mountAgentRoutes(m: DashboardMount, d: AgentRoutesDeps): void {
     if (r instanceof Promise) await r;
     else send(ctx.res, r);
   });
+
+  // Reading phones (lane C, change 7): the list, and add, rename, unlink and remove behind the change guard.
+  if (d.phones) {
+    const phones = new PhoneRoutes(d.phones);
+    read('/dashboard/api/whatsapp/phones', () => phones.list());
+    change('/dashboard/api/whatsapp/phones', (_ctx, o, body) => phones.add(o, body));
+    change('/dashboard/api/whatsapp/phones/:id/rename', ({ params }, o, body) => phones.rename(o, params.id, body));
+    change('/dashboard/api/whatsapp/phones/:id/unlink', ({ params }, o, body) => phones.unlink(o, params.id, body));
+    change('/dashboard/api/whatsapp/phones/:id/remove', ({ params }, o, body) => phones.remove(o, params.id, body));
+  }
 }

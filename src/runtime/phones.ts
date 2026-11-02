@@ -66,6 +66,16 @@ export interface WorkspacePhones {
    * a group, any phone is open.
    */
   connected(groupId?: string): boolean;
+  /**
+   * What Open chat takes of WhatsApp, each through the group's own phone only: whether it is connected, the send socket,
+   * the members and the Delete chat socket (never another phone's).
+   */
+  readonly chat: {
+    connected: (groupId?: string) => boolean;
+    groupSocket: (groupId: string) => ReturnType<PhoneSet['groupSocket']>;
+    groupMembers: (groupId: string) => ReturnType<PhoneSet['groupMembers']>;
+    chatDeleteSocket: (groupId: string) => ReturnType<PhoneSet['chatDeleteSocket']>;
+  };
   /** The approved groups changed: each phone's allow-list follows. */
   setConfigs(configs: readonly ClientConfig[]): void;
   /** The phone routes' deps (src/web/routes/whatsapp.ts PhoneRoutes). */
@@ -189,16 +199,23 @@ export async function workspacePhones(d: WorkspacePhonesDeps): Promise<Workspace
     },
   };
 
+  const connected = (groupId?: string) => (groupId !== undefined ? set.isOpenFor(groupId) : set.phones().some((p) => p.status.state === 'open'));
   return {
     set,
     list,
+    chat: {
+      connected,
+      groupSocket: (groupId) => set.groupSocket(groupId),
+      groupMembers: (groupId) => set.groupMembers(groupId),
+      chatDeleteSocket: (groupId) => set.chatDeleteSocket(groupId),
+    },
     driver: (target) => {
       const id = phoneIdOf(target);
       const s = slots.get(id);
       return s && list.get(id) ? linkDriver(s) : undefined;
     },
     numbers: () => [...slots.values()].map((s) => s.number).filter((n): n is string => n !== undefined),
-    connected: (groupId) => (groupId !== undefined ? set.isOpenFor(groupId) : set.phones().some((p) => p.status.state === 'open')),
+    connected,
     setConfigs: (next) => {
       configs = next;
       set.setConfigs(next);

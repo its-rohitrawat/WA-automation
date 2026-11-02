@@ -575,10 +575,9 @@ export async function buildCustomerRuntime(
           // while the owner has it switched on in Settings.
           chat: {
             db: trackerStore, configs: () => currentConfigs, sendingOn: () => store.get().dashboardSend,
-            // Per group: its own phone is open (a group on a phone that is down is not connected, even with another up).
-            connected: (groupId?: string) => readingPhones.connected(groupId),
-            groupSocket: (groupId) => gateway.groupSocket(groupId),
-            groupMembers: (groupId) => gateway.groupMembers(groupId),
+            // Each through the group's own phone only (src/runtime/phones.ts): connected (a group on a phone that is down
+            // is not connected, even with another up), the send socket, the members, and Delete chat's socket.
+            ...readingPhones.chat,
             directory, log, clock: systemClock,
           },
           google: {
@@ -597,6 +596,8 @@ export async function buildCustomerRuntime(
             ...(heartbeat ? { heartbeat } : {}),
           },
           links: phoneLinks,
+          // The workspace's reading phones (lane C, change 7): list, add, rename, unlink and remove.
+          phones: readingPhones.routes,
           // The platform (S5H.2 2.2) and the public sign-up (S5H.6 4.1): the founder's dashboard only, on the platform Db.
           ...(platformDb ? {
             platform: { db: platformDb, clock: systemClock, log, publicUrl: sitePublicUrl, founderName: env.PLATFORM_FOUNDER_NAME, mailer, ...d.platformHooks },
