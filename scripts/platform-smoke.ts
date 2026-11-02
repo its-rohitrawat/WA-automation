@@ -60,6 +60,24 @@ async function navOf(page: Page): Promise<{ group(name: string): string[]; all: 
   return { group: (name) => groups.find((g) => g.name === name)?.ids ?? [], all: groups.flatMap((g) => g.ids), locked: locked.sort() };
 }
 
+/** The Ask button never covers a control: row actions sit outside its lane, and the screen's end scrolls clear of it. */
+async function clearOfAsk(page: Page, where: string) {
+  const fab = await page.locator('#asst-fab').boundingBox();
+  if (!fab) return fail(where, 'no Ask button');
+  for (const b of await page.locator('.pf-cust td:last-child, .pf-inv td:last-child').locator('button, a').all()) {
+    const box = await b.boundingBox();
+    if (box && box.x + box.width > fab.x - 4) fail(where, `"${(await b.textContent())?.trim()}" sits in the Ask button's lane`);
+  }
+  await page.locator('.view').evaluate((v) => v.scrollIntoView({ block: 'end' }));
+  const covered = await page.evaluate((f) => [...document.querySelectorAll('.view :is(button, a, input, select, textarea)')]
+    .filter((e) => {
+      const r = e.getBoundingClientRect();
+      return r.width > 0 && r.right > f.x && r.left < f.x + f.width && r.bottom > f.y && r.top < f.y + f.height;
+    })
+    .map((e) => e.textContent?.trim().slice(0, 30) || e.tagName), fab);
+  if (covered.length) fail(where, `the Ask button covers ${covered.join(', ')} at the end of the screen`);
+}
+
 async function launch() {
   for (const channel of CHANNELS) {
     try {
@@ -124,6 +142,7 @@ try {
       }
       if ((await p.locator('#nav [data-go="invite"]').count()) !== 1) fail(where, 'no nav entry');
       await shot(p, where, `invite-${tag}`);
+      await clearOfAsk(p, where);
 
       where = `invite copy link ${tag}`;
       await p.locator('[data-invite] [name="business"]').fill(`Joshi Interiors ${round}`);
@@ -233,6 +252,8 @@ try {
       await p.locator('.pf-step.locked .pf-step-head').first().click({ force: true });
       await p.locator('.toast', { hasText: 'Finish WhatsApp and your API key first.' }).waitFor();
       await shot(p, where, `onboarding-${tag}`);
+      // A customer's workspace has no assistant yet: no Ask button.
+      if (await p.locator('#asst-fab').isVisible()) fail(where, 'an Ask button for a customer without the assistant');
 
       // (S4.6 C) Step 1, the customer's own WhatsApp: the QR shows inline; Cancel gives the button back; a scan links.
       // The preview's link is the fake dashboard's (two codes, a scan, done); the real one is the customer's own link
@@ -299,6 +320,7 @@ try {
       if ((await p.locator('.pf-cust tbody tr', { hasText: 'Nair Digital Works' }).locator('.pf-run', { hasText: 'Keeps crashing' }).count()) !== 1) fail(where, 'no runtime note');
       if ((await p.locator('.pf-cust .pf-run').count()) !== 1) fail(where, 'a runtime note on a customer without one');
       await shot(p, where, `customers-${tag}`);
+      await clearOfAsk(p, where);
       delete fakeRuntimes[nairId];
 
       where = `customers pause ${tag}`;

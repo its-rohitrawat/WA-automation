@@ -1,4 +1,4 @@
-/* The AI assistant (views/assistant.js): its page and the "Ask the assistant" button at the foot of the side menu. The
+/* The AI assistant (views/assistant.js): its page and the round "Ask the assistant" button at the bottom right. The
    look follows the website's hero: an emerald glow on dark, the agent's particle core on an empty chat, mono uppercase
    eyebrows, a tight heading with one green word, glass panels and glowing primary buttons. The theme's tokens, so light
    mode is WhatsApp Web's light theme with the glow kept faint. The conversation keeps to a readable column; on a phone
@@ -13,20 +13,25 @@
   --asst-edge: #E9EDEF; --asst-hi: rgba(255,255,255,.9); --asst-me: #D9FDD3; --asst-me-ink: #111B21; --asst-send: #008069; --asst-send-ink: #FFFFFF;
 }
 
-/* The side menu's button: above Collapse; only its icon when the menu is collapsed. */
-.side-ask { margin-top: 10px; display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 12px;
-  border: 1px solid rgba(37,211,102,.28); background: linear-gradient(135deg, rgba(37,211,102,.16), rgba(18,140,126,.10)); color: var(--text);
-  font: 600 13.5px var(--font); cursor: pointer; white-space: nowrap; box-shadow: inset 0 1px 0 rgba(255,255,255,.06); }
-.side-ask svg { color: var(--green); flex: none; }
-.side-ask.on { border-color: rgba(37,211,102,.5); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 10px 28px -16px rgba(37,211,102,.7); }
-.side-ask:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
-.side-ask[hidden] { display: none; }
-:root[data-theme="light"] .side-ask { background: rgba(0,168,132,.08); border-color: rgba(0,168,132,.28); box-shadow: none; }
-:root[data-theme="light"] .side-ask svg { color: #008069; }
-/* Collapsed on a laptop only: on a phone the menu is a drawer and keeps its words. */
-@media (min-width: 961px) {
-  .app.collapsed .side-ask span:last-child { display: none; }
-  .app.collapsed .side-ask { justify-content: center; padding: 10px; }
+/* The assistant's button, bottom right on every screen but its own page (app.js): a round emerald button with the spark
+   and a soft glow, as the website's primary button. Hidden while a drawer, the chat sheet or a dialog is open (each
+   puts a .scrim on the page) and while the phone's menu is open, so it never covers a composer or a Confirm. */
+.asst-fab { position: fixed; z-index: 55; right: max(24px, calc(env(safe-area-inset-right) + 16px)); bottom: max(24px, calc(env(safe-area-inset-bottom) + 16px));
+  width: 56px; height: 56px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 50%; cursor: pointer; color: #06251a;
+  background: radial-gradient(circle at 34% 28%, #7CF2A8 0%, #25D366 46%, #128C7E 100%);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.45), 0 0 0 1px rgba(37,211,102,.35), 0 14px 36px -10px rgba(37,211,102,.7); }
+.asst-fab::after { content: ""; position: absolute; inset: -5px; border-radius: 50%; border: 1px solid rgba(37,211,102,.28); pointer-events: none; }
+.asst-fab:focus-visible { outline: 2px solid var(--link); outline-offset: 4px; }
+.asst-fab[hidden], body:has(> .scrim) .asst-fab, .app.nav-open ~ .asst-fab { display: none; }
+:root[data-theme="light"] .asst-fab { color: #FFFFFF; background: radial-gradient(circle at 34% 28%, #25D366 0%, #00A884 50%, #008069 100%);
+  box-shadow: 0 0 0 1px rgba(0,128,105,.25), 0 10px 26px -8px rgba(0,128,105,.55); }
+:root[data-theme="light"] .asst-fab::after { border-color: rgba(0,168,132,.22); }
+/* While it shows, a screen's end scrolls clear of it, and toasts sit above it. */
+body.has-asst .view { padding-bottom: max(104px, calc(env(safe-area-inset-bottom) + 96px)); }
+body.has-asst .toast { bottom: max(92px, calc(env(safe-area-inset-bottom) + 84px)); }
+@media (max-width: 640px) {
+  .asst-fab { width: 52px; height: 52px; right: max(16px, calc(env(safe-area-inset-right) + 12px)); bottom: max(16px, calc(env(safe-area-inset-bottom) + 12px)); }
+  body.has-asst .toast { bottom: max(80px, calc(env(safe-area-inset-bottom) + 76px)); }
 }
 
 /* The page: the conversation fills the height under the top bar, and scrolls on its own. */
@@ -177,8 +182,8 @@
 }
 
 @media (prefers-reduced-motion: no-preference) {
-  .side-ask { transition: border-color 160ms ease, box-shadow 200ms ease, transform 140ms var(--ease-out); }
-  .side-ask:active { transform: scale(0.98); }
+  .asst-fab { transition: transform 160ms var(--ease-out), box-shadow 200ms ease; }
+  .asst-fab:active { transform: scale(0.95); }
   .asst-sugg-card { transition: border-color 160ms ease, transform 160ms var(--ease-out), background-color 160ms ease; }
   .asst-sugg-card:active { transform: scale(0.98); }
   .asst-send { transition: transform 140ms var(--ease-out), box-shadow 200ms ease; }
@@ -199,6 +204,7 @@
   .asst-live, .asst-live-dot { animation: asst-dot 1.4s ease-in-out infinite; }
 }
 @media (hover: hover) and (pointer: fine) {
+  .asst-fab:hover { box-shadow: inset 0 1px 0 rgba(255,255,255,.5), 0 0 0 1px rgba(37,211,102,.5), 0 18px 44px -10px rgba(37,211,102,.85); }
   .asst-sugg-card:hover { border-color: rgba(37,211,102,.35); }
   .asst-open:hover { background: rgba(52,183,241,.14); }
 }

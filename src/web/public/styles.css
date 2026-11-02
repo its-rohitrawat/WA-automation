@@ -145,7 +145,7 @@ a { color: inherit; text-decoration: none; }
 .nav { flex: 1 1 auto; min-height: 0; overflow-x: hidden; overflow-y: auto; margin: 0 -12px; padding: 0 12px 6px; }
 .nav::-webkit-scrollbar { width: 4px; } .nav::-webkit-scrollbar-thumb { background: var(--line-2); border: 0; border-radius: 4px; }
 @supports not selector(::-webkit-scrollbar) { .nav { scrollbar-width: thin; scrollbar-color: var(--line-2) transparent; } }
-.side-health, .side-ask, .collapse { flex: none; }
+.side-health, .collapse { flex: none; }
 .side-health { margin-top: 12px; display: flex; gap: 10px; align-items: center; padding: 12px; border-radius: 14px; background: var(--panel-2); border: 1px solid var(--line); font-size: 12.5px; }
 .side-health svg.ecg { flex: none; }
 .side-health b { display: block; font-size: 13px; }

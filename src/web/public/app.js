@@ -82,6 +82,17 @@ applyTheme(savedTheme());
 const session = () => ({ role: owner?.role, platform: owner?.platform === true, workspaces: owner?.workspaces ?? 1, assistant: owner?.assistant === true });
 
 /**
+ * The assistant's button, bottom right: shown where the workspace has the assistant, on every screen but the assistant's
+ * own page (it would sit on the composer). An open drawer, chat sheet or dialog hides it too (assistant.css). Toasts
+ * move up above it while it shows.
+ */
+function syncAskButton() {
+  const fab = $('#asst-fab');
+  fab.hidden = !owner || !session().assistant || current.screen === 'assistant';
+  document.body.classList.toggle('has-asst', !fab.hidden);
+}
+
+/**
  * Whether this workspace has the assistant: its API answers. A customer's runtime has none yet (the November release's
  * piece 3 turns it on), so a customer is not asked.
  */
@@ -117,7 +128,6 @@ function markNav(screen) {
     if (on) a.setAttribute('aria-current', 'page');
     else a.removeAttribute('aria-current');
   });
-  $('#side-ask').classList.toggle('on', screen === 'assistant');
 }
 
 /**
@@ -357,6 +367,7 @@ function show(screen, sub, opts = {}) {
   scrollTo({ top: 0 });
   const view = $('#view');
   view.dataset.screen = screen;
+  syncAskButton();
 
   if (screen === 'overview') {
     /** @type {ReturnType<typeof readOverview> | null} */
@@ -427,7 +438,7 @@ function enterApp() {
   $('#me-name').textContent = owner?.name || 'Owner';
   $('#me-email').textContent = owner?.email ?? '';
   statusPoll = poll(refreshStatus, STATUS_MS);
-  $('#side-ask').hidden = !session().assistant;
+  syncAskButton();
   const { screen, sub } = parsePath(location.pathname);
   show(screen, sub, { replace: true });
   if (!reduceMotion && gsap) {
@@ -449,10 +460,10 @@ function leaveApp(signedOut) {
   closeDrawer(true);
   resetGroups();
   forgetAssistant();
-  $('#side-ask').hidden = true;
   owner = null;
   status = null;
   current = { screen: '', sub: null };
+  syncAskButton(); // signed out: no button
   // Nothing of the owner's stays in the page; emptying the view also ends the heartbeat animation.
   $('#view').replaceChildren();
   $('#me-name').textContent = '';

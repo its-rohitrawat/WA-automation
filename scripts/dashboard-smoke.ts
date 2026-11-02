@@ -84,6 +84,27 @@ async function check(page: Page, where: string, selector: string, shot: string) 
   await page.screenshot({ path: join(OUT, `${shot}.png`), fullPage: true });
 }
 
+/**
+ * The assistant's button, bottom right, covers no control: with the screen scrolled to its end, nothing of it lies under
+ * the button (content above the end scrolls out from under it).
+ */
+async function askClear(page: Page, where: string) {
+  const fab = page.locator('#asst-fab');
+  if (!(await fab.isVisible())) return fail(where, 'no Ask button');
+  await page.evaluate(() => scrollTo(0, document.documentElement.scrollHeight));
+  await page.waitForTimeout(200);
+  const box = await fab.boundingBox();
+  if (!box) return fail(where, 'no Ask button');
+  const covered = await page.evaluate((f) => [...document.querySelectorAll('#view :is(button, a, input, select, textarea)')]
+    .filter((e) => {
+      const r = e.getBoundingClientRect();
+      return r.width > 0 && r.height > 0 && r.right > f.x && r.left < f.x + f.width && r.bottom > f.y && r.top < f.y + f.height;
+    })
+    .map((e) => e.textContent?.trim().slice(0, 30) || e.tagName), box);
+  if (covered.length) fail(where, `the Ask button covers ${covered.join(', ')} at the end of the screen`);
+  await page.evaluate(() => scrollTo(0, 0));
+}
+
 async function launch() {
   for (const channel of CHANNELS) {
     try {
@@ -147,6 +168,7 @@ async function main() {
         where = `overview ${tag}`;
         await p.goto(`${base}/dashboard`);
         await check(p, where, '.kpis', `overview-${tag}`);
+        await askClear(p, where);
         // The uptime strip lists the newest outages with their exact times ("Off from 02:14 to 06:33 (4 h 19 min)").
         if ((await p.locator('[data-uptime-outages] li', { hasText: / to \d\d:\d\d \(/ }).count()) < 1) fail(where, 'no outage with its exact times');
         if ((await p.locator('#view b', { hasText: '<b>' }).count()) !== 1) fail(where, 'agent text was not shown as plain text');
@@ -219,28 +241,29 @@ async function main() {
         // The AI assistant's page (November release), on a scripted Claude (scripts/assistantFake.ts: no API call): open it
         // from the side menu's button, ask, Confirm a card, and follow an answer's "Open …" link (it never jumps by itself).
         where = `assistant ${tag}`;
-        const askWords = p.locator('#side-ask > span:last-child');
         if (vp.name === 'phone') {
-          // In the phone's drawer the button keeps its words, even with the menu collapsed earlier on a laptop.
+          // The phone's drawer lists the Assistant, and the Ask button is not shown over it.
           await p.locator('#mnav').click();
           await p.waitForTimeout(400);
-          if (!(await askWords.isVisible())) fail(where, 'the drawer hides the Ask button\'s words');
+          if (!(await p.locator('#nav [data-go="assistant"]').isVisible())) fail(where, 'no Assistant in the drawer');
+          if (await p.locator('#asst-fab').isVisible()) fail(where, 'the Ask button shows over the open menu');
           await p.screenshot({ path: join(OUT, `menu-drawer-${tag}.png`) });
+          await p.keyboard.press('Escape');
+          await p.waitForTimeout(400);
         } else {
-          // Collapsed on a laptop: the button shows its icon only, and the menu opens again.
+          // Collapsed on a laptop: icons only, the Ask button still bottom right, and the menu opens again.
           await p.locator('#collapse').click();
           await p.waitForTimeout(400);
-          if (await askWords.isVisible()) fail(where, 'the collapsed menu still shows the Ask button\'s words');
-          if (!(await p.locator('#side-ask').isVisible())) fail(where, 'the collapsed menu lost the Ask button');
+          if (!(await p.locator('#asst-fab').isVisible())) fail(where, 'no Ask button with the menu collapsed');
           await p.screenshot({ path: join(OUT, `menu-collapsed-${tag}.png`) });
           await p.locator('#collapse').click();
           await p.waitForTimeout(400);
-          if (!(await askWords.isVisible())) fail(where, 'the menu opened again without the Ask button\'s words');
         }
-        await p.locator('#side-ask').click();
-        await p.waitForURL('**/dashboard/assistant', { timeout: WAIT_MS }).catch(() => fail(where, `the side button did not open the page: ${p.url()}`));
+        // The round button at the bottom right opens the page, and is not shown on the page itself.
+        await p.locator('#asst-fab').click();
+        await p.waitForURL('**/dashboard/assistant', { timeout: WAIT_MS }).catch(() => fail(where, `the Ask button did not open the page: ${p.url()}`));
         if ((await p.locator('#nav [data-go="assistant"][aria-current="page"]').count()) !== 1) fail(where, 'the Assistant entry is not marked');
-        if ((await p.locator('#asst-fab').count()) !== 0) fail(where, 'the floating button is still there');
+        if (await p.locator('#asst-fab').isVisible()) fail(where, 'the Ask button shows on the assistant page');
         await p.locator('.asst-page .asst-hero .asst-sugg-card').first().waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'no suggested questions'));
         if ((await p.locator('.asst-page .asst-hero [data-core] canvas').count()) !== 1) fail(where, 'no core on the empty chat');
         await p.waitForTimeout(700); // the core's first frames
@@ -278,11 +301,7 @@ async function main() {
         // The chats kept for the workspace (piece 2): back on the page, the list holds this round's chats; open one,
         // rename it, and delete it after the confirm. On a phone the list is a drawer.
         where = `assistant chats ${tag}`;
-        if (vp.name === 'phone') {
-          await p.locator('#mnav').click();
-          await p.waitForTimeout(400);
-        }
-        await p.locator('#side-ask').click();
+        await p.locator('#asst-fab').click();
         await p.waitForURL('**/dashboard/assistant', { timeout: WAIT_MS });
         const openList = async () => {
           if (vp.name !== 'phone') return;
@@ -338,6 +357,7 @@ async function main() {
           await p.goto(`${base}/dashboard/${screen}`);
           await p.locator('#view .skel').first().waitFor({ state: 'detached', timeout: WAIT_MS }).catch(() => fail(where, 'still loading'));
           await check(p, where, '#view .card', `${screen}-${tag}`);
+          if (screen === 'tasks' || screen === 'settings') await askClear(p, where);
           if (await p.locator('#view .err-state').count()) fail(where, 'shows its error panel');
           if ((await p.locator('#view', { hasText: 'Coming in the next update' }).count()) !== 0) fail(where, 'is still the placeholder');
           if (screen === 'tracker') {
@@ -383,6 +403,7 @@ async function main() {
         where = `clients ${tag}`;
         await p.goto(`${base}/dashboard/clients`);
         await check(p, where, '.ccard', `clients-${tag}`);
+        await askClear(p, where);
         // Every card has its status line; the ones the agent is working on have the travelling edge.
         if ((await p.locator('.ccard .cstat').count()) !== (await p.locator('.ccard').count())) fail(where, 'a card has no status line');
         if ((await p.locator('.ccard.busy').count()) !== 2) fail(where, 'expected 2 busy cards (Acme reading, Blue Harbour reading its last 7 days)');
@@ -414,6 +435,9 @@ async function main() {
 
         // Open chat. Sending is off at first: the chat says so and has no text box.
         where = `open chat, sending off ${tag}`;
+        const askHiddenOverSheet = async () => {
+          if (await p.locator('#asst-fab').isVisible()) fail(where, 'the Ask button shows over the chat sheet');
+        };
         const openAcmeChat = async () => {
           await p.locator('.ccard', { hasText: 'Acme Traders' }).click();
           await p.locator('.drawer [data-open-chat]').click();
@@ -425,6 +449,8 @@ async function main() {
           if (fromEnd > 80) fail(where, `the chat did not open at its newest message (${fromEnd}px from the end)`);
         };
         await openAcmeChat();
+        await askHiddenOverSheet();
+        await p.screenshot({ path: join(OUT, `clients-chat-sheet-${tag}.png`) });
         await p.locator('.chat-sheet .ch-off', { hasText: 'Sending is off' }).waitFor();
         if ((await p.locator('.chat-sheet #ch-text').count()) !== 0) fail(where, 'a text box while sending is off');
         if ((await p.locator('.chat-sheet .ch-reply').count()) !== 0) fail(where, 'Reply buttons while sending is off');
@@ -526,6 +552,7 @@ async function main() {
         await p.screenshot({ path: join(OUT, `group-drawer-${tag}.png`) });
         await p.locator('.drawer button[type="submit"]').click();
         await p.locator('.savebar', { hasText: '1 change not saved' }).waitFor();
+        await p.locator('.drawer').waitFor({ state: 'detached' });
         if (vp.name === 'laptop' && theme === 'dark') {
           // A code a listed client has: the drawer says so before any save.
           where = `manage groups refused ${tag}`;
