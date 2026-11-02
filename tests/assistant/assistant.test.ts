@@ -58,7 +58,7 @@ function results(messages: AssistantMessage[]): { content: string; is_error?: bo
   return (last.content as { type: string; content: string; is_error?: boolean }[]).filter((b) => b.type === 'tool_result');
 }
 
-async function setup(o: { ai: AssistantAi; cap?: number; clock?: ManualClock }) {
+async function setup(o: { ai: AssistantAi; cap?: number; clock?: ManualClock; customer?: boolean }) {
   const { db, ids } = await seeded();
   const clock = o.clock ?? manualClock(NOW);
   const spend = new SpendGuard({ db, clock, capUsd: o.cap ?? 10 });
@@ -67,6 +67,7 @@ async function setup(o: { ai: AssistantAi; cap?: number; clock?: ManualClock }) 
   const status: AgentStatus = { at: NOW, up: true, line: { ok: true, text: 'All good' }, parts: [], lastMessageAt: null, spentToday: 0, capUsd: o.cap ?? 10 };
   const assistant = new Assistant({
     ai: o.ai, paid: spend, prices: PRICES, pending, settings, log: silentLogger(), clock, db, control: { status: async () => status }, spend, voiceLocal: false,
+    ...(o.customer ? { customer: true } : {}),
   });
   const task = await createTask(db, {
     clientId: ids.sharma, side: 'us', title: 'Send the revised quote', category: 'design', priority: 'medium', assignedTo: 'Rohit', askedBy: null,
@@ -328,6 +329,16 @@ describe('Assistant: changes wait for the owner\'s Confirm', () => {
   });
 });
 
+/** FakeAi that also records the screens open_screen was offered on each call. */
+class ToolsAi extends FakeAi {
+  readonly screens: string[][] = [];
+  override async turn(req: { system: string; messages: AssistantMessage[]; tools?: { name: string; input_schema: unknown }[] }, onText: (d: string) => void): Promise<AssistantTurn> {
+    const open = req.tools?.find((t) => t.name === 'open_screen');
+    this.screens.push((open?.input_schema as { properties: { screen: { enum: string[] } } } | undefined)?.properties.screen.enum ?? []);
+    return super.turn(req, onText);
+  }
+}
+
 /** A Claude that streams its text in two parts with a gate between them (an answer still running). */
 class GatedAi implements AssistantAi {
   readonly attempts = 1;
@@ -359,6 +370,31 @@ class GatedAi implements AssistantAi {
     return { content: more ? [use('get_overview', {})] : [text('Part one. Part two.')], stopReason: more ? 'tool_use' : 'end_turn', costUsd: 0.01, fallbackUsed: false };
   }
 }
+
+describe('Assistant: a customer’s workspace (November release, piece 3)', () => {
+  it('is never offered, told of or linked to Connections or AI usage; the founder’s has every screen', async () => {
+    const steps = () => [
+      () => ({ content: [use('open_screen', { screen: 'usage' }), use('open_screen', { screen: 'connections' }), use('open_screen', { screen: 'audit' })] }),
+      () => ({ content: [text('ok')] }),
+    ];
+    const customerAi = new ToolsAi(steps());
+    const { run } = await setup({ ai: customerAi, customer: true });
+    const events = await run('show me my usage');
+    expect(customerAi.screens[0]).not.toContain('usage');
+    expect(customerAi.screens[0]).not.toContain('connections');
+    expect(customerAi.screens[0]).toEqual(['overview', 'clients', 'tasks', 'meetings', 'activity', 'tracker', 'automations', 'audit', 'settings']);
+    expect(customerAi.systems[0]).toContain('It has no Connections or AI usage screen: never mention, offer or point to them.');
+    expect(events.filter((e) => e.type === 'navigate').map((e) => (e as { screen: string }).screen)).toEqual(['audit']);
+    expect(results(customerAi.sent[1]!).map((r) => r.content).slice(0, 2)).toEqual(['That screen is not in this workspace.', 'That screen is not in this workspace.']);
+
+    const founderAi = new ToolsAi(steps());
+    const founder = await setup({ ai: founderAi });
+    const founderEvents = await founder.run('show me my usage');
+    expect(founderAi.screens[0]).toContain('usage');
+    expect(founderAi.systems[0]).toBe(SYSTEM_PROMPT);
+    expect(founderEvents.filter((e) => e.type === 'navigate').map((e) => (e as { screen: string }).screen)).toEqual(['usage', 'connections', 'audit']);
+  });
+});
 
 describe('Assistant: chats stored per workspace (November release, changes 1 and 8)', () => {
   it('a new chat is titled by its question; a question in a chat gets its earlier turns; another chat starts fresh', async () => {

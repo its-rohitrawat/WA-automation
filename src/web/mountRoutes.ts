@@ -226,6 +226,7 @@ export function mountAgentRoutes(m: DashboardMount, d: AgentRoutesDeps): void {
     const assistant = new Assistant({
       ai: d.assistant.ai, paid: d.assistant.paid, prices: d.assistant.prices, pending, settings: d.settings, log: d.log, clock: d.clock,
       db: d.db, control: d.control, spend: d.spend, voiceLocal: d.voiceLocal, health: d.health, ...(d.accountOf ? { accountOf: d.accountOf } : {}),
+      customer: tenant !== FOUNDER_TENANT_ID, // a customer's assistant: no Connections or AI usage
     });
     m.sessions.onEnd((e) => assistant.forget(e));
     registerAssistantApi(router, { ...action, db: d.db, clock: d.clock, assistant, pending, settings: d.settings, audit: m.audit });

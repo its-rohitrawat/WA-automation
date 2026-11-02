@@ -13,7 +13,7 @@ import type { Logger } from '../util/logger.ts';
 import { istDate, istTime, istWeekday } from '../util/time.ts';
 import type { SessionEnd } from '../web/sessions.ts';
 import { draftProposal, type PendingActions, type ProposalCard } from './proposals.ts';
-import { asData, INPUTS, PROPOSE_TOOLS, runReadTool, screenTarget, TOOL_DEFINITIONS, type ToolDeps, type ToolName } from './tools.ts';
+import { asData, CUSTOMER_SCREENS, INPUTS, PROPOSE_TOOLS, runReadTool, screenTarget, SCREENS, toolDefinitions, type Screen, type ToolDeps, type ToolName } from './tools.ts';
 
 // The dashboard assistant (owner request, 29 Oct 2026; its own page and stored chats, November release changes 1 and 8):
 // Claude with the tools in tools.ts. Each Claude call is a paid call under the daily spend cap (withReservation, label
@@ -93,6 +93,33 @@ export interface AssistantDeps extends ToolDeps {
   settings: Pick<SettingsStore, 'view'>;
   log: Logger;
   clock: Clock;
+  /**
+   * A customer's workspace (not the founder's): its dashboard has CUSTOMER_SCREENS, without the founder's Connections and
+   * AI usage. The model is offered only those, told the others do not exist, and any other is refused.
+   */
+  customer?: boolean;
+}
+
+/** The screens' names as the dashboard's side menu shows them. */
+const SCREEN_NAMES: Record<Screen, string> = {
+  overview: 'Overview', clients: 'Clients', tasks: 'Tasks', meetings: 'Meetings', activity: 'Activity', tracker: 'Tracker', connections: 'Connections',
+  usage: 'AI usage', automations: 'Automations', audit: 'Audit logs', settings: 'Settings',
+};
+
+/**
+ * The system prompt for a workspace: SYSTEM_PROMPT, and for one without every screen (a customer's) a line that names
+ * its screens and says the others are not there, so the assistant never names, offers or links them.
+ */
+export function systemPromptFor(screens: readonly Screen[] = SCREENS): string {
+  const missing = SCREENS.filter((s) => !screens.includes(s));
+  if (missing.length === 0) return SYSTEM_PROMPT;
+  const names = (xs: readonly Screen[], last: string) => {
+    const w = xs.map((s) => SCREEN_NAMES[s]);
+    return w.length < 2 ? w.join('') : `${w.slice(0, -1).join(', ')} ${last} ${w.at(-1)}`;
+  };
+  return `${SYSTEM_PROMPT}
+
+This workspace's dashboard has these screens only: ${names(screens, 'and')}. It has no ${names(missing, 'or')} screen: never mention, offer or point to ${missing.length === 1 ? 'it' : 'them'}. AI spend here is this workspace's own, on its own Claude key.`;
 }
 
 /** A question being answered: Stop sets `stopped`. */
@@ -112,6 +139,10 @@ const nowLine = (d: Date) => `Now: ${istWeekday(d)} ${istDate(d)}, ${istTime(d)}
 
 export class Assistant {
   readonly #d: AssistantDeps;
+  /** This workspace's screens, and what the model is given for them: the tools and the prompt. */
+  readonly #screens: readonly Screen[];
+  readonly #tools: Anthropic.Beta.BetaTool[];
+  readonly #system: string;
   /** The answers running now, by chat id. */
   readonly #runs = new Map<number, Run>();
   /** Questions accepted and still being set up (their chat read or made): they count toward RUNS_MAX at once. */
@@ -119,6 +150,9 @@ export class Assistant {
 
   constructor(d: AssistantDeps) {
     this.#d = d;
+    this.#screens = d.customer ? CUSTOMER_SCREENS : SCREENS;
+    this.#tools = toolDefinitions(this.#screens);
+    this.#system = systemPromptFor(this.#screens);
   }
 
   /** A session ended (sign-out, sign out everywhere, expiry): its waiting cards go. Its chats stay with the workspace. */
@@ -224,9 +258,9 @@ export class Assistant {
           note = `Stopped after ${MAX_CALLS} steps. Ask a narrower question.`;
           break;
         }
-        const estimate = estimateCostUsd(SYSTEM_PROMPT.length + JSON.stringify(TOOL_DEFINITIONS).length + JSON.stringify(messages).length, d.prices, ASSISTANT_MAX_TOKENS);
+        const estimate = estimateCostUsd(this.#system.length + JSON.stringify(this.#tools).length + JSON.stringify(messages).length, d.prices, ASSISTANT_MAX_TOKENS);
         calls++;
-        const turn = await withReservation(d.paid, estimate, 'assistant call', () => d.ai.turn({ system: SYSTEM_PROMPT, tools: TOOL_DEFINITIONS, messages }, say), d.ai.attempts, (usd) => {
+        const turn = await withReservation(d.paid, estimate, 'assistant call', () => d.ai.turn({ system: this.#system, tools: this.#tools, messages }, say), d.ai.attempts, (usd) => {
           cost += usd;
         });
         cost += turn.costUsd;
@@ -286,7 +320,7 @@ export class Assistant {
     emit({ type: 'tool', label: TOOL_LABELS[name] });
     try {
       if (name === 'open_screen') {
-        const t = screenTarget(use.input);
+        const t = screenTarget(use.input, this.#screens);
         kept.links.push(t);
         emit({ type: 'navigate', ...t });
         return { content: `The owner now has a link that opens ${t.label}. It opens when they tap it.` };
