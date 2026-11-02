@@ -142,8 +142,13 @@ describe('several phones (lane C, change 7): with one phone the founder starts e
     expect(sockets).toHaveLength(2);
     sockets[0]!.emit('connection.update', { connection: 'open' });
     expect(await whatsapp()).toMatchObject({ label: '1 of 2 phones connected' });
+    // The status command's per-phone line reads these from the health snapshot: names and states, no number.
+    const listed = () => rt.app.health.snapshot().phones?.map((p) => [p.id, p.label, p.state === 'open']);
+    expect(listed()).toEqual([[1, 'Phone 1', true], [2, 'Front desk', false]]);
     sockets[1]!.emit('connection.update', { connection: 'open' });
     expect(await whatsapp()).toMatchObject({ state: 'ok', label: '2 of 2 phones connected' });
+    expect(listed()).toEqual([[1, 'Phone 1', true], [2, 'Front desk', true]]);
+    expect(JSON.stringify(rt.app.health.snapshot())).not.toContain('919800000002');
     await rt.stop();
   });
 

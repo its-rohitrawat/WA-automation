@@ -67,6 +67,32 @@ describe('Health', () => {
     expect(h.line().text).toBe("❌ WhatsApp is not linked. Open the dashboard → Connections and link the founder's phone.");
   });
 
+  it('several reading phones (lane C): the snapshot lists each by name and state, never its number; one phone, none', async () => {
+    const { db, h } = await setup();
+    h.setWhatsApp(status('open'));
+    let list = [{ id: 1, label: 'Office', status: status('open'), number: '…4321' }];
+    h.watchPhones(() => list);
+    expect(h.snapshot().phones).toBeUndefined();
+    list = [...list, { id: 2, label: 'Front desk', status: status('closed'), number: '…7788' }];
+    const two = [{ id: 1, label: 'Office', state: 'open' }, { id: 2, label: 'Front desk', state: 'closed' }];
+    expect(h.snapshot().phones).toEqual(two);
+    await h.persist();
+    const read = await readHealthSnapshot(db);
+    expect(read?.phones).toEqual(two);
+    expect(JSON.stringify(read)).not.toMatch(/4321|7788/);
+    // A source that fails leaves only the phones out.
+    h.watchPhones(() => {
+      throw new Error('gone');
+    });
+    expect(h.snapshot()).toMatchObject({ whatsapp: { state: 'open' } });
+    expect(h.snapshot().phones).toBeUndefined();
+    // A broken list in a stored snapshot drops that list only.
+    await setKv(db, 'health', JSON.stringify({ ...read, phones: [{ id: 'x' }] }));
+    const broken = await readHealthSnapshot(db);
+    expect(broken).toMatchObject({ whatsapp: { state: 'open' } });
+    expect(broken?.phones).toBeUndefined();
+  });
+
   it('reports an unlinked device straight away', async () => {
     const { h } = await setup();
     h.setWhatsApp(status('logged_out'));

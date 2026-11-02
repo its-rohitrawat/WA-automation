@@ -181,3 +181,26 @@ describe('formatStatus and the morning report', () => {
     expect(out).toContain('Report:      last known: Morning report: sent at 06:00 IST');
   });
 });
+
+describe('formatStatus with several reading phones (lane C, change 7)', () => {
+  const phones: HealthSnapshot['phones'] = [
+    { id: 1, label: 'Office', state: 'open' }, { id: 2, label: 'Front desk', state: 'closed' }, { id: 3, label: 'Site', state: 'open' },
+  ];
+
+  it('says how many are connected and names each one that is not, by its name only', () => {
+    expect(formatStatus({ ...base, snapshot: { ...snapshot, phones } })).toContain('\nWhatsApp:    2 of 3 phones connected (Front desk: reconnecting)\n');
+    const two = phones!.map((p) => (p.id === 3 ? { ...p, state: 'not_linked' as const } : p.id === 2 ? { ...p, state: 'logged_out' as const } : p));
+    expect(formatStatus({ ...base, snapshot: { ...snapshot, phones: two } })).toContain('\nWhatsApp:    1 of 3 phones connected (Front desk: logged out on the phone, Site: not linked)\n');
+    const all = phones!.map((p) => ({ ...p, state: 'open' as const }));
+    expect(formatStatus({ ...base, snapshot: { ...snapshot, phones: all } })).toContain('\nWhatsApp:    3 of 3 phones connected\n');
+    // An old report: marked as last known, as the one-phone line is.
+    const stale = { ...snapshot, phones, at: new Date(now.getTime() - 10 * 60_000).toISOString() };
+    expect(formatStatus({ ...base, snapshot: stale })).toContain('\nWhatsApp:    last known: 2 of 3 phones connected (Front desk: reconnecting)\n');
+  });
+
+  it('with one phone the output is byte for byte as before', () => {
+    const before = formatStatus({ ...base, snapshot });
+    expect(before).toContain('\nWhatsApp:    open since 19 Oct 09:00\n');
+    expect(formatStatus({ ...base, snapshot: { ...snapshot, phones: [{ id: 1, label: 'Office', state: 'open' }] } })).toBe(before);
+  });
+});

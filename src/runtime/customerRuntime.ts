@@ -427,6 +427,8 @@ export async function buildCustomerRuntime(
         }
         : {}),
     });
+    // Each reading phone by name and state in the health snapshot, for the status command's WhatsApp line (lane C).
+    app.health.watchPhones(() => gateway.phones());
 
     // watchGroupsFile catches a throwing onChange (including reloadClients conflicts) and calls onError.
     let currentConfigs = configs;
