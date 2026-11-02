@@ -101,7 +101,7 @@ describe('media store', () => {
 
   // SQLite only (S2.7): SQLite's migrations 3 to 5.
   it.runIf(onSqlite)('adds version 5 as a new migration after version 4', () => {
-    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
     expect(MIGRATIONS[4]!.sql.trim()).toBe('ALTER TABLE media ADD COLUMN requeued_for_text INTEGER NOT NULL DEFAULT 0;');
   });
 

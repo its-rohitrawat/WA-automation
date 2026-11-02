@@ -6,6 +6,9 @@ import { migrate, openDb } from '../../src/store/db.ts';
 import { MIGRATIONS, type Migration } from '../../src/store/migrations.ts';
 import { rawOf } from '../../src/store/engine/sqlite.ts';
 
+/** Every version this code has, in order. */
+const ALL_VERSIONS = MIGRATIONS.map((m) => m.version);
+
 // SQLite only (S2.7), like every block in this file: openDb and SQLite's own migrations (Postgres: tests/store/pg).
 describe.runIf(onSqlite)('openDb', () => {
   it('creates every table', () => {
@@ -50,16 +53,17 @@ describe.runIf(onSqlite)('openDb', () => {
 describe.runIf(onSqlite)('migrate: a skipped migration', () => {
   // A database made before main's v6 (the reports table) reached this branch is recorded at 1 to 5 and 7 onwards.
   const withoutV6 = MIGRATIONS.filter((m) => m.version !== 6);
-  const FAKE_V13: Migration = { version: 13, sql: 'CREATE TABLE fake_later (id INTEGER PRIMARY KEY);' };
+  // A version after every real one (the next lane's real version must not collide with it).
+  const FAKE_LATER: Migration = { version: ALL_VERSIONS.at(-1)! + 1, sql: 'CREATE TABLE fake_later (id INTEGER PRIMARY KEY);' };
   const versions = (db: Database.Database) =>
     (db.prepare('SELECT version FROM schema_version ORDER BY version').all() as { version: number }[]).map((r) => r.version);
 
   it('throws, naming only the version numbers, and applies nothing when the code knows a version the database skipped', () => {
     const db = new Database(':memory:');
     migrate(db, withoutV6);
-    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12]);
+    expect(versions(db)).toEqual(ALL_VERSIONS.filter((v) => v !== 6));
     expect(() => migrate(db)).toThrow('database is at v13 but v6 was never applied; restore a backup or contact the developer');
-    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12]);
+    expect(versions(db)).toEqual(ALL_VERSIONS.filter((v) => v !== 6));
     expect(db.prepare("SELECT name FROM sqlite_master WHERE name = 'reports'").get()).toBeUndefined();
   });
 
@@ -73,11 +77,11 @@ describe.runIf(onSqlite)('migrate: a skipped migration', () => {
   it('applies every version in order on a fresh database, a later one after them, and a database with every version recorded migrates as before', () => {
     const db = new Database(':memory:');
     migrate(db);
-    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    expect(versions(db)).toEqual(ALL_VERSIONS);
     migrate(db);
-    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
-    migrate(db, [...MIGRATIONS, FAKE_V13]);
-    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+    expect(versions(db)).toEqual(ALL_VERSIONS);
+    migrate(db, [...MIGRATIONS, FAKE_LATER]);
+    expect(versions(db)).toEqual([...ALL_VERSIONS, FAKE_LATER.version]);
     expect(db.prepare("SELECT name FROM sqlite_master WHERE name = 'fake_later'").get()).toEqual({ name: 'fake_later' });
   });
 
@@ -86,7 +90,7 @@ describe.runIf(onSqlite)('migrate: a skipped migration', () => {
     migrate(db, MIGRATIONS.filter((m) => m.version <= 4));
     expect(versions(db)).toEqual([1, 2, 3, 4]);
     migrate(db);
-    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    expect(versions(db)).toEqual(ALL_VERSIONS);
     expect(() => migrate(db)).not.toThrow();
     expect(() => openDb(':memory:')).not.toThrow();
   });
@@ -316,7 +320,7 @@ describe.runIf(onSqlite)('migration v10 (dashboard: task history index, outage r
 
   it('reaches v10 on a fresh database, with the task history index and the reason column', () => {
     const db = openDb(':memory:');
-    expect(versions(rawOf(db))).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    expect(versions(rawOf(db))).toEqual(ALL_VERSIONS);
     expect(rawOf(db).prepare("SELECT name FROM pragma_index_info('task_events_task') ORDER BY seqno").all()).toEqual([{ name: 'task_id' }, { name: 'at' }, { name: 'id' }]);
     expect(columns(rawOf(db), 'uptime_log')).toEqual([
       { name: 'id', type: 'INTEGER', required: 0 },
@@ -386,7 +390,7 @@ describe.runIf(onSqlite)('migration v11 (priority levels and sentiment)', () => 
     const db = atV10WithTasks();
     const before = db.prepare('SELECT * FROM tasks').all() as Record<string, unknown>[];
     migrate(db);
-    expect(versions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    expect(versions(db)).toEqual(ALL_VERSIONS);
     const after = db.prepare('SELECT * FROM tasks').all() as Record<string, unknown>[];
     expect(after).toEqual(before.map((t) => ({ ...t, priority_level: null, priority_source: null, priority_keyword: null, sentiment: null })));
     expect(db.prepare('SELECT sentiment, sentiment_at AS at FROM clients').all()).toEqual([{ sentiment: null, at: null }]);

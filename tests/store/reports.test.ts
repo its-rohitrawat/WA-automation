@@ -31,7 +31,7 @@ describe.runIf(onSqlite)('migration v6', () => {
   });
 
   it('adds version 6 as a new, additive migration and leaves versions 1 to 5 unchanged', () => {
-    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
     const text = MIGRATIONS.filter((m) => m.version <= 5).map((m) => `${m.version}\n${m.sql}`).join('\n---\n');
     expect(createHash('sha256').update(text).digest('hex')).toBe('53081fb02c22d829badad1e5b7f5d7c0855a67b631a353244b1e5828f81c02df');
     expect(MIGRATIONS[5]!.sql).toMatch(/^\s*CREATE TABLE reports \(/);

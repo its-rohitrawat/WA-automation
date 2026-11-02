@@ -58,7 +58,7 @@ function results(messages: AssistantMessage[]): { content: string; is_error?: bo
   return (last.content as { type: string; content: string; is_error?: boolean }[]).filter((b) => b.type === 'tool_result');
 }
 
-async function setup(o: { ai: FakeAi; cap?: number; clock?: ManualClock }) {
+async function setup(o: { ai: AssistantAi; cap?: number; clock?: ManualClock }) {
   const { db, ids } = await seeded();
   const clock = o.clock ?? manualClock(NOW);
   const spend = new SpendGuard({ db, clock, capUsd: o.cap ?? 10 });
@@ -106,7 +106,7 @@ describe('Assistant: answers with read tools', () => {
     const events = await run('What is open for Sharma?');
     expect(events.filter((e) => e.type === 'tool')).toEqual([{ type: 'tool', label: 'Looking at tasks' }]);
     expect(events.filter((e) => e.type === 'text').map((e) => (e as { text: string }).text).join('')).toBe('Let me look.\n\nSharma has 1 open task: SHA-001.');
-    expect(events.at(-1)).toEqual({ type: 'done', costUsd: 0.02, calls: 2 });
+    expect(events.at(-1)).toEqual({ type: 'done', costUsd: 0.02, calls: 2, status: 'done' });
     expect(await spendRows(db, spend)).toEqual([{ kind: 'ai', usd: 0.01, detail: 'assistant call' }, { kind: 'ai', usd: 0.01, detail: 'assistant call' }]);
     // The system prompt says tool data is untrusted and that changes need the owner's Confirm.
     expect(ai.systems[0]).toBe(SYSTEM_PROMPT);
@@ -146,7 +146,7 @@ describe('Assistant: answers with read tools', () => {
     spend.record('ai', 0.05, 'batch 1');
     const events = await run('hello');
     expect(ai.sent).toHaveLength(0);
-    expect(events).toEqual([{ type: 'done', costUsd: 0, calls: 1, note: "Today's AI spend cap is reached, so the assistant is paused until tomorrow." }]);
+    expect(events).toEqual([{ type: 'done', costUsd: 0, calls: 1, status: 'failed', note: "Today's AI spend cap is reached, so the assistant is paused until tomorrow." }]);
   });
 
   it('a refusal ends the answer with a plain note', async () => {

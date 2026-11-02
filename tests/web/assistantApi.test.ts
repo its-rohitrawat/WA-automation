@@ -91,7 +91,8 @@ async function boot(o: { askCapacity?: number; ai?: AssistantAi } = {}) {
     },
   });
   closers.push(() => h.close());
-  return { db, h, ai, pending, assistant };
+  // The fake the test gave, or the proposing one (whose calls the tests count).
+  return { db, h, ai: ai as ProposingAi, pending, assistant };
 }
 
 /** The answer's events, one JSON object per line. */
