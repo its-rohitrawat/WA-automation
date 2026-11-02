@@ -62,7 +62,8 @@ describe.runIf(onPg)('db-migrate to P6 (the assistant chats) on a real Postgres'
       const owner = await db.owner();
       try {
         const lines: string[] = [];
-        expect(await migrate(owner, { now, out: (l) => lines.push(l) })).toEqual([1, 2, 3, 4, 5, 6]);
+        // Up to P6 only: P7 and later have their own tests (tests/store/pg/p7.test.ts).
+        expect(await migrate(owner, { now, out: (l) => lines.push(l), migrations: PG_MIGRATIONS.slice(0, 6) })).toEqual([1, 2, 3, 4, 5, 6]);
         expect(lines).toEqual(['Applied P1', 'Applied P2', 'Applied P3', 'Applied P4', 'Applied P5', 'Applied P6', CHECKED]);
       } finally {
         await owner.end();
@@ -92,7 +93,7 @@ describe.runIf(onPg)('db-migrate to P6 (the assistant chats) on a real Postgres'
         await owner.sql('COMMIT');
 
         const lines: string[] = [];
-        expect(await migrate(owner, { now, out: (l) => lines.push(l) })).toEqual([6]);
+        expect(await migrate(owner, { now, out: (l) => lines.push(l), migrations: PG_MIGRATIONS.slice(0, 6) })).toEqual([6]);
         expect(lines).toEqual(['Applied P6', CHECKED]);
       } finally {
         await owner.end();

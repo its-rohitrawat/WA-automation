@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { PLATFORM_TABLES } from '../../../src/platform/pgSchema.ts';
 import { openDb, type Db } from '../../../src/store/db.ts';
 import {
-  CUSTOMER_TABLES, FOUNDER_TENANT_ID, P1_SQL, P2_SQL, P3_GRANTS_SQL, P3_SQL, P6_SQL, PG_LATEST, PG_MIGRATIONS, SCHEMA_VERSION_FN_SQL, WEB_SESSIONS_PG_SQL,
+  CUSTOMER_TABLES, FOUNDER_TENANT_ID, P1_SQL, P2_SQL, P3_GRANTS_SQL, P3_SQL, P6_SQL, P7_SQL, PG_LATEST, PG_MIGRATIONS, SCHEMA_VERSION_FN_SQL, WEB_SESSIONS_PG_SQL,
 } from '../../../src/store/pg/migrations.ts';
 
 // Until S2's test server exists (S2.7), the Postgres schema is checked against the migrated SQLite schema by reading
@@ -203,7 +203,7 @@ describe('the Postgres schema (P1 to P6) against the SQLite schema', () => {
     expect(SCHEMA_VERSION_FN_SQL).toContain('REVOKE ALL ON FUNCTION wa_schema_version() FROM PUBLIC;');
     expect(SCHEMA_VERSION_FN_SQL).toContain('GRANT EXECUTE ON FUNCTION wa_schema_version() TO wa_app, wa_platform;');
     expect(SCHEMA_VERSION_FN_SQL).not.toMatch(/\b(INSERT|UPDATE|DELETE)\b/);
-    expect(PG_LATEST).toBe(6);
+    expect(PG_LATEST).toBe(7);
   });
 
   it('P4 drops the founder default from web_sessions.tenant_id, and only that (P3 is never edited)', () => {
@@ -241,8 +241,20 @@ describe('the Postgres schema (P1 to P6) against the SQLite schema', () => {
     for (const t of ['assistant_chats', 'assistant_messages']) expect(P2_SQL, t).not.toContain(t);
   });
 
+  it('P7 only widens wa_auth’s phone check to phones 2 to 5: nothing dropped but that check, no table, no grant (lane C)', () => {
+    expect(PG_MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(PG_MIGRATIONS[6]!.sql).toBe(P7_SQL);
+    expect(P7_SQL.trim().split('\n')).toEqual([
+      'ALTER TABLE wa_auth DROP CONSTRAINT wa_auth_phone_check;',
+      "ALTER TABLE wa_auth ADD CONSTRAINT wa_auth_phone_check CHECK (phone IN ('founder', 'phone2', 'phone3', 'phone4', 'phone5', 'spare'));",
+    ]);
+    // P1 made the check inline, the name Postgres gives it; the new one keeps every name P1 allowed.
+    expect(P1_SQL).toContain("phone text NOT NULL CHECK (phone IN ('founder', 'spare'))");
+    expect(CUSTOMER_TABLES).not.toContain('wa_phones'); // the phone list is in kv: no table, so P2's frozen list is untouched
+  });
+
   it('P6 makes the assistant chats per customer, with forced row-level security on them only (November release)', () => {
-    expect(PG_MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(PG_MIGRATIONS.map((m) => m.version).slice(0, 6)).toEqual([1, 2, 3, 4, 5, 6]);
     expect(PG_MIGRATIONS[5]!.sql).toBe(P6_SQL);
     expect(CUSTOMER_TABLES.slice(-2)).toEqual(['assistant_chats', 'assistant_messages']);
     for (const t of ['assistant_chats', 'assistant_messages']) {

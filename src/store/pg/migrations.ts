@@ -544,6 +544,17 @@ CREATE TABLE assistant_messages (
 CREATE INDEX assistant_messages_chat ON assistant_messages (tenant_id, chat_id, id);
 ${rlsSql(P6_TABLES)}`;
 
+/**
+ * P7 (November release, lane C, change 7): up to five reading phones per workspace. wa_auth's phone check (P1's, inline,
+ * so Postgres named it wa_auth_phone_check) is replaced by a wider one: phones 2 to 5 as phone2 to phone5, beside founder
+ * (phone 1) and spare. Nothing else changes: no table, no column, no row rewritten, so row security and the access rules
+ * are as P6 left them, and every row already there (founder or spare) passes the new check.
+ */
+export const P7_SQL = `
+ALTER TABLE wa_auth DROP CONSTRAINT wa_auth_phone_check;
+ALTER TABLE wa_auth ADD CONSTRAINT wa_auth_phone_check CHECK (phone IN ('founder', 'phone2', 'phone3', 'phone4', 'phone5', 'spare'));
+`;
+
 /** In order; recorded in pg_schema_version by the runner (S2.4). Never edited once applied: a change is a new entry. */
 export const PG_MIGRATIONS: readonly { version: number; sql: string }[] = [
   { version: 1, sql: P1_SQL },
@@ -552,6 +563,7 @@ export const PG_MIGRATIONS: readonly { version: number; sql: string }[] = [
   { version: 4, sql: P4_SQL },
   { version: 5, sql: P5_SQL },
   { version: 6, sql: P6_SQL },
+  { version: 7, sql: P7_SQL },
 ];
 
 /** The version this code needs: openStore refuses a database at any other one (run db-migrate first). */
