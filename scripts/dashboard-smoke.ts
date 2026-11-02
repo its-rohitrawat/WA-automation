@@ -342,11 +342,19 @@ async function main() {
           await p.locator('#mnav').click();
           await p.waitForTimeout(400);
         }
+        // The reading phones are the fake's own list (the answer this screen fetches): a card each, in place of the
+        // founder's card, beside the 6 other connections. Each card carries its label as plain text.
+        const phonesAnswer = p.waitForResponse((r) => r.url().endsWith('/dashboard/api/whatsapp/phones') && r.request().method() === 'GET');
         await p.locator('#nav [data-go="connections"]').click();
         await p.waitForURL('**/dashboard/connections');
         await check(p, where, '.conn', `connections-${tag}`);
+        const { phones } = (await (await phonesAnswer).json()) as { phones: { id: number; label: string }[] };
         const cards = await p.locator('.conn').count();
-        if (cards !== 7) fail(where, `expected 7 cards, found ${cards}`);
+        if (cards !== 6 + phones.length) fail(where, `expected ${6 + phones.length} cards (6 and ${phones.length} phones), found ${cards}`);
+        for (const ph of phones) {
+          const h3 = p.locator(`.conn[data-conn="phone-${ph.id}"] h3`);
+          if ((await h3.count()) !== 1 || (await h3.textContent()) !== ph.label) fail(where, `no card for phone ${ph.id} named "${ph.label}"`);
+        }
         const driveCard = p.locator('[data-conn="drive"]');
         if ((await driveCard.locator('dd', { hasText: 'owner@example.com' }).count()) !== 1) fail(where, 'the Drive card does not name the account');
         if ((await driveCard.locator('a[data-open-drive][href^="https://drive.google.com/file/d/"]').count()) !== 1) fail(where, 'the Drive card has no Open in Drive');
