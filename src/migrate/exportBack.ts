@@ -6,14 +6,15 @@ import { openSessionFile } from '../store/engine/sessionFile.ts';
 
 import type { Sql } from '../store/engine/types.ts';
 import { acquireLock, AlreadyRunningError } from '../util/lock.ts';
+import { sessionFileOf } from '../wa/authState.ts';
 import { tableChecksum } from './canonical.ts';
 import type { CopyReport, TableResult } from './copy.ts';
-import { copyPlan, SESSION_PLANS, type TablePlan } from './plan.ts';
+import { copyPlan, SESSION_PHONE, SESSION_PLANS, type TablePlan } from './plan.ts';
 import type { CopyTarget } from './target.ts';
 
 // export-to-sqlite (plan 2026-10-29-saas-s3-s6.md, S3.5; the go-live guide's rollback B): one customer's rows in
-// Postgres back into NEW SQLite files (tracker.db, session.db, sender-session.db when the spare phone has keys), in a
-// folder that must not exist yet. It never writes into data/: the owner moves the files in by hand. Postgres is only
+// Postgres back into NEW SQLite files (tracker.db, session.db, and session-2.db to session-5.db and sender-session.db
+// for each phone that has keys), in a folder that must not exist yet. It never writes into data/: the owner moves the files in by hand. Postgres is only
 // read (the transaction is rolled back at the end). Each table is checked as the copy checks it: the rows read from
 // Postgres against the rows read back from the new file. A mismatch leaves the files with a DO-NOT-USE.txt beside them.
 
@@ -72,8 +73,9 @@ export async function exportToSqlite(o: ExportOptions, source: CopyTarget): Prom
   }
   mkdirSync(o.out, { recursive: true, mode: 0o700 });
   const tracker = openDb(join(o.out, 'tracker.db')); // every SQLite migration, as the agent would make it
-  const session = openSessionFile(join(o.out, 'session.db'));
-  let sender: Db | undefined;
+  const session = openSessionFile(sessionFileOf(o.out, 'founder'));
+  /** The other phones' files: each made only when that phone has keys. */
+  const more: Partial<Record<TablePlan['source'], Db>> = {};
   try {
     await ensurePlatformSchema(tracker);
     const plans: TablePlan[] = [...(await copyPlan(tracker)), ...SESSION_PLANS].filter((p) => o.platform !== false || !p.platform);
@@ -83,9 +85,12 @@ export async function exportToSqlite(o: ExportOptions, source: CopyTarget): Prom
         if (pv !== source.latestVersion) throw new Error(`Postgres is at P${pv}; this version reads P${source.latestVersion}.`);
         const read = new Map<TablePlan, Record<string, unknown>[]>();
         for (const p of plans) read.set(p, await pgRows(q, p));
-        // The spare phone's file only when it has keys, as on a Mac where the spare number was never linked.
-        if (plans.some((p) => p.source === 'sender' && read.get(p)!.length > 0)) sender = openSessionFile(join(o.out, 'sender-session.db'));
-        const fileFor = (p: TablePlan): Db | undefined => (p.source === 'tracker' ? tracker : p.source === 'session' ? session : sender);
+        // Phones 2 to 5 and the spare: a file only when it has keys, as on a Mac where the spare number was never linked.
+        for (const p of plans) {
+          if (p.source === 'tracker' || p.source === 'session' || more[p.source] || read.get(p)!.length === 0) continue;
+          more[p.source] = openSessionFile(sessionFileOf(o.out, SESSION_PHONE[p.source]));
+        }
+        const fileFor = (p: TablePlan): Db | undefined => (p.source === 'tracker' ? tracker : p.source === 'session' ? session : more[p.source]);
         for (const p of plans) {
           const db = fileFor(p);
           if (db) await writeRows(db, p.table, p.columns, read.get(p)!);
@@ -94,7 +99,7 @@ export async function exportToSqlite(o: ExportOptions, source: CopyTarget): Prom
         const tables: TableResult[] = [];
         for (const p of plans) {
           const db = fileFor(p);
-          if (!db) continue; // no spare-phone file: nothing was read for it either
+          if (!db) continue; // no file for that phone: nothing was read for it either
           const pgSide = tableChecksum(p.columns, read.get(p)!);
           const fileSide = tableChecksum(p.columns, await db.all<Record<string, unknown>>(`SELECT ${p.columns.join(', ')} FROM ${p.table}`));
           tables.push({ table: `${p.source}:${p.table}`, targetTable: p.target, source: pgSide, target: fileSide, match: pgSide.rows === fileSide.rows && pgSide.sha256 === fileSide.sha256 });
@@ -110,7 +115,7 @@ export async function exportToSqlite(o: ExportOptions, source: CopyTarget): Prom
   } finally {
     await tracker.close().catch(() => undefined);
     await session.close().catch(() => undefined);
-    await sender?.close().catch(() => undefined);
+    for (const db of Object.values(more)) await db?.close().catch(() => undefined);
     await lock.release();
   }
 }

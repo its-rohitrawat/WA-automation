@@ -69,10 +69,11 @@ describe.runIf(onSqlite)('the copy plan', () => {
 });
 
 describe.runIf(onSqlite)('the WhatsApp session files', () => {
-  it('go to wa_auth: each phone, live and backup, keys and values only', () => {
+  it('go to wa_auth: each phone (phones 2 to 5 too, lane C), live and backup, keys and values only', () => {
     expect(SESSION_PLANS.map((p) => [p.source, p.table, p.fixed.phone, p.fixed.slot])).toEqual([
       ['session', 'auth', 'founder', 'live'],
       ['session', 'auth_backup', 'founder', 'backup'],
+      ...[2, 3, 4, 5].flatMap((n) => [[`phone${n}`, 'auth', `phone${n}`, 'live'], [`phone${n}`, 'auth_backup', `phone${n}`, 'backup']]),
       ['sender', 'auth', 'spare', 'live'],
       ['sender', 'auth_backup', 'spare', 'backup'],
     ]);

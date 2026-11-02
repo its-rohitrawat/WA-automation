@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -6,6 +7,8 @@ import { copyToPostgres, type CopyReport } from '../../src/migrate/copy.ts';
 import { FOUNDER_TENANT_ID } from '../../src/platform/store.ts';
 import { SqliteDb } from '../../src/store/engine/sqlite.ts';
 import { acquireLock } from '../../src/util/lock.ts';
+import { sessionFileOf } from '../../src/wa/authState.ts';
+import { PHONES_KV_KEY } from '../../src/wa/phoneList.ts';
 import { FakeTarget } from './fakeTarget.ts';
 import { fixture, type Fixture } from './fixture.ts';
 import { onSqlite } from '../helpers/db.ts';
@@ -87,6 +90,31 @@ describe.runIf(onSqlite)('migrate-to-postgres --apply', () => {
     expect(target.setvals).toContain('platform_audit');
     expect(target.setvals).not.toContain('wa_auth');
     expect(f.hashes()).toEqual(before);
+  });
+
+  it('carries phones 2 and 3 (lane C, change 7): each session file into wa_auth under its own phone, row for row, and the phone list', async () => {
+    const g = await fixture({ phones: { key: randomBytes(32), ids: [2, 3] } });
+    const before = g.hashes();
+    const backupDir = join(g.dir, 'backup');
+    const r = await copyToPostgres({ dataDir: g.data, tenantId: FOUNDER_TENANT_ID, apply: true, backupDir }, target);
+    expect(r).toMatchObject({ ok: true, applied: true });
+    expect(r.tables.filter((t) => t.targetTable === 'wa_auth').map((t) => [t.table, t.match])).toEqual([
+      ['session:auth', true], ['session:auth_backup', true], ['phone2:auth', true], ['phone2:auth_backup', true], ['phone3:auth', true], ['phone3:auth_backup', true],
+    ]);
+    expect(readdirSync(backupDir).sort()).toEqual(['session-2.db', 'session-3.db', 'session.db', 'tracker.db']);
+    for (const phone of ['phone2', 'phone3'] as const) {
+      const src = SqliteDb.open(sessionFileOf(g.data, phone), { readonly: true });
+      for (const [table, slot] of [['auth', 'live'], ['auth_backup', 'backup']] as const) {
+        const rows = await src.all(`SELECT k, v FROM ${table} ORDER BY k`);
+        expect(rows.length, `${phone} ${table}`).toBeGreaterThan(0);
+        expect(await target.db.all('SELECT k, v FROM wa_auth WHERE phone = ? AND slot = ? ORDER BY k', [phone, slot]), `${phone} ${table}`).toEqual(rows);
+      }
+      await src.close();
+    }
+    const tracker = SqliteDb.open(trackerDbPath(g.data), { readonly: true });
+    expect(await target.db.get('SELECT v FROM kv WHERE k = ?', [PHONES_KV_KEY])).toEqual(await tracker.get('SELECT v FROM kv WHERE k = ?', [PHONES_KV_KEY]));
+    await tracker.close();
+    expect(g.hashes()).toEqual(before);
   });
 
   it('needs --backup-dir, and a folder that does not exist yet', async () => {

@@ -1,12 +1,13 @@
 import { existsSync, mkdirSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import { senderSessionDbPath, sessionDbPath, trackerDbPath } from '../config/paths.ts';
+import { trackerDbPath } from '../config/paths.ts';
 import { SqliteDb } from '../store/engine/sqlite.ts';
 import type { Sql } from '../store/engine/types.ts';
 import { MIGRATIONS } from '../store/migrations.ts';
 import { acquireLock, AlreadyRunningError } from '../util/lock.ts';
+import { sessionFileOf } from '../wa/authState.ts';
 import { tableChecksum, type TableSum } from './canonical.ts';
-import { copyPlan, SESSION_PLANS, type TablePlan } from './plan.ts';
+import { copyPlan, SESSION_PHONE, SESSION_PLANS, type SessionSource, type TablePlan } from './plan.ts';
 import type { CopyTarget } from './target.ts';
 
 // migrate-to-postgres (design 8.3; plan 2026-10-29-saas-s3-s6.md, S3.4): the founder's SQLite files into Postgres as one
@@ -62,13 +63,18 @@ class Rollback extends Error {
   }
 }
 
+/** Every file the copy reads: tracker.db, then each phone's session file (phones 2 to 5 too). */
+const SOURCES: readonly Source[] = ['tracker', ...(Object.keys(SESSION_PHONE) as SessionSource[])];
+
 function files(dataDir: string): Record<Source, string> {
-  return { tracker: trackerDbPath(dataDir), session: sessionDbPath(dataDir), sender: senderSessionDbPath(dataDir) };
+  const out = { tracker: trackerDbPath(dataDir) } as Record<Source, string>;
+  for (const s of Object.keys(SESSION_PHONE) as SessionSource[]) out[s] = sessionFileOf(dataDir, SESSION_PHONE[s]);
+  return out;
 }
 
 function openSources(paths: Record<Source, string>): Sources {
   const out: Sources = {};
-  for (const k of ['tracker', 'session', 'sender'] as const) if (existsSync(paths[k])) out[k] = SqliteDb.open(paths[k], { readonly: true });
+  for (const k of SOURCES) if (existsSync(paths[k])) out[k] = SqliteDb.open(paths[k], { readonly: true });
   return out;
 }
 
@@ -83,7 +89,7 @@ const rowsOf = (db: SqliteDb, p: TablePlan) => db.all<Record<string, unknown>>(`
 async function backupAndVerify(sources: Sources, paths: Record<Source, string>, dir: string, plans: readonly TablePlan[]): Promise<Record<Source, string>> {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const out = {} as Record<Source, string>;
-  for (const k of ['tracker', 'session', 'sender'] as const) {
+  for (const k of SOURCES) {
     const src = sources[k];
     if (!src) continue;
     out[k] = join(dir, basename(paths[k]));
