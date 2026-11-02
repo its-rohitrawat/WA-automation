@@ -375,4 +375,37 @@ CREATE INDEX outbox_client ON outbox(client_id, created_at);
 CREATE INDEX outbox_created ON outbox(created_at);
 `,
   },
+  {
+    // The assistant's chats (November release, changes 1 and 8): kept per workspace, so the owner finds a past chat again
+    // and an answer still streaming when the owner leaves the page finishes and is saved. created_by: the email that
+    // started the chat (the workspace's owners share its chats). A message is a question (user) or an answer
+    // (assistant); an answer is running while the agent writes it, then done, stopped or failed. cards: the change
+    // cards it drafted, with what became of each; links: the screens it named (JSON text). Deleting a chat deletes its
+    // messages first. Lane A's version (v14 is lane C's). Additive only.
+    version: 13,
+    sql: `
+CREATE TABLE assistant_chats (
+  id INTEGER PRIMARY KEY,
+  created_by TEXT NOT NULL CHECK (length(created_by) BETWEEN 1 AND 320),
+  title TEXT NOT NULL CHECK (length(title) BETWEEN 1 AND 80),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX assistant_chats_updated ON assistant_chats(updated_at);
+CREATE TABLE assistant_messages (
+  id INTEGER PRIMARY KEY,
+  chat_id INTEGER NOT NULL REFERENCES assistant_chats(id),
+  role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+  body TEXT NOT NULL CHECK (length(body) <= 16000),
+  status TEXT NOT NULL CHECK (status IN ('running', 'done', 'stopped', 'failed')),
+  note TEXT CHECK (note IS NULL OR length(note) BETWEEN 1 AND 300),
+  cost_usd REAL NOT NULL DEFAULT 0,
+  cards TEXT NOT NULL DEFAULT '[]' CHECK (length(cards) <= 20000),
+  links TEXT NOT NULL DEFAULT '[]' CHECK (length(links) <= 4000),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX assistant_messages_chat ON assistant_messages(chat_id, id);
+`,
+  },
 ];

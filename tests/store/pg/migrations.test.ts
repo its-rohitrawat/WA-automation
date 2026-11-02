@@ -1,8 +1,9 @@
+import { createHash } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { PLATFORM_TABLES } from '../../../src/platform/pgSchema.ts';
 import { openDb, type Db } from '../../../src/store/db.ts';
 import {
-  CUSTOMER_TABLES, FOUNDER_TENANT_ID, P1_SQL, P2_SQL, P3_GRANTS_SQL, P3_SQL, PG_LATEST, PG_MIGRATIONS, SCHEMA_VERSION_FN_SQL, WEB_SESSIONS_PG_SQL,
+  CUSTOMER_TABLES, FOUNDER_TENANT_ID, P1_SQL, P2_SQL, P3_GRANTS_SQL, P3_SQL, P6_SQL, PG_LATEST, PG_MIGRATIONS, SCHEMA_VERSION_FN_SQL, WEB_SESSIONS_PG_SQL,
 } from '../../../src/store/pg/migrations.ts';
 
 // Until S2's test server exists (S2.7), the Postgres schema is checked against the migrated SQLite schema by reading
@@ -68,6 +69,9 @@ const pgIndexes = (sql: string) =>
   [...sql.matchAll(/CREATE INDEX (\w+) ON (\w+) \(([^)]*)\);/g)].map((m) => ({ name: m[1]!, table: m[2]!, cols: m[3]!.split(',').map((c) => c.trim()) }));
 
 const P1 = pgTables(P1_SQL);
+/** Every customer table as the migrations create it: P1's, then the assistant's chats (P6, November release). */
+const CUSTOMER_SQL = `${P1_SQL}\n${P6_SQL}`;
+const CUST = pgTables(CUSTOMER_SQL);
 const WEB = pgTables(WEB_SESSIONS_PG_SQL);
 
 let db: Db;
@@ -93,12 +97,13 @@ function expectedTypes(c: LiteCol): string[] {
   throw new Error(`unexpected SQLite type ${c.type} for ${c.name}`);
 }
 
-describe('the Postgres schema (P1 to P3) against the SQLite schema', () => {
-  it('has every SQLite table: the customer tables in P1, web_sessions on the platform side', async () => {
+describe('the Postgres schema (P1 to P6) against the SQLite schema', () => {
+  it('has every SQLite table: the customer tables in P1 and P6, web_sessions on the platform side', async () => {
     const lite = await sqliteTables();
     const customer = lite.filter((t) => t !== 'web_sessions');
     expect([...customer].sort()).toEqual(CUSTOMER_TABLES.filter((t) => t !== 'wa_auth').sort());
-    for (const t of CUSTOMER_TABLES) expect(P1.has(t), t).toBe(true);
+    for (const t of CUSTOMER_TABLES) expect(CUST.has(t), t).toBe(true);
+    expect([...pgTables(P6_SQL).keys()]).toEqual(['assistant_chats', 'assistant_messages']);
     expect(P1.has('tenants')).toBe(true);
     expect(P1.has('web_sessions')).toBe(false);
     expect(WEB.has('web_sessions')).toBe(true);
@@ -108,15 +113,15 @@ describe('the Postgres schema (P1 to P3) against the SQLite schema', () => {
 
   it('gives every customer table its tenant_id first, defaulting to the transaction’s customer', () => {
     for (const t of CUSTOMER_TABLES) {
-      const first = P1.get(t)!.columns[0]!;
+      const first = CUST.get(t)!.columns[0]!;
       expect(first.def, t).toBe("tenant_id uuid NOT NULL DEFAULT current_setting('app.tenant_id')::uuid REFERENCES tenants (id)");
-      expect(P1.get(t)!.columns.filter((c) => c.name === 'tenant_id'), t).toHaveLength(1);
+      expect(CUST.get(t)!.columns.filter((c) => c.name === 'tenant_id'), t).toHaveLength(1);
     }
   });
 
   it('has exactly the SQLite columns, with types, NOT NULL and defaults that match', async () => {
     for (const t of [...CUSTOMER_TABLES.filter((x) => x !== 'wa_auth'), 'web_sessions']) {
-      const pg = (t === 'web_sessions' ? WEB : P1).get(t)!;
+      const pg = (t === 'web_sessions' ? WEB : CUST).get(t)!;
       const lite = await liteColumns(t);
       expect(pg.columns.map((c) => c.name).filter((n) => n !== 'tenant_id').sort(), t).toEqual(lite.map((c) => c.name).sort());
       for (const c of lite) {
@@ -137,7 +142,7 @@ describe('the Postgres schema (P1 to P3) against the SQLite schema', () => {
       // A text primary key (kv.k, reports.date, settings.k) has no index row of its own here: take it from the columns.
       const textPk = (await liteColumns(t)).filter((c) => c.pk === 1 && c.type.toUpperCase() !== 'INTEGER').map((c) => c.name);
       if (textPk.length > 0) sets.push(textPk);
-      const pg = P1.get(t)!.constraints;
+      const pg = CUST.get(t)!.constraints;
       for (const cols of sets) {
         const want = ['tenant_id', ...cols].join(', ');
         expect(pg.some((c) => c === `UNIQUE (${want})` || c === `PRIMARY KEY (${want})`), `${t} (${want})`).toBe(true);
@@ -149,10 +154,10 @@ describe('the Postgres schema (P1 to P3) against the SQLite schema', () => {
   it('turns every foreign key into (tenant_id, column) to a parent with UNIQUE (tenant_id, id)', async () => {
     for (const t of CUSTOMER_TABLES.filter((x) => x !== 'wa_auth')) {
       const fks = await db.all<{ table: string; from: string; to: string }>(`SELECT "table", "from", "to" FROM pragma_foreign_key_list('${t}')`);
-      const pg = P1.get(t)!;
+      const pg = CUST.get(t)!;
       for (const fk of fks) {
         expect(pg.constraints, `${t}.${fk.from}`).toContain(`FOREIGN KEY (tenant_id, ${fk.from}) REFERENCES ${fk.table} (tenant_id, ${fk.to})`);
-        expect(P1.get(fk.table)!.constraints, `${fk.table} parent of ${t}`).toContain(`UNIQUE (tenant_id, ${fk.to})`);
+        expect(CUST.get(fk.table)!.constraints, `${fk.table} parent of ${t}`).toContain(`UNIQUE (tenant_id, ${fk.to})`);
         expect(pg.columns.find((c) => c.name === fk.from)!.def, `${t}.${fk.from}`).not.toMatch(/REFERENCES/); // never a single-column key
       }
       const declared = pg.constraints.filter((c) => c.startsWith('FOREIGN KEY'));
@@ -163,7 +168,7 @@ describe('the Postgres schema (P1 to P3) against the SQLite schema', () => {
   });
 
   it('has every SQLite index, tenant_id first and then the same columns', async () => {
-    const pg = pgIndexes(P1_SQL);
+    const pg = pgIndexes(CUSTOMER_SQL);
     const lite = await db.all<{ name: string; tbl_name: string }>("SELECT name, tbl_name FROM sqlite_master WHERE type = 'index' AND sql IS NOT NULL");
     for (const ix of lite) {
       const cols = (await db.all<{ name: string }>(`SELECT name FROM pragma_index_info('${ix.name}') ORDER BY seqno`)).map((c) => c.name);
@@ -198,7 +203,7 @@ describe('the Postgres schema (P1 to P3) against the SQLite schema', () => {
     expect(SCHEMA_VERSION_FN_SQL).toContain('REVOKE ALL ON FUNCTION wa_schema_version() FROM PUBLIC;');
     expect(SCHEMA_VERSION_FN_SQL).toContain('GRANT EXECUTE ON FUNCTION wa_schema_version() TO wa_app, wa_platform;');
     expect(SCHEMA_VERSION_FN_SQL).not.toMatch(/\b(INSERT|UPDATE|DELETE)\b/);
-    expect(PG_LATEST).toBe(5);
+    expect(PG_LATEST).toBe(6);
   });
 
   it('P4 drops the founder default from web_sessions.tenant_id, and only that (P3 is never edited)', () => {
@@ -208,7 +213,7 @@ describe('the Postgres schema (P1 to P3) against the SQLite schema', () => {
   });
 
   it('P5 takes SELECT on the sequences from wa_app (now and later) and makes later functions not PUBLIC (review S2)', () => {
-    expect(PG_MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5]);
+    expect(PG_MIGRATIONS.map((m) => m.version).slice(0, 5)).toEqual([1, 2, 3, 4, 5]);
     expect(PG_MIGRATIONS[4]!.sql.trim().split('\n')).toEqual([
       'REVOKE SELECT ON ALL SEQUENCES IN SCHEMA public FROM wa_app;',
       'ALTER DEFAULT PRIVILEGES FOR ROLE wa_owner IN SCHEMA public REVOKE SELECT ON SEQUENCES FROM wa_app;',
@@ -217,15 +222,37 @@ describe('the Postgres schema (P1 to P3) against the SQLite schema', () => {
     expect(PG_MIGRATIONS[4]!.sql).not.toMatch(/\bGRANT\b/); // it only takes away
   });
 
-  it('P2 enables, forces and scopes row-level security on every customer table, and only those', () => {
-    for (const t of CUSTOMER_TABLES) {
+  it('P2 enables, forces and scopes row-level security on every table P1 made, and only those', () => {
+    const inP1 = CUSTOMER_TABLES.filter((t) => P1.has(t));
+    for (const t of inP1) {
       expect(P2_SQL, t).toContain(`ALTER TABLE ${t} ENABLE ROW LEVEL SECURITY;`);
       expect(P2_SQL, t).toContain(`ALTER TABLE ${t} FORCE ROW LEVEL SECURITY;`);
       expect(P2_SQL, t).toContain(`CREATE POLICY ${t}_tenant ON ${t}\n  USING (tenant_id = current_setting('app.tenant_id', true)::uuid)\n  WITH CHECK (tenant_id = current_setting('app.tenant_id', true)::uuid);`);
     }
-    expect([...P2_SQL.matchAll(/ENABLE ROW LEVEL SECURITY/g)]).toHaveLength(CUSTOMER_TABLES.length);
+    expect([...P2_SQL.matchAll(/ENABLE ROW LEVEL SECURITY/g)]).toHaveLength(inP1.length);
     expect(P2_SQL).toContain('REVOKE ALL ON tenants, pg_schema_version FROM wa_app;');
     for (const t of PLATFORM_TABLES) expect(P2_SQL, t).not.toContain(`ALTER TABLE ${t} `);
+  });
+
+  it('P2 is exactly the SQL applied since S2: a table added later never changes it (it would run before its table exists)', () => {
+    // P2_SQL as on main d61bd9d (21 tables), byte for byte.
+    expect(P2_SQL).toHaveLength(6185);
+    expect(createHash('sha256').update(P2_SQL).digest('hex')).toBe('0933f921202d7c921ed1b1cd41727c03bd17af8b6af5251bd2a6b4919380e973');
+    for (const t of ['assistant_chats', 'assistant_messages']) expect(P2_SQL, t).not.toContain(t);
+  });
+
+  it('P6 makes the assistant chats per customer, with forced row-level security on them only (November release)', () => {
+    expect(PG_MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(PG_MIGRATIONS[5]!.sql).toBe(P6_SQL);
+    expect(CUSTOMER_TABLES.slice(-2)).toEqual(['assistant_chats', 'assistant_messages']);
+    for (const t of ['assistant_chats', 'assistant_messages']) {
+      expect(P6_SQL, t).toContain(`ALTER TABLE ${t} ENABLE ROW LEVEL SECURITY;\nALTER TABLE ${t} FORCE ROW LEVEL SECURITY;`);
+      expect(P6_SQL, t).toContain(`CREATE POLICY ${t}_tenant ON ${t}\n  USING (tenant_id = current_setting('app.tenant_id', true)::uuid)\n  WITH CHECK (tenant_id = current_setting('app.tenant_id', true)::uuid);`);
+    }
+    expect([...P6_SQL.matchAll(/ENABLE ROW LEVEL SECURITY/g)]).toHaveLength(2);
+    // The tables come before their row security; nothing is dropped, granted or changed elsewhere.
+    expect(P6_SQL.indexOf('CREATE TABLE assistant_messages')).toBeLessThan(P6_SQL.indexOf('ALTER TABLE assistant_chats ENABLE'));
+    expect(P6_SQL).not.toMatch(/\b(DROP|GRANT|DELETE|UPDATE|INSERT)\b|ALTER TABLE (?!assistant_)/);
   });
 
   it('P3 ends by taking the platform tables back from wa_app and granting wa_platform and wa_backup (A4)', () => {

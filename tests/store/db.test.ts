@@ -23,15 +23,15 @@ describe.runIf(onSqlite)('openDb', () => {
     expect(idx).toEqual(expect.arrayContaining(['tasks_client_status', 'task_events_client_at', 'media_due', 'media_client', 'meetings_due', 'meetings_conference']));
   });
 
-  it('is at schema version 12 straight after openDb', () => {
+  it('is at schema version 13 straight after openDb', () => {
     const db = openDb(':memory:');
-    expect((rawOf(db).prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(12);
+    expect((rawOf(db).prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(13);
   });
 
   it('is safe to migrate twice', () => {
     const db = openDb(':memory:');
     migrate(rawOf(db));
-    expect((rawOf(db).prepare('SELECT COUNT(*) AS n FROM schema_version').get() as { n: number }).n).toBe(12);
+    expect((rawOf(db).prepare('SELECT COUNT(*) AS n FROM schema_version').get() as { n: number }).n).toBe(13);
   });
 
   it('overwrites deleted content, so wiped download details do not stay in free pages', () => {
@@ -58,7 +58,7 @@ describe.runIf(onSqlite)('migrate: a skipped migration', () => {
     const db = new Database(':memory:');
     migrate(db, withoutV6);
     expect(versions(db)).toEqual([1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12]);
-    expect(() => migrate(db)).toThrow('database is at v12 but v6 was never applied; restore a backup or contact the developer');
+    expect(() => migrate(db)).toThrow('database is at v13 but v6 was never applied; restore a backup or contact the developer');
     expect(versions(db)).toEqual([1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12]);
     expect(db.prepare("SELECT name FROM sqlite_master WHERE name = 'reports'").get()).toBeUndefined();
   });
@@ -67,7 +67,7 @@ describe.runIf(onSqlite)('migrate: a skipped migration', () => {
     const db = new Database(':memory:');
     migrate(db);
     db.prepare('DELETE FROM schema_version WHERE version IN (2, 6)').run();
-    expect(() => migrate(db)).toThrow('database is at v12 but v2, v6 were never applied');
+    expect(() => migrate(db)).toThrow('database is at v13 but v2, v6 were never applied');
   });
 
   it('applies every version in order on a fresh database, a later one after them, and a database with every version recorded migrates as before', () => {
@@ -447,6 +447,46 @@ describe.runIf(onSqlite)('migration v12 (Open chat: the outbox)', () => {
     expect(() => put(rawOf(db), { uuid: '00000000-0000-4000-8000-000000000003', text: '' })).toThrowError(/CHECK/);
     expect(() => put(rawOf(db), { uuid: '00000000-0000-4000-8000-000000000004', text: 'x'.repeat(4097) })).toThrowError(/CHECK/);
     expect(() => put(rawOf(db), { uuid: '00000000-0000-4000-8000-000000000005', client: 99 })).toThrowError(/FOREIGN KEY/);
+  });
+});
+
+describe.runIf(onSqlite)('migration v13 (November release: the assistant chats)', () => {
+  const chat = (db: Database.Database, o: Record<string, unknown> = {}) =>
+    db.prepare(`INSERT INTO assistant_chats (created_by, title, created_at, updated_at) VALUES (@by, @title, '2026-11-02T08:00:00Z', '2026-11-02T08:00:00Z')`)
+      .run({ by: 'owner@example.com', title: 'Summarise today', ...o });
+  const msg = (db: Database.Database, o: Record<string, unknown> = {}) =>
+    db.prepare(`INSERT INTO assistant_messages (chat_id, role, body, status, created_at, updated_at) VALUES (@chat, @role, @body, @status, '2026-11-02T08:00:00Z', '2026-11-02T08:00:00Z')`)
+      .run({ chat: 1, role: 'user', body: 'Summarise today', status: 'done', ...o });
+
+  it('is additive only: two new tables and their indexes', () => {
+    const v13 = MIGRATIONS.find((m) => m.version === 13)!;
+    expect(v13.sql).not.toMatch(/\b(DROP|DELETE|UPDATE|INSERT|RENAME|ALTER)\b/i);
+    expect(v13.sql.match(/\bCREATE TABLE (\w+)/g)).toEqual(['CREATE TABLE assistant_chats', 'CREATE TABLE assistant_messages']);
+  });
+
+  it('upgrades a v12 database with data, keeping every row', () => {
+    const db = new Database(':memory:');
+    db.pragma('foreign_keys = ON');
+    migrate(db, MIGRATIONS.filter((m) => m.version <= 12));
+    db.prepare(`INSERT INTO clients (code, name, group_id, phases) VALUES ('SHA', 'Sharma', '120363000000000001@g.us', '[]')`).run();
+    const before = db.prepare('SELECT * FROM clients').all();
+    migrate(db);
+    expect(db.prepare('SELECT * FROM clients').all()).toEqual(before);
+    expect(db.prepare('SELECT COUNT(*) AS n FROM assistant_chats').get()).toEqual({ n: 0 });
+  });
+
+  it('a titled chat, and messages of a known role and status in an existing chat, within their lengths', () => {
+    const db = rawOf(openDb(':memory:'));
+    chat(db);
+    expect(() => chat(db, { title: '' })).toThrowError(/CHECK/);
+    expect(() => chat(db, { title: 'x'.repeat(81) })).toThrowError(/CHECK/);
+    msg(db);
+    msg(db, { role: 'assistant', body: '', status: 'running' });
+    expect(() => msg(db, { role: 'system' })).toThrowError(/CHECK/);
+    expect(() => msg(db, { status: 'queued' })).toThrowError(/CHECK/);
+    expect(() => msg(db, { body: 'x'.repeat(16_001) })).toThrowError(/CHECK/);
+    expect(() => msg(db, { chat: 99 })).toThrowError(/FOREIGN KEY/);
+    expect(db.prepare("SELECT cost_usd, cards, links, note FROM assistant_messages WHERE role = 'assistant'").get()).toEqual({ cost_usd: 0, cards: '[]', links: '[]', note: null });
   });
 });
 
