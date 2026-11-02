@@ -5,7 +5,7 @@
 // the founder's WhatsApp, once (the uuid made here makes a repeated request find the first one). Every text from the
 // agent is shown through esc(): group messages are untrusted.
 import { ApiError, get, post } from '../api.js';
-import { readChat, readMembers, readSendResult } from '../contract.js';
+import { readChat, readDeleteResult, readMembers, readSendResult } from '../contract.js';
 import { $, esc, icon, toast } from '../dom.js';
 import { clock } from '../format.js';
 import { closeDrawer, openChatLayer, openDrawerElement } from './drawer.js';
@@ -38,7 +38,7 @@ const desk = matchMedia('(hover: hover) and (pointer: fine)');
  *   draft: string, armed: boolean, onBack: () => void, names: Record<string, string>, members: Member[] | null,
  *   reading: Promise<{ name: string, members: Member[] } | { name: string, note: string }> | null,
  *   failed: { note: string, at: number } | null, labels: Map<string, string>, picks: Map<string, string>,
- *   picker: { start: number, query: string, active: number } | null } | null}
+ *   picker: { start: number, query: string, active: number } | null, cleared: boolean, deleting: boolean } | null}
  */
 let chat = null;
 
@@ -157,7 +157,9 @@ function listHtml() {
     if (d !== lastDay) parts.push(`<div class="ch-day" role="separator"><span>${esc(dayLabel(d))}</span></div>`);
     for (const o of own) parts.push(outBubble(o));
   }
-  if (parts.length === 0) parts.push('<p class="ch-empty">No messages stored for this group yet.</p>');
+  if (parts.length === 0) {
+    parts.push(chat.cleared ? '<p class="ch-empty">You deleted this chat. New messages in the group will show here.</p>' : '<p class="ch-empty">No messages stored for this group yet.</p>');
+  }
   return parts.join('');
 }
 
@@ -219,6 +221,7 @@ function take(d, newest) {
     return;
   }
   if (chat.messages.size <= d.messages.length) chat.hasOlder = d.hasOlder;
+  chat.cleared = d.cleared;
   const footChanged = chat.sendingOn !== d.sendingOn || chat.connected !== d.connected;
   chat.sendingOn = d.sendingOn;
   chat.connected = d.connected;
@@ -546,6 +549,52 @@ function toWhatsApp(shown, picks) {
   return { text, tagged };
 }
 
+/** Opens or closes the chat's menu (the header's dots). @param {NonNullable<typeof chat>} c @param {boolean} show */
+function toggleMenu(c, show) {
+  const menu = /** @type {HTMLElement} */ ($('.ch-menu', c.el));
+  menu.hidden = !show;
+  c.el.querySelector('[data-chat-menu]')?.setAttribute('aria-expanded', String(show));
+  if (show) /** @type {HTMLElement | null} */ (menu.querySelector('[data-chat-delete]'))?.focus();
+}
+
+/**
+ * Delete chat (November release, owner decision 2 Nov 2026): after a confirm that names the group and says what happens,
+ * the agent deletes the chat on the founder's phone's WhatsApp and hides it here. Deleted, or not surely: the chat is
+ * emptied here (a new message brings it back). Not deleted: nothing changes.
+ */
+async function deleteChat() {
+  const c = chat;
+  if (!c || c.deleting) return;
+  const yes = await confirmDialog({
+    eyebrow: 'Delete chat',
+    title: `Delete the chat with ${c.groupName}?`,
+    text: 'This deletes the chat on your phone’s WhatsApp and hides it here. It can’t be undone. The agent’s saved messages and tasks stay, and the group stays approved: the agent keeps reading it, and a new message brings the chat back.',
+    yes: 'Delete chat',
+  });
+  if (!yes || chat !== c) return;
+  c.deleting = true;
+  try {
+    const r = readDeleteResult(await post(`/clients/${encodeURIComponent(c.code)}/chat/delete`, { confirm: true }));
+    if (chat !== c) return;
+    if (r.state === 'failed') {
+      toast(r.code === 'whatsapp_not_connected' ? 'WhatsApp isn’t connected, so the chat was not deleted.' : 'The chat was not deleted.', false);
+      return;
+    }
+    toast(r.state === 'deleted' ? 'Chat deleted.' : 'Hidden here. It may not have been deleted on your phone: check WhatsApp.', r.state === 'deleted');
+    // Emptied here at once; the dashboard's own messages still on their way stay.
+    c.messages.clear();
+    c.outbox = new Map([...c.outbox].filter(([, o]) => o.local === 'inflight'));
+    c.hasOlder = false;
+    c.cleared = true;
+    draw({ toEnd: true });
+    void loadNewest();
+  } catch (e) {
+    if (chat === c) toast(e instanceof ApiError ? e.message : 'The chat could not be deleted. Try again.', false);
+  } finally {
+    c.deleting = false;
+  }
+}
+
 /** Back to the chat from the group info panel. */
 function closeInfo() {
   const c = chat;
@@ -564,7 +613,9 @@ export function openChat(code, onBack) {
   // The group's picture and name open its info, as in WhatsApp. The name is the sheet's title (the h2), as a button.
   const el = openChatLayer(`<div class="ch-head"><button class="icon-btn" type="button" data-chat-back aria-label="Back to the client">${icon('arrowL', 18)}</button>
       <span class="ch-av" data-chat-info aria-hidden="true">${icon('users', 18)}</span><div class="grow-1 ch-title"><h2><button class="ch-who" type="button" data-chat-info aria-haspopup="dialog">Loading…</button></h2><small>${esc(code)} · stored messages</small></div>
-      <button class="icon-btn" type="button" data-close aria-label="Close the chat">${icon('close', 18)}</button></div>
+      <button class="icon-btn" type="button" data-chat-menu aria-haspopup="menu" aria-expanded="false" aria-controls="ch-menu" aria-label="Chat menu">${icon('dots', 18)}</button>
+      <button class="icon-btn" type="button" data-close aria-label="Close the chat">${icon('close', 18)}</button>
+      <div class="ch-menu" id="ch-menu" role="menu" aria-label="Chat menu" hidden><button type="button" role="menuitem" data-chat-delete>${icon('trash', 16)}Delete chat</button></div></div>
     <div class="ch-body" tabindex="0" aria-label="Messages"><button class="ch-older link" type="button" hidden>Load older messages</button>
       <div class="ch-list" aria-live="polite"><p class="ch-empty">Loading the messages…</p></div></div>
     <div class="ch-foot"></div>
@@ -572,7 +623,7 @@ export function openChat(code, onBack) {
   chat = {
     code, el, messages: new Map(), outbox: new Map(), hasOlder: false, loadingOlder: false, sendingOn: false, connected: false,
     groupName: code, clientName: '', replyTo: null, draft: '', armed: false, onBack,
-    names: {}, members: null, reading: null, failed: null, labels: new Map(), picks: new Map(), picker: null,
+    names: {}, members: null, reading: null, failed: null, labels: new Map(), picks: new Map(), picker: null, cleared: false, deleting: false,
   };
   const body = /** @type {HTMLElement} */ ($('.ch-body', el));
   // Scrolling up near the top loads the page before; the button does the same for keyboards. Checked on scroll, and
@@ -585,6 +636,14 @@ export function openChat(code, onBack) {
   el.addEventListener('click', (e) => {
     const t = /** @type {Element} */ (e.target);
     if (!chat) return;
+    // The chat's menu: the dots open it; Delete chat asks first; a click anywhere else closes it.
+    const menuOpen = !(/** @type {HTMLElement} */ ($('.ch-menu', el))).hidden;
+    if (t.closest('[data-chat-menu]')) return toggleMenu(chat, !menuOpen);
+    if (t.closest('[data-chat-delete]')) {
+      toggleMenu(chat, false);
+      return void deleteChat();
+    }
+    if (menuOpen && !t.closest('.ch-menu')) toggleMenu(chat, false);
     if (t.closest('[data-chat-back]')) {
       const back = chat.onBack;
       closeDrawer(true);
@@ -663,7 +722,14 @@ export function openChat(code, onBack) {
       e.preventDefault();
       void send();
     }
-    // Escape in the group info goes back to the chat; the layer's own Escape (closing the chat) is not reached.
+    // Escape closes the chat's menu, or leaves the group info for the chat; the layer's own Escape (closing the chat) is
+    // not reached then.
+    if (e.key === 'Escape' && chat && !(/** @type {HTMLElement} */ ($('.ch-menu', el))).hidden) {
+      e.stopPropagation();
+      toggleMenu(chat, false);
+      /** @type {HTMLElement | null} */ (el.querySelector('[data-chat-menu]'))?.focus();
+      return;
+    }
     if (e.key === 'Escape' && !(/** @type {HTMLElement} */ ($('.ch-info', el))).hidden) {
       e.stopPropagation();
       closeInfo();

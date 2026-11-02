@@ -2,7 +2,22 @@ import { describe, expect, it } from 'vitest';
 // The browser's own module, checked by tsconfig.web.json, which this project's tsconfig does not include: the import is
 // untyped here, as in tests/web/public.test.ts.
 // @ts-expect-error -- browser module (see above)
-import { readChat, readMembers } from '../../src/web/public/contract.js';
+import { readChat, readDeleteResult, readMembers } from '../../src/web/public/contract.js';
+
+describe('Delete chat in the browser', () => {
+  it('reads the outcome, and anything odd as unknown (it may have been done: never "deleted" by guess)', () => {
+    expect(readDeleteResult({ state: 'deleted', code: null })).toEqual({ state: 'deleted', code: null });
+    expect(readDeleteResult({ state: 'failed', code: 'whatsapp_not_connected' })).toEqual({ state: 'failed', code: 'whatsapp_not_connected' });
+    expect(readDeleteResult({ state: 'gone', code: '<b>' })).toEqual({ state: 'unknown', code: null });
+    expect(readDeleteResult(null)).toEqual({ state: 'unknown', code: null });
+  });
+
+  it('a chat page says when it is empty because the owner deleted it', () => {
+    expect(readChat({ cleared: true }).cleared).toBe(true);
+    expect(readChat({ cleared: 'yes' }).cleared).toBe(false);
+    expect(readChat({}).cleared).toBe(false);
+  });
+});
 
 describe('readChat: the names of the tags on the page (tagging)', () => {
   it('keeps a name for each tag the agent knows; anything else is dropped', () => {

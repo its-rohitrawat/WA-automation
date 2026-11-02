@@ -1,5 +1,6 @@
 import type { ClientRow } from '../store/clients.ts';
-import type { Db } from '../store/db.ts';
+import type { Db, Sql } from '../store/db.ts';
+import { getKv } from '../store/kv.ts';
 import { outboxToShow, type OutboxRow, type OutboxState } from '../store/outbox.ts';
 import { mentionTags, tagOf, type GroupMember } from '../wa/groupMembers.ts';
 import { messageKind, oneLine, senderLabel, type ClientMessage } from './clientQueries.ts';
@@ -54,6 +55,8 @@ export interface ChatPage {
    * are the text's own; no number is added.
    */
   names: Record<string, string>;
+  /** The owner deleted this chat (Delete chat) and nothing has come since: the newest page is empty for that reason. */
+  cleared: boolean;
 }
 
 // Line breaks stay (a chat message keeps its lines); other control and direction characters go.
@@ -130,24 +133,68 @@ async function messageQuote(db: Db, clientId: number, id: number): Promise<ChatO
 export async function chatPage(db: Db, c: ClientRow, now: Date, o: { before?: number; limit?: number } = {}): Promise<ChatPage> {
   const limit = Math.max(1, Math.min(CHAT_PAGE_MAX, Math.floor(o.limit ?? CHAT_PAGE)));
   let rows: RawMessage[];
+  // After Delete chat, only what came after its mark (by time, then row); with no mark, everything.
+  const hidden = await chatHidden(db, c.id);
+  const floor = { hts: hidden?.uptoTs ?? '', hid: hidden?.uptoId ?? 0 };
+  const AFTER_MARK = '(m.ts > @hts OR (m.ts = @hts AND m.id > @hid))';
   if (o.before !== undefined) {
     const cursor = await db.get<{ ts: string; id: number }>('SELECT ts, id FROM messages WHERE client_id = ? AND id = ?', [c.id, o.before]);
     rows = cursor
       ? await db.all<RawMessage>(
-        `${SELECT} WHERE m.client_id = @client AND (m.ts < @ts OR (m.ts = @ts AND m.id < @id)) ORDER BY m.ts DESC, m.id DESC LIMIT @limit`,
-        { client: c.id, ts: cursor.ts, id: cursor.id, limit: limit + 1 },
+        `${SELECT} WHERE m.client_id = @client AND (m.ts < @ts OR (m.ts = @ts AND m.id < @id)) AND ${AFTER_MARK} ORDER BY m.ts DESC, m.id DESC LIMIT @limit`,
+        { client: c.id, ts: cursor.ts, id: cursor.id, limit: limit + 1, ...floor },
       )
       : [];
   } else {
-    rows = await db.all<RawMessage>(`${SELECT} WHERE m.client_id = ? ORDER BY m.ts DESC, m.id DESC LIMIT ?`, [c.id, limit + 1]);
+    rows = await db.all<RawMessage>(`${SELECT} WHERE m.client_id = @client AND ${AFTER_MARK} ORDER BY m.ts DESC, m.id DESC LIMIT @limit`, { client: c.id, limit: limit + 1, ...floor });
   }
   const since = new Date(now.getTime() - OUTBOX_DAYS * 86_400_000).toISOString();
   const outbox: ChatOutboxItem[] = [];
-  if (o.before === undefined) for (const row of await outboxToShow(db, c.id, since)) outbox.push(await outboxItem(db, row));
+  if (o.before === undefined) {
+    for (const row of await outboxToShow(db, c.id, since)) if (!hidden || row.createdAt > hidden.at) outbox.push(await outboxItem(db, row));
+  }
   const messages = rows.slice(0, limit).map(toMessage);
   const texts = [...messages, ...outbox].flatMap((x) => [x.text, x.quote?.text ?? '']);
-  return { messages, hasOlder: rows.length > limit, outbox, names: await tagNames(db, c, texts) };
+  return {
+    messages, hasOlder: rows.length > limit, outbox, names: await tagNames(db, c, texts),
+    cleared: hidden !== null && o.before === undefined && messages.length === 0 && outbox.length === 0,
+  };
 }
+
+/**
+ * Delete chat's mark for a client (November release, owner decision 2 Nov 2026), in the key-value store, so no schema
+ * change: the newest message the delete reached (by time, then row), when it was asked, and how it went. The chat shows
+ * only what came after it, so a new message brings the chat back. Nothing is removed from the agent's store.
+ */
+export interface ChatHidden {
+  uptoTs: string;
+  uptoId: number;
+  at: string;
+  state: 'asking' | 'deleted' | 'unknown';
+  code: string | null;
+}
+
+export const chatHiddenKey = (clientId: number): string => `chat_hidden:${clientId}`;
+
+const HIDDEN_STATES: readonly string[] = ['asking', 'deleted', 'unknown'];
+
+/** The client's mark, or null (none, or one that can't be read: that hides nothing). */
+export async function chatHidden(db: Sql, clientId: number): Promise<ChatHidden | null> {
+  const raw = await getKv(db, chatHiddenKey(clientId));
+  if (!raw) return null;
+  try {
+    const v = JSON.parse(raw) as Partial<ChatHidden>;
+    if (typeof v.uptoTs === 'string' && typeof v.uptoId === 'number' && Number.isInteger(v.uptoId) && typeof v.at === 'string' && typeof v.state === 'string' && HIDDEN_STATES.includes(v.state)) {
+      return { uptoTs: v.uptoTs, uptoId: v.uptoId, at: v.at, state: v.state, code: typeof v.code === 'string' ? v.code : null };
+    }
+  } catch {
+    // an unreadable mark hides nothing
+  }
+  return null;
+}
+
+/** The message comes after the mark: by time, then row, as the chat orders them. */
+export const afterMark = (m: { ts: string; id: number }, h: ChatHidden): boolean => m.ts > h.uptoTs || (m.ts === h.uptoTs && m.id > h.uptoId);
 
 /**
  * The names of the tags in some texts: for each "@<digits>", this client's person whose id or number has those digits,

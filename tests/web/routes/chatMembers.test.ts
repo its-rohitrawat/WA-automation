@@ -6,7 +6,7 @@ import { upsertPerson } from '../../../src/store/people.ts';
 import { manualClock } from '../../../src/util/clock.ts';
 import { createLogger } from '../../../src/util/logger.ts';
 import type { GroupMember } from '../../../src/wa/groupMembers.ts';
-import { chatMembersHandler, type ChatDeps } from '../../../src/web/routes/chat.ts';
+import { chatMembersHandler, chatReadHandler, type ChatDeps } from '../../../src/web/routes/chat.ts';
 import type { OwnerContext } from '../../../src/web/routes/context.ts';
 import { MEHTA, NOW, seeded, SHARMA, testDb } from '../../helpers/db.ts';
 
@@ -109,6 +109,18 @@ describe('the group info panel: its members', () => {
     expect(view(await read())).toEqual({ known: false, groupName: 'Sharma x Studio', reason: 'members_unavailable', members: [] });
     delete deps.groupMembers;
     expect(view(await read())).toEqual({ known: false, groupName: 'Sharma x Studio', reason: 'members_unavailable', members: [] });
+  });
+
+  it('connected is per group: another group’s phone being open does not count for this one (more phones, lane C)', async () => {
+    deps.connected = (groupId) => groupId !== SHARMA.groupId;
+    members = [m(PN('919800000001'))];
+    expect(view(await read())).toEqual({ known: false, groupName: 'Sharma x Studio', reason: 'whatsapp_not_connected', members: [] });
+    expect(source).not.toHaveBeenCalled();
+    expect(view(await read('MEH')).known).toBe(true);
+    expect(source).toHaveBeenCalledWith(MEHTA.groupId);
+    const connectedOf = async (code: string) => ((await chatReadHandler(deps, CTX, code, {})).body as { connected: boolean }).connected;
+    expect(await connectedOf('SHA')).toBe(false);
+    expect(await connectedOf('MEH')).toBe(true);
   });
 
   it('is only for this workspace’s approved clients: another workspace’s client, an unapproved one or a bad code is 404, and nothing is asked', async () => {

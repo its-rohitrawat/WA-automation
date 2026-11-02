@@ -350,7 +350,17 @@ export function readChat(raw) {
       .filter((m) => m.id > 0 && m.at !== null),
     outbox: arr(r.outbox).map(outboxOf).filter((o) => o.uuid && o.at !== null),
     names: tagNames(r.names),
+    cleared: r.cleared === true,
   };
+}
+
+const DELETE_STATES = ['deleted', 'failed', 'unknown'];
+
+/** The answer to POST /clients/:code/chat/delete (Delete chat): how it went, and why when it did not. @param {unknown} raw */
+export function readDeleteResult(raw) {
+  const r = obj(raw);
+  const state = DELETE_STATES.includes(str(r.state)) ? str(r.state) : 'unknown';
+  return { state, code: /^[a-z_]{1,40}$/.test(str(r.code)) ? str(r.code) : null };
 }
 
 /**

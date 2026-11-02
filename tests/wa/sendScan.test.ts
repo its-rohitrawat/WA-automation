@@ -257,10 +257,23 @@ describe('the one change Delete chat makes on the founder’s WhatsApp (November
   });
 
   it('only the dashboard’s chat route deletes, and only the gateways and the runtime hand out the socket', () => {
-    // Subsets until the route calls it (lane B, piece B4); then these become exact, as the send's are.
-    for (const f of sources().filter((s) => /\bdeleteGroupChat\(/.test(s.text)).map((s) => s.file)) expect([CHAT_DELETE, 'web/routes/chat.ts']).toContain(f);
+    // The callers are exact (lane B, piece B4), as the send's are. The givers stay a list to choose from until the
+    // per-phone wiring (lane C, task 9) is in.
+    expect(sources().filter((s) => /\bdeleteGroupChat\(/.test(s.text)).map((s) => s.file).sort()).toEqual([CHAT_DELETE, 'web/routes/chat.ts']);
     const givers = sources().filter((s) => /\bchatDeleteSocket\(/.test(s.text)).map((s) => s.file);
     for (const f of givers) expect(['runtime/customerRuntime.ts', 'wa/gateway.ts', 'wa/phoneSet.ts', 'wa/switchableGateway.ts']).toContain(f);
     expect(givers).toEqual(expect.arrayContaining(['wa/gateway.ts', 'wa/switchableGateway.ts']));
+  });
+
+  it('the chat route checks the confirm and the client, claims the mark and logs the attempt before it deletes', () => {
+    const text = readFileSync(join(SRC, 'web', 'routes', 'chat.ts'), 'utf8');
+    const body = text.slice(text.indexOf('export async function chatDeleteHandler('));
+    const call = body.indexOf('await deleteGroupChat(');
+    expect(call).toBeGreaterThan(-1);
+    expect(body.match(/\bdeleteGroupChat\(/g)).toHaveLength(1);
+    for (const before of ['DeleteBody.safeParse(body)', 'const c = await approvedClient(deps, code);', 'if (!source) return', 'await setKv(tx, key, JSON.stringify(mark));', "'dashboard delete: asking WhatsApp'"]) {
+      expect(body.indexOf(before), before).toBeGreaterThan(-1);
+      expect(body.indexOf(before), before).toBeLessThan(call);
+    }
   });
 });
