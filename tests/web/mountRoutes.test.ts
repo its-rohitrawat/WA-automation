@@ -105,6 +105,36 @@ describe('the combined dashboard routes', () => {
   });
 });
 
+describe('the reading phones’ routes (lane C, change 7): mounted with their deps, behind the owner and change guards', () => {
+  const PHONES = '/dashboard/api/whatsapp/phones';
+  const phoneDeps = (calls: string[]): Partial<AgentRoutesDeps> => ({
+    phones: {
+      list: () => [{ id: 1, label: 'Phone 1', state: 'active', number: '…0001', status: 'open', groups: 2 }],
+      add: async (label) => (calls.push(`add ${String(label)}`), { id: 2, label: String(label), state: 'active', addedAt: NOW }),
+      rename: async (id, label) => (calls.push(`rename ${id}`), { id, label: String(label), state: 'active', addedAt: NOW }),
+      unlink: async (id) => (calls.push(`unlink ${id}`), { phone: { id, label: 'x', state: 'unlinked', addedAt: NOW }, loggedOut: true }),
+      remove: async (id) => (calls.push(`remove ${id}`), { id, label: 'x', state: 'active', addedAt: NOW }),
+    },
+  });
+
+  it('without them there are no phone routes; with them each route answers, and a change needs the CSRF token and confirm', async () => {
+    expect((await (await boot()).get(PHONES)).status).toBe(404);
+    const calls: string[] = [];
+    const { get, post, session } = await boot(() => phoneDeps(calls));
+    expect((await get(PHONES)).status).toBe(200);
+    expect((await get(PHONES, false)).status).toBe(401);
+    const h = { origin: PUBLIC, 'x-csrf-token': session.csrf };
+    expect((await post(`${PHONES}/2/unlink`, { origin: PUBLIC }, JSON.stringify({ confirm: true }))).status).toBe(403); // no token
+    expect((await post(`${PHONES}/2/unlink`, h, '{}')).status).toBe(400); // no confirm
+    expect(calls).toEqual([]);
+    expect((await post(PHONES, h, JSON.stringify({ label: 'Sales' }))).status).toBe(200);
+    expect((await post(`${PHONES}/2/rename`, h, JSON.stringify({ label: 'Desk' }))).status).toBe(200);
+    expect((await post(`${PHONES}/2/unlink`, h, JSON.stringify({ confirm: true }))).status).toBe(200);
+    expect((await post(`${PHONES}/2/remove`, h, JSON.stringify({ confirm: true }))).status).toBe(200);
+    expect(calls).toEqual(['add Sales', 'rename 2', 'unlink 2', 'remove 2']);
+  });
+});
+
 describe('the platform and sign-up routes (SaaS S5H.2, S5H.6): mounted only when their deps are given', () => {
   const INVITES = '/dashboard/api/platform/invites';
 

@@ -406,3 +406,26 @@ export function readMembers(raw) {
       .filter((m) => m.tag !== ''),
   };
 }
+
+// ---------- Reading phones (lane C, change 7) ----------
+
+/** @typedef {{ id: number, label: string, state: 'active' | 'unlinked', number: string | null, status: string | null, groups: number }} PhoneRow */
+
+/**
+ * GET /dashboard/api/whatsapp/phones ({ phones, max }, src/web/routes/whatsapp.ts): each reading phone with its label (owner
+ * text), its state, its number already masked by the agent, its gateway's state and its approved groups.
+ * @param {unknown} raw @returns {{ phones: PhoneRow[], max: number }}
+ */
+export function readPhones(raw) {
+  const x = obj(raw);
+  const phones = arr(x.phones)
+    .map((p) => {
+      const r = obj(p);
+      return {
+        id: num(r.id), label: str(r.label), state: /** @type {'active' | 'unlinked'} */ (r.state === 'unlinked' ? 'unlinked' : 'active'),
+        number: str(r.number) || null, status: str(r.status) || null, groups: num(r.groups),
+      };
+    })
+    .filter((p) => Number.isInteger(p.id) && p.id >= 1 && p.id <= 5 && p.label !== '');
+  return { phones, max: num(x.max) || 5 };
+}

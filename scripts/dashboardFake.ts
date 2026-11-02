@@ -98,7 +98,7 @@ export interface FakeState {
 
 /** A fake phone link: two codes, a scan, then linked (and the fake flags updated). */
 function fakeLinks(state: FakeState) {
-  const links = new Map<string, { target: 'founder' | 'spare'; cancelled: boolean }>();
+  const links = new Map<string, { target: string; cancelled: boolean }>();
   const stream = (id: string, res: ServerResponse) => {
     const link = links.get(id);
     if (!link) return sendError(res, 404, 'not_found', 'Unknown link.');
@@ -332,9 +332,9 @@ export async function fakeDashboard(o: { port: number; state: FakeState; log?: L
   web.router.post('/dashboard/api/whatsapp/link/start', async ({ req, res }) => {
     if (!owner(req, res)) return;
     const b = (await readJson(req)) as { target?: unknown; confirm?: unknown };
-    if ((b.target !== 'founder' && b.target !== 'spare') || b.confirm !== true) return sendError(res, 400, 'invalid', 'Choose the founder or the spare phone, and confirm.');
+    if (!['founder', 'phone2', 'phone3', 'phone4', 'phone5', 'spare'].includes(String(b.target)) || b.confirm !== true) return sendError(res, 400, 'invalid', 'Choose the phone to link, and confirm.');
     const linkId = randomBytes(16).toString('hex');
-    wa.links.set(linkId, { target: b.target, cancelled: false });
+    wa.links.set(linkId, { target: String(b.target), cancelled: false });
     sendJson(res, 200, { linkId });
   });
   web.router.get('/dashboard/api/whatsapp/link/stream', ({ req, res, url }) => {
@@ -346,6 +346,38 @@ export async function fakeDashboard(o: { port: number; state: FakeState; log?: L
     if (link) link.cancelled = true;
     sendJson(res, 200, { cancelled: Boolean(link) });
   });
+  // Reading phones (lane C, change 7): three phones, the third unlinked (the names Groups' fake uses, lane B); the
+  // changes act on this list in memory.
+  const phones = [
+    { id: 1, label: 'Office', state: 'active', number: '…4321', status: 'open', groups: 5 },
+    { id: 2, label: 'Rahul <b>phone', state: 'active', number: '…7788', status: 'open', groups: 2 },
+    { id: 3, label: 'Old phone', state: 'unlinked', number: null, status: null, groups: 1 },
+  ] as { id: number; label: string; state: 'active' | 'unlinked'; number: string | null; status: string | null; groups: number }[];
+  const phoneOf = (id: string | undefined) => phones.find((p) => p.id === Number(id));
+  web.router.get('/dashboard/api/whatsapp/phones', guarded(() => ({ phones, max: 5 })));
+  web.router.post('/dashboard/api/whatsapp/phones', async ({ req, res }) => {
+    if (!owner(req, res)) return;
+    const label = String(((await readJson(req)) as { label?: unknown }).label ?? '').trim();
+    if (!label || label.length > 40) return sendError(res, 422, 'invalid', "A phone's name is one line of 1 to 40 characters.");
+    const id = [2, 3, 4, 5].find((n) => !phones.some((p) => p.id === n));
+    if (id === undefined) return sendError(res, 409, 'conflict', 'A workspace can have at most 5 phones. Remove one first.');
+    const phone = { id, label, state: 'active' as const, number: null, status: 'not_linked', groups: 0 };
+    phones.push(phone);
+    sendJson(res, 200, { phone });
+  });
+  for (const action of ['rename', 'unlink', 'remove'] as const) {
+    web.router.post(`/dashboard/api/whatsapp/phones/:id/${action}`, async ({ req, res, params }) => {
+      if (!owner(req, res)) return;
+      const p = phoneOf(params.id);
+      if (!p) return sendError(res, 404, 'not_found', 'There is no such phone.');
+      const body = (await readJson(req)) as { label?: unknown; confirm?: unknown };
+      if (action === 'rename') p.label = String(body.label ?? '').trim() || p.label;
+      else if (body.confirm !== true) return sendError(res, 400, 'invalid', 'Choose a phone, and confirm.');
+      else if (action === 'unlink') Object.assign(p, { state: 'unlinked', number: null, status: null });
+      else phones.splice(phones.indexOf(p), 1);
+      sendJson(res, 200, { phone: p, loggedOut: true });
+    });
+  }
   web.router.post('/dashboard/api/google/connect', async ({ req, res }) => {
     if (!owner(req, res)) return;
     const b = (await readJson(req)) as { account?: unknown };
