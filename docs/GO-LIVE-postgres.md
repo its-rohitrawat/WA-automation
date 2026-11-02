@@ -13,12 +13,21 @@ each kept apart. You run every step yourself, on the Mac, with the Mac assistant
   - a **normal Terminal window** for `brew` and `sudo launchctl …`.
 - **Placeholders** look like `<this>`. Replace each one, including the `<` and `>`. Never paste a password into a chat,
   an email or a screenshot.
+- **The port** is `5432` by default. On the office Mac, WA Agent's own Postgres is on **5433**, because the ATP
+  platform's Postgres already has 5432. Wherever this guide says `<port>`, type yours:
+  - every command that connects to Postgres has `-p <port>` (`pg_isready`, `psql`, `createdb`, `pg_restore`, `dropdb`,
+    and `pg_dump` in the nightly job);
+  - the `~/.pgpass` line and the three addresses in `.env` use it too.
 
-> **Checked against the code** (30 Oct): the commands, settings and outputs this guide names are the ones the agent
+  On the office Mac, never point anything of WA Agent's at 5432: that is the ATP platform's server, and it must not be
+  touched.
+
+> **Checked against the code** (2 Nov): the commands, settings and outputs this guide names are the ones the agent
 > has.
 > - `db-bootstrap`: asks for the `postgres` password, then the new `wa_backup` password twice, and shows nothing as you
->   type. It never takes a password on the command line. `--superuser <name>` defaults to `postgres`.
-> - `db-migrate`, which applies the migrations P1 to P5, then checks the access rules.
+>   type. It never takes a password on the command line. `--superuser <name>` defaults to `postgres`. It connects to
+>   the host and port in `DATABASE_OWNER_URL`.
+> - `db-migrate`, which applies the migrations P1 to P7, then checks the access rules.
 > - `migrate-to-postgres`, with `--apply`, `--backup-dir <new folder>` and `--data-dir <folder>`.
 > - `export-to-sqlite`, with `--out <new folder>` (required) and `--data-dir <folder>`.
 > - The `.env` names `DB_ENGINE`, `DATABASE_URL`, `DATABASE_OWNER_URL` and `DATABASE_PLATFORM_URL`. The backup password
@@ -27,7 +36,7 @@ each kept apart. You run every step yourself, on the Mac, with the Mac assistant
 > - The switch for the customer parts, `PLATFORM_ENABLED` (off by default, part 7), and the name on invites,
 >   `PLATFORM_FOUNDER_NAME` (optional, default "WA Agent").
 > - The first line of `npm run cli -- status` names the database: `Database: SQLite (data/tracker.db)` before the
->   switch, `Database: Postgres (127.0.0.1:5432/wa_agent as wa_app)` after it. Never a password.
+>   switch, `Database: Postgres (127.0.0.1:<port>/wa_agent as wa_app)` after it. Never a password.
 
 ---
 
@@ -63,6 +72,7 @@ outside the Mac can reach it.
    ```sh
    /usr/local/opt/postgresql@17/bin/initdb -D /opt/wa-agent-db/data -U postgres --pwprompt --auth=scram-sha-256 --encoding=UTF8 --locale=C
    echo "listen_addresses = '127.0.0.1'" >> /opt/wa-agent-db/data/postgresql.conf
+   echo "port = <port>" >> /opt/wa-agent-db/data/postgresql.conf
    ```
 
    You should see `Success. You can now start the database server`.
@@ -117,15 +127,15 @@ outside the Mac can reach it.
 6. **Check it** (normal window), after 10 seconds:
 
    ```sh
-   /usr/local/opt/postgresql@17/bin/pg_isready -h 127.0.0.1
-   sudo lsof -nP -iTCP:5432 -sTCP:LISTEN
+   /usr/local/opt/postgresql@17/bin/pg_isready -h 127.0.0.1 -p <port>
+   sudo lsof -nP -iTCP:<port> -sTCP:LISTEN
    ```
 
    You should see:
-   - `127.0.0.1:5432 - accepting connections`;
-   - one listening line with `127.0.0.1:5432`, and **never** `*:5432`.
+   - `127.0.0.1:<port> - accepting connections`;
+   - one listening line with `127.0.0.1:<port>`, and **never** `*:<port>`.
 
-   If you see `*:5432`, Postgres is open to the network: stop it with
+   If you see `*:<port>`, Postgres is open to the network: stop it with
    `sudo launchctl bootout system/com.wa-agent.postgres` and ask.
 
 ## Part 2. The roles and the empty database (once, about 10 minutes)
@@ -145,10 +155,13 @@ The agent and its jobs connect with their own limited roles, never the superuser
 
    ```env
    DB_ENGINE=sqlite
-   DATABASE_URL=postgres://wa_app:<app password>@127.0.0.1:5432/wa_agent
-   DATABASE_PLATFORM_URL=postgres://wa_platform:<platform password>@127.0.0.1:5432/wa_agent
-   DATABASE_OWNER_URL=postgres://wa_owner:<owner password>@127.0.0.1:5432/wa_agent
+   DATABASE_URL=postgres://wa_app:<app password>@127.0.0.1:<port>/wa_agent
+   DATABASE_PLATFORM_URL=postgres://wa_platform:<platform password>@127.0.0.1:<port>/wa_agent
+   DATABASE_OWNER_URL=postgres://wa_owner:<owner password>@127.0.0.1:<port>/wa_agent
    ```
+
+   All three use the same `<port>`. `db-bootstrap` makes its roles on the server that `DATABASE_OWNER_URL` names, so
+   on the office Mac check that it says `127.0.0.1:5433`, never 5432, before step 3.
 
 3. **Create the roles and the database** (waagent window). `db-bootstrap` creates the database itself, with the right
    settings (text compared byte by byte, as SQLite does). Never create the database by hand. It asks for the
@@ -163,9 +176,9 @@ The agent and its jobs connect with their own limited roles, never the superuser
    - from `db-bootstrap`: `Created role wa_owner`, then the same for `wa_app`, `wa_platform` and `wa_backup`
      (`Updated role …` if you run it again), `Created database wa_agent, owned by wa_owner`, a `Granted wa_agent: …`
      line and `Next: npm run cli -- db-migrate`;
-   - from `db-migrate`: `Applied P1`, `Applied P2`, `Applied P3`, `Applied P4` and `Applied P5`, then
+   - from `db-migrate`: `Applied P1`, and so on up to `Applied P7`, then
      `Access rules checked: row security on every customer table, nothing of the platform open to wa_app`. The next
-     time: `Already at P5: nothing to apply`, then the same `Access rules checked: …` line.
+     time: `Already at P7: nothing to apply`, then the same `Access rules checked: …` line.
 
    No password is ever printed.
 
@@ -182,11 +195,12 @@ agent keeps running, and nothing in Postgres or in `data/` changes. Do it a day 
 
    ```sh
    mkdir -m 700 /opt/wa-agent-db/rehearsal
-   for f in tracker session sender-session; do [ -f data/$f.db ] && sqlite3 data/$f.db ".backup '/opt/wa-agent-db/rehearsal/$f.db'"; done
+   for f in tracker session session-2 session-3 session-4 session-5 sender-session; do [ -f data/$f.db ] && sqlite3 data/$f.db ".backup '/opt/wa-agent-db/rehearsal/$f.db'"; done
    ls -l /opt/wa-agent-db/rehearsal
    ```
 
-   You should see `tracker.db`, `session.db`, and `sender-session.db` if the spare number is linked.
+   You should see `tracker.db` and `session.db`, then `session-2.db` to `session-5.db` for each extra WhatsApp phone
+   you linked, and `sender-session.db` if the spare number is linked.
 
 2. **The dry run on the copy** (waagent window). `time` shows how long it took:
 
@@ -235,15 +249,18 @@ running.
   ```sh
   Z=~/wa-backup-$(date +%Y%m%d-%H%M).zip
   sudo ditto -c -k --sequesterRsrc --keepParent /opt/wa-agent/data "$Z"
-  unzip -l "$Z" | tail -1
+  sudo chmod 600 "$Z"
+  ls -l "$Z"
+  sudo unzip -l "$Z" | tail -1
   ```
 
-  It shows the number of files in the zip just made: more than zero.
+  The zip holds the WhatsApp logins and the keys, so only its owner may read it: `ls -l` starts with `-rw-------`.
+  The last line shows the number of files in it: more than zero.
 - A checked copy of each database (waagent window):
 
   ```sh
   mkdir -m 700 /opt/wa-agent-db/sqlite-before-postgres
-  for f in tracker session sender-session; do [ -f data/$f.db ] && sqlite3 data/$f.db ".backup '/opt/wa-agent-db/sqlite-before-postgres/$f.db'"; done
+  for f in tracker session session-2 session-3 session-4 session-5 sender-session; do [ -f data/$f.db ] && sqlite3 data/$f.db ".backup '/opt/wa-agent-db/sqlite-before-postgres/$f.db'"; done
   sqlite3 /opt/wa-agent-db/sqlite-before-postgres/tracker.db "PRAGMA integrity_check"
   ```
 
@@ -288,7 +305,7 @@ sudo launchctl bootstrap system /Library/LaunchDaemons/com.wa-agent.plist
 
 **4.8 Check** (about 10 minutes, after waiting one minute):
 1. Waagent window: `npm run cli -- status`. The first line should say
-   `Database: Postgres (127.0.0.1:5432/wa_agent as wa_app)`, then `Health: ✅ Connected…` and the `WhatsApp:` line
+   `Database: Postgres (127.0.0.1:<port>/wa_agent as wa_app)`, then `Health: ✅ Connected…` and the `WhatsApp:` line
    saying `open`.
 2. Dashboard: **sign in again.** Sign-in sessions are not copied. The Overview shows the same numbers you wrote down in
    4.1, and Activity's newest message is the same one.
@@ -306,7 +323,7 @@ The dumps hold every business's data: keep them on this Mac only. FileVault prot
    password from part 2, and save:
 
    ```text
-   127.0.0.1:5432:wa_agent:wa_backup:<backup password>
+   127.0.0.1:<port>:wa_agent:wa_backup:<backup password>
    ```
 
    Then `chmod 600 ~/.pgpass`. Type the password with `nano`, never with `echo`, which would keep it in the shell
@@ -338,7 +355,7 @@ The dumps hold every business's data: keep them on this Mac only. FileVault prot
      <array>
        <string>/bin/sh</string>
        <string>-c</string>
-       <string>/usr/local/opt/postgresql@17/bin/pg_dump -h 127.0.0.1 -U wa_backup -Fc -f /opt/wa-agent-db/backups/wa-$(date +%a).dump wa_agent</string>
+       <string>/usr/local/opt/postgresql@17/bin/pg_dump -h 127.0.0.1 -p <port> -U wa_backup -Fc -f /opt/wa-agent-db/backups/wa-$(date +%a).dump wa_agent</string>
      </array>
      <key>StartCalendarInterval</key>
      <dict>
@@ -367,11 +384,11 @@ The dumps hold every business's data: keep them on this Mac only. FileVault prot
 
    ```sh
    B=/usr/local/opt/postgresql@17/bin
-   $B/createdb -h 127.0.0.1 -U postgres wa_restore_test
-   $B/pg_restore -h 127.0.0.1 -U postgres -d wa_restore_test /opt/wa-agent-db/backups/wa-$(date +%a).dump
-   $B/psql -h 127.0.0.1 -U postgres -d wa_restore_test -tAc "select count(*) from messages"
-   $B/psql -h 127.0.0.1 -U wa_backup -d wa_agent -tAc "select count(*) from messages"
-   $B/dropdb -h 127.0.0.1 -U postgres wa_restore_test
+   $B/createdb -h 127.0.0.1 -p <port> -U postgres wa_restore_test
+   $B/pg_restore -h 127.0.0.1 -p <port> -U postgres -d wa_restore_test /opt/wa-agent-db/backups/wa-$(date +%a).dump
+   $B/psql -h 127.0.0.1 -p <port> -U postgres -d wa_restore_test -tAc "select count(*) from messages"
+   $B/psql -h 127.0.0.1 -p <port> -U wa_backup -d wa_agent -tAc "select count(*) from messages"
+   $B/dropdb -h 127.0.0.1 -p <port> -U postgres wa_restore_test
    ```
 
    The two counts match, or the live one is a little higher if messages came in since the dump. Only the test
@@ -399,6 +416,9 @@ the Postgres days not showing for now. They stay in Postgres, and B brings them 
 The agent is back exactly where it was at 4.2. If WhatsApp shows as not connected, use **Fix now** on the Overview. Its
 link keys may have moved on while it ran on Postgres.
 
+A WhatsApp phone you added while on Postgres is not in the old SQLite files: link it again in Connections, or use B,
+which brings it back.
+
 ### B. Bring the Postgres days back to SQLite (about 15 minutes)
 
 **Use it when:** you're going back to SQLite for longer than a day or two, and you want the messages and tasks from the
@@ -413,14 +433,17 @@ Postgres days with you.
 
    Every line should say `OK`, and the last one `EXPORTED: every table matched. …`. If any says `MISMATCH`, stop and
    use A instead (a `DO-NOT-USE.txt` is then beside the files).
-3. Waagent window: move today's files aside (nothing is deleted), then put the exported ones in place:
+3. Waagent window: move today's files aside (nothing is deleted), then put the exported ones in place. The moved
+   files include each phone's `-wal` and `-shm` files, so no old one is left beside a new file:
 
    ```sh
    mkdir -m 700 /opt/wa-agent-db/sqlite-before-rollback
-   for f in tracker session sender-session; do [ -f data/$f.db ] && mv data/$f.db* /opt/wa-agent-db/sqlite-before-rollback/; done
+   for f in tracker session session-2 session-3 session-4 session-5 sender-session; do [ -f data/$f.db ] && mv data/$f.db* /opt/wa-agent-db/sqlite-before-rollback/; done
    cp /opt/wa-agent-db/from-postgres-<date>/*.db data/
    ls -l data/*.db
    ```
+
+   The export has a `session-2.db` to `session-5.db` for each extra WhatsApp phone, so they stay linked.
 
 4. `nano .env`, set `DB_ENGINE=sqlite`, and save. Start the agent (4.7), and check (4.8).
 
@@ -497,3 +520,132 @@ Send Claude:
 - the last 50 lines of `logs/wa-agent.err.log` (`tail -n 50 logs/wa-agent.err.log` in the waagent window).
 
 **Never send** the `.env` file, `~/.pgpass`, a password, a dump, or a database file.
+
+## Part 9. Updating to the November release (P6 and P7)
+
+This release changes the database twice: P6 (the assistant's saved chats) and P7 (up to five WhatsApp phones). It
+takes about 20 minutes, with the agent stopped.
+
+**Do steps 1 and 2 before anything is merged.** The Mac updates itself as soon as the merge lands. While the agent is
+stopped, that update's restart fails, which is expected and harmless, and the new version waits for you.
+
+These steps are for the Mac on Postgres. On SQLite, skip the database dump in step 2 and all of step 4: the agent
+updates its files itself when it starts.
+
+1. **Stop the agent** (normal window), as in 4.2:
+
+   ```sh
+   sudo launchctl disable system/com.wa-agent
+   sudo launchctl bootout system/com.wa-agent
+   sudo launchctl print system/com.wa-agent | grep -E 'state'
+   ```
+
+   The last command prints nothing, or says it could not find the service.
+
+2. **Back up, twice.**
+   - **The database.** Run the nightly dump now (normal window):
+
+     ```sh
+     sudo launchctl kickstart system/com.wa-agent.pgdump
+     ```
+
+     After a minute, in the waagent window, give that dump its own name, so the nightly job never writes over it, and
+     check it:
+
+     ```sh
+     cp -p /opt/wa-agent-db/backups/wa-$(date +%a).dump /opt/wa-agent-db/before-november.dump
+     ls -l /opt/wa-agent-db/before-november.dump
+     /usr/local/opt/postgresql@17/bin/pg_restore -l /opt/wa-agent-db/before-november.dump | grep -c 'TABLE DATA'
+     ```
+
+     `ls -l` shows a time from a minute ago and a size larger than zero. The last line is a number above 10. If you
+     see `0` or an error, stop: look at `/opt/wa-agent-db/pgdump.log` and run the dump again.
+   - **The data folder** (normal window), as in 4.3:
+
+     ```sh
+     Z=~/wa-backup-$(date +%Y%m%d-%H%M).zip
+     sudo ditto -c -k --sequesterRsrc --keepParent /opt/wa-agent/data "$Z"
+     sudo chmod 600 "$Z"
+     ls -l "$Z"
+     sudo unzip -l "$Z" | tail -1
+     ```
+
+     `ls -l` starts with `-rw-------`, and the last line shows more than zero files.
+
+3. **Merge, then bring the new version in.** Merge the release (or ask the developer to). Then, in the waagent window:
+
+   ```sh
+   cd /opt/wa-agent
+   git pull --ff-only
+   npm ci
+   ```
+
+   If the Mac's own update already ran, this changes nothing.
+
+4. **Update the database** (waagent window):
+
+   ```sh
+   npm run cli -- db-migrate
+   ```
+
+   You should see `Applied P6`, then `Applied P7`, then `Access rules checked: …`. If it ends any other way, don't
+   start the agent: send Claude that output (part 8).
+
+5. **Start the agent** (normal window), as in 4.7:
+
+   ```sh
+   sudo launchctl enable system/com.wa-agent
+   sudo launchctl bootstrap system /Library/LaunchDaemons/com.wa-agent.plist
+   ```
+
+6. **Check**, after a minute:
+   - Waagent window: `npm run cli -- status`. The first line says
+     `Database: Postgres (127.0.0.1:<port>/wa_agent as wa_app)`, then `Health: ✅ Connected…`.
+   - Dashboard: the Overview shows your clients and tasks as before. Connections shows your phone as **Phone 1**,
+     connected. It stays linked through the update: there is no QR code to scan.
+   - Send a short test message in an approved group. It appears in Activity within a minute.
+
+**Going back.** On Postgres, putting the old version back is **not** enough by itself: the old version refuses a
+database at P7, and `db-migrate` never undoes a change. Choose one:
+- **Everything as it was before the update:** stop the agent, and restore `before-november.dump` into a fresh database
+  for the old version. Nothing in `wa_agent` is deleted. Claude gives you those steps for your case.
+- **For a short time:** rollback A (part 6). The agent runs on the SQLite files from the switch. What it saved on
+  Postgres since is not shown until you use B.
+- **Rollback B** (part 6) brings the Postgres days into SQLite files. Run it while the new version is still in place:
+  the old version can't read P7.
+
+## Part 10. More WhatsApp phones (new in November)
+
+Your phone today is **phone 1**, the main phone. You can add up to four more: up to **5 reading phones** for your
+business, and for each customer's. The spare phone for the morning report is separate, and doesn't count.
+
+**Add a phone.**
+1. Dashboard: open **Connections**, then **Add phone**.
+2. Give it a name you'll recognise, for example "Office phone", and press **Add and link**.
+3. A QR code opens, for that phone only. On that phone, open WhatsApp, then **Settings**, then **Linked devices**,
+   then **Link a device**, and scan it. The phone then lists this link as "WA Agent - Tracker".
+
+Two limits:
+- **One link at a time.** While one phone's QR code is open, another can't start: finish or cancel that one first.
+- **One number, once.** A phone already linked as another of your phones, or as the spare, is refused. Scan with a
+  different phone.
+
+**Which phone reads a group.** Each approved group is read through one phone, and Groups shows which. A group that two
+of your phones are in is read once. Messages you send from Open chat go through the group's own phone. The sending
+limits are for your whole business, across all its phones.
+
+**When a phone has a problem,** the status says how many phones are connected, for example "2 of 3 phones connected",
+and the health line names the phone. Use its **Relink** in Connections.
+
+**Unlink a phone.** In Connections, press the phone's **Unlink**, read what it says, and confirm.
+- It logs that phone out of WhatsApp ("WA Agent - Tracker" goes from its Linked devices) and stops reading it.
+- Its messages, tasks and group approvals stay. Its groups show "phone unlinked" until you link it again, or move
+  them to another phone.
+- Unlinking phone 1 asks you again, because it's your main phone.
+- If WhatsApp didn't answer, the dashboard says so. Then also remove "WA Agent - Tracker" from that phone's Linked
+  devices yourself.
+
+**Remove a phone** (2 to 5 only) takes it off the list. Unlink it, and move its groups to another phone, first.
+
+**Memory:** each linked phone keeps its own connection to WhatsApp open on the Mac, so each one uses a little more
+memory.
