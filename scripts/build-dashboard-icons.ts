@@ -17,6 +17,8 @@ export const ICON_PICK: Readonly<Record<string, string>> = {
   dots: 'MoreHorizontal', refresh: 'Refresh', ext: 'LinkSquare02', drag: 'DragDropVertical', edit: 'Edit02', tick: 'Tick02', undo: 'Undo02',
   alert: 'Alert02', info: 'InformationCircle', chevR: 'ArrowRight01', phone: 'SmartPhone01', db: 'Database01', flow: 'WorkflowSquare10',
   act: 'Activity03', doc: 'File01', wifi: 'Wifi01', cloud: 'CloudUpload', key: 'Key01', globe: 'Globe02', pie: 'PieChart',
+  // The assistant's page (November release, lane A): Stop while an answer streams, a new chat, and deleting a chat.
+  stop: 'Stop', newchat: 'MessageAdd01', trash: 'Delete02',
 };
 
 type IconNode = [tag: string, attrs: Record<string, string | number>];

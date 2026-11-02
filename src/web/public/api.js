@@ -80,15 +80,17 @@ export async function post(path, body, opts = {}) {
 
 /**
  * POSTs JSON with the CSRF token and reads the answer as it streams: one JSON object per line, each handed to onEvent
- * as it arrives (the assistant's answers). An error status throws ApiError, as post() does.
- * @param {string} path @param {unknown} body @param {(e: any) => void} onEvent
+ * as it arrives (the assistant's answers). An error status throws ApiError, as post() does. `signal`: the page stops
+ * reading (the owner left the screen); the fetch then rejects with an AbortError.
+ * @param {string} path @param {unknown} body @param {(e: any) => void} onEvent @param {AbortSignal} [signal]
  */
-export async function postLines(path, body, onEvent) {
+export async function postLines(path, body, onEvent, signal) {
   const res = await fetch(BASE + path, {
     method: 'POST',
     credentials: 'same-origin',
     headers: { Accept: 'application/x-ndjson, application/json', 'Content-Type': 'application/json', 'X-CSRF-Token': csrf ?? '' },
     body: JSON.stringify(body ?? {}),
+    ...(signal ? { signal } : {}),
   });
   if (!res.ok || !res.body) {
     await parse(res);

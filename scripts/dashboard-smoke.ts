@@ -216,35 +216,42 @@ async function main() {
         await p.goto(`${base}/dashboard`);
         await p.locator('.kpis').waitFor();
 
-        // The AI assistant, on a scripted Claude (scripts/assistantFake.ts: no API call): open it, ask, Confirm a card,
-        // let it open a screen, and close it with Escape.
+        // The AI assistant's page (November release), on a scripted Claude (scripts/assistantFake.ts: no API call): open it
+        // from the side menu's button, ask, Confirm a card, and follow an answer's "Open …" link (it never jumps by itself).
         where = `assistant ${tag}`;
-        await p.locator('#asst-fab').click();
-        await p.locator('#asst .asst-sugg .chip').first().waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'no suggested questions'));
+        if (vp.name === 'phone') {
+          await p.locator('#mnav').click();
+          await p.waitForTimeout(400);
+        }
+        await p.locator('#side-ask').click();
+        await p.waitForURL('**/dashboard/assistant', { timeout: WAIT_MS }).catch(() => fail(where, `the side button did not open the page: ${p.url()}`));
+        if ((await p.locator('#nav [data-go="assistant"][aria-current="page"]').count()) !== 1) fail(where, 'the Assistant entry is not marked');
+        if ((await p.locator('#asst-fab').count()) !== 0) fail(where, 'the floating button is still there');
+        await p.locator('.asst-page .asst-sugg .chip').first().waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'no suggested questions'));
         await p.waitForTimeout(400);
         await p.screenshot({ path: join(OUT, `assistant-open-${tag}.png`) });
-        await p.locator('#asst .chip', { hasText: 'Summarise today' }).click();
-        await p.locator('#asst .asst-meta').first().waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'the answer never finished'));
-        if ((await p.locator('#asst .asst-msg.bot b', { hasText: '11 open tasks' }).count()) !== 1) fail(where, 'the answer was not drawn');
+        await p.locator('.asst-page .chip', { hasText: 'Summarise today' }).click();
+        await p.locator('.asst-page .asst-meta').first().waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'the answer never finished'));
+        if ((await p.locator('.asst-page .asst-msg.bot b', { hasText: '11 open tasks' }).count()) !== 1) fail(where, 'the answer was not drawn');
         await p.locator('#asst-q').fill('Add a task for Acme: book the photo shoot');
         await p.keyboard.press('Enter');
-        await p.locator('#asst .asst-card [data-confirm]').waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'no card to confirm'));
-        await p.locator('#asst .asst-meta').nth(1).waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'the second answer never finished'));
+        await p.locator('.asst-page .asst-card [data-confirm]').waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'no card to confirm'));
+        await p.locator('.asst-page .asst-meta').nth(1).waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'the second answer never finished'));
         await p.waitForTimeout(300);
         await p.screenshot({ path: join(OUT, `assistant-card-${tag}.png`) });
-        await p.locator('#asst .asst-card [data-confirm]').click();
-        await p.locator('#asst .asst-card .ok', { hasText: 'added' }).waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'Confirm did not finish'));
+        await p.locator('.asst-page .asst-card [data-confirm]').click();
+        await p.locator('.asst-page .asst-card .ok', { hasText: 'added' }).waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'Confirm did not finish'));
         await p.locator('#asst-q').fill('Show overdue tasks');
         await p.keyboard.press('Enter');
-        await p.waitForURL('**/dashboard/tasks?status=overdue', { timeout: WAIT_MS }).catch(() => fail(where, `did not open the overdue tasks: ${p.url()}`));
-        await p.locator('#asst .asst-meta').nth(2).waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'the third answer never finished'));
+        await p.locator('.asst-page .asst-meta').nth(2).waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'the third answer never finished'));
+        if (!p.url().endsWith('/dashboard/assistant')) fail(where, `the page jumped away on its own: ${p.url()}`);
         await p.waitForTimeout(300);
-        await p.screenshot({ path: join(OUT, `assistant-screen-${tag}.png`) });
+        await p.screenshot({ path: join(OUT, `assistant-link-${tag}.png`) });
         const asstSideways = await p.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
         if (asstSideways > 1) fail(where, `scrolls sideways by ${asstSideways}px`);
-        await p.locator('#asst-q').focus();
-        await p.keyboard.press('Escape');
-        await p.locator('#asst').waitFor({ state: 'hidden', timeout: 5_000 }).catch(() => fail(where, 'Escape did not close it'));
+        await p.locator('.asst-page .asst-open').first().click();
+        await p.waitForURL('**/dashboard/tasks?status=overdue', { timeout: WAIT_MS }).catch(() => fail(where, `the link did not open the overdue tasks: ${p.url()}`));
+        if ((await p.locator('.asst-page').count()) !== 0) fail(where, 'the assistant page stayed behind the next screen');
 
         where = `connections ${tag}`;
         if (vp.name === 'phone') {

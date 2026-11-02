@@ -24,6 +24,12 @@ export const ONBOARDING_NAV = ['onboarding', 'Getting started', 'flash'];
 /** A member's switch between its workspaces, at the start of System: only with 2 or more. @type {[string, string, string]} */
 export const WORKSPACES_NAV = ['workspaces', 'Switch workspace', 'brief'];
 
+/**
+ * The assistant's page (November release, change 1), right after Overview: only where the workspace has the assistant
+ * (the session says `assistant`), so nothing opens a screen whose API is not there. @type {[string, string, string]}
+ */
+export const ASSISTANT_NAV = ['assistant', 'Assistant', 'spark'];
+
 /** The founder's own screens a customer never sees (plan S4.8 step 4); Customers and Invite are the founder's too. */
 const FOUNDER_ONLY = new Set(['connections', 'usage']);
 
@@ -33,18 +39,28 @@ export const LOCKED_UNTIL_ACTIVE = new Set(['clients', 'tasks', 'meetings', 'tra
 /**
  * Who is signed in, as GET /dashboard/api/me says: `role` 'owner' is a customer's owner; anything else is the founder
  * (on SQLite every session is the founder's). `platform`: the platform routes are mounted. `workspaces`: how many
- * workspaces a customer's member can switch between.
- * @typedef {{ role?: string, platform?: boolean, workspaces?: number }} Session
+ * workspaces a customer's member can switch between. `assistant`: this workspace has the assistant (its API answers).
+ * @typedef {{ role?: string, platform?: boolean, workspaces?: number, assistant?: boolean }} Session
  */
 
 /**
  * The sidebar for this session. The founder: NAV, with Customers and Invite when the platform is on. A customer:
  * Getting started first, then their Workspace, and System without the founder's own screens (with Switch workspace
- * first for a member of several).
+ * first for a member of several). Either way the Assistant follows Overview where the workspace has it.
  * @param {Session} s
  * @returns {[string, [string, string, string][]][]}
  */
 export function navFor(s) {
+  const nav = baseNav(s);
+  if (!s.assistant) return nav;
+  return nav.map(([group, items]) => {
+    const at = items.findIndex(([id]) => id === 'overview');
+    return [group, at < 0 ? items : [...items.slice(0, at + 1), ASSISTANT_NAV, ...items.slice(at + 1)]];
+  });
+}
+
+/** @param {Session} s @returns {[string, [string, string, string][]][]} */
+function baseNav(s) {
   if (s.role === 'owner') {
     const system = (/** @type {[string, string, string][]} */ items) => {
       const own = items.filter(([id]) => !FOUNDER_ONLY.has(id));

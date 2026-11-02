@@ -4,7 +4,7 @@ import { problems, readOverview, readStatus } from './contract.js';
 import { $, $$, esc, gsap, icon, installTooltip, paint, reduceMotion, toast } from './dom.js';
 import { initials } from './format.js';
 import { LOCKED_UNTIL_ACTIVE, navFor, navigate, onPopState, parsePath, pathFor, SCREENS, showScreens } from './router.js';
-import { ASSISTANT_CHANGED, ASSISTANT_GO, mountAssistant, unmountAssistant } from './views/assistant.js';
+import { ASSISTANT_GO, forgetAssistant, mountAssistant } from './views/assistant.js';
 import { mountClients } from './views/clients.js';
 import { CONNECTIONS_CHANGED, openFix, runAction } from './views/connect.js';
 import { mountConnections } from './views/connections.js';
@@ -19,11 +19,12 @@ import './views/workspaces.js';
 
 SCREEN_MOUNTS.set('clients', mountClients);
 SCREEN_MOUNTS.set('connections', mountConnections);
+SCREEN_MOUNTS.set('assistant', mountAssistant);
 // After a link, a reconnect or a quick action: the health pill now (an open dialog stays; Connections reloads itself).
 addEventListener(CONNECTIONS_CHANGED, () => {
   if (owner) void refreshStatus();
 });
-// The assistant opens a screen with its filters in the address; the screen reads them as from a link.
+// An answer's "Open …" link: the screen with its filters in the address, which the screen reads as from a link.
 addEventListener(ASSISTANT_GO, (e) => {
   const d = /** @type {CustomEvent<{ screen?: unknown, search?: unknown }>} */ (e).detail;
   if (!owner || typeof d?.screen !== 'string' || !SCREENS.has(d.screen)) return;
@@ -31,20 +32,13 @@ addEventListener(ASSISTANT_GO, (e) => {
   current = { screen: '', sub: null }; // drawn again even when it is the screen already showing
   show(d.screen, null, { fromHistory: true });
 });
-// A change confirmed in the assistant: the screen showing is drawn again with it.
-addEventListener(ASSISTANT_CHANGED, () => {
-  if (!owner || !current.screen) return;
-  const { screen, sub } = current;
-  current = { screen: '', sub: null };
-  show(screen, sub, { fromHistory: true });
-});
 import { hideSignin, showSignin } from './views/signin.js';
 
 const STATUS_MS = 10_000;
 const OVERVIEW_MS = 30_000;
 const THEME_KEY = 'wa-agent-theme';
 
-/** @type {{ email: string, name: string, platform?: boolean, role?: string, workspaces?: number } | null} */
+/** @type {{ email: string, name: string, platform?: boolean, role?: string, workspaces?: number, assistant?: boolean } | null} */
 let owner = null;
 /** A customer's workspace is active (GET /platform/onboarding): until then their Clients, Tasks, Meetings and Tracker are locked. */
 let active = false;
@@ -85,7 +79,21 @@ applyTheme(savedTheme());
 
 // ---------- the shell ----------
 /** This session, as the nav reads it. */
-const session = () => ({ role: owner?.role, platform: owner?.platform === true, workspaces: owner?.workspaces ?? 1 });
+const session = () => ({ role: owner?.role, platform: owner?.platform === true, workspaces: owner?.workspaces ?? 1, assistant: owner?.assistant === true });
+
+/**
+ * Whether this workspace has the assistant: its API answers. A customer's runtime has none yet (the November release's
+ * piece 3 turns it on), so a customer is not asked.
+ */
+async function hasAssistant() {
+  if (!owner || owner.role === 'owner') return false;
+  try {
+    await get('/assistant');
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /** A customer's screen that waits for their workspace to be active. */
 const locked = (/** @type {string} */ screen) => owner?.role === 'owner' && !active && LOCKED_UNTIL_ACTIVE.has(screen);
@@ -109,6 +117,7 @@ function markNav(screen) {
     if (on) a.setAttribute('aria-current', 'page');
     else a.removeAttribute('aria-current');
   });
+  $('#side-ask').classList.toggle('on', screen === 'assistant');
 }
 
 /**
@@ -322,6 +331,7 @@ function show(screen, sub, opts = {}) {
   setDrawer(false);
   scrollTo({ top: 0 });
   const view = $('#view');
+  view.dataset.screen = screen;
 
   if (screen === 'overview') {
     /** @type {ReturnType<typeof readOverview> | null} */
@@ -392,7 +402,7 @@ function enterApp() {
   $('#me-name').textContent = owner?.name || 'Owner';
   $('#me-email').textContent = owner?.email ?? '';
   statusPoll = poll(refreshStatus, STATUS_MS);
-  mountAssistant();
+  $('#side-ask').hidden = !session().assistant;
   const { screen, sub } = parsePath(location.pathname);
   show(screen, sub, { replace: true });
   if (!reduceMotion && gsap) {
@@ -413,7 +423,8 @@ function leaveApp(signedOut) {
   onStatus = () => {};
   closeDrawer(true);
   resetGroups();
-  unmountAssistant();
+  forgetAssistant();
+  $('#side-ask').hidden = true;
   owner = null;
   status = null;
   current = { screen: '', sub: null };
@@ -441,6 +452,7 @@ async function boot() {
   } catch {
     owner = null;
   }
+  if (owner) owner.assistant = await hasAssistant();
   // This session's screens (SaaS S5): the founder's, with the platform ones when the server has them, or a customer's.
   showScreens(session());
   await refreshActive();
