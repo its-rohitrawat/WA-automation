@@ -234,3 +234,32 @@ describe('control API review fixes', () => {
     expect((await h.get('/dashboard/api/session')).status).toBe(200);
   });
 });
+
+describe('control API: the morning message editor (November release, change 5)', () => {
+  it('reads the editor data, owner-only, with no number in it', async () => {
+    const { h } = await boot();
+    expect((await h.get('/dashboard/api/settings/report-message', { cookie: null })).status).toBe(401);
+    const r = await h.get('/dashboard/api/settings/report-message');
+    expect(r).toMatchObject({
+      status: 200,
+      json: { template: "{greeting}. {summary}. Today's tracker: {tracker_link}", isDefault: true, maxChars: 1000, trackerLinked: false },
+    });
+    expect((r.json as { placeholders: { key: string }[] }).placeholders.map((p) => p.key)).toContain('tracker_link');
+    expect(JSON.stringify(r.json)).not.toContain('9812345678');
+  });
+
+  it('saves the text through POST /settings with CSRF, checked on the server and audited, and reads it back', async () => {
+    const { db, h } = await boot();
+    const body = { key: 'reportMessage', value: 'Hi! {open} open.\n{tracker_link}' };
+    expect((await h.post('/dashboard/api/settings', { body, csrf: null })).status).toBe(403);
+    for (const value of ['', 'x'.repeat(1001), 'ring\u0007', 7]) {
+      expect(await h.post('/dashboard/api/settings', { body: { key: 'reportMessage', value } }), JSON.stringify(value)).toMatchObject({ status: 422, json: { error: { field: 'reportMessage' } } });
+    }
+    expect(await auditRows(db)).toEqual([]);
+    expect(await h.post('/dashboard/api/settings', { body })).toMatchObject({ status: 200, json: { reportMessage: body.value } });
+    expect(await h.get('/dashboard/api/settings/report-message')).toMatchObject({ json: { template: body.value, isDefault: false } });
+    expect(await h.post('/dashboard/api/settings', { body: { key: 'reportMessage', value: null } })).toMatchObject({ status: 200 });
+    expect(await h.get('/dashboard/api/settings/report-message')).toMatchObject({ json: { isDefault: true } });
+    expect((await auditRows(db)).map((a) => a.detail)).toEqual(['Morning briefing message changed (31 of 1000 characters)', 'Morning briefing message reset to the default']);
+  });
+});

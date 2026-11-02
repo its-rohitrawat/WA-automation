@@ -350,6 +350,30 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .phone .chat { min-height: 220px; padding: 14px 10px; background: #0b141a radial-gradient(rgba(233,237,239,.04) 1px, transparent 1px) 0 0/14px 14px; border-radius: 0 0 22px 22px; }
 .phone .msg { background: #005C4B; color: #E9EDEF; padding: 9px 11px 6px; border-radius: 12px 12px 12px 4px; font-size: 13.5px; max-width: 92%; line-height: 1.45; }
 .phone .msg u { color: var(--sky); text-decoration: none; } .phone .msg small { display: block; text-align: right; font: 400 10.5px var(--mono); opacity: .6; margin-top: 4px; }
+/* Automations: the morning message editor (November release, change 5). On a laptop the preview stays beside the
+   settings and the editor (sticky); on a phone it comes after the editor. Placeholders sit beside the text on a wide
+   card, below it on a narrow one. */
+@media (min-width: 961px) {
+  .auto-grid .auto-preview { grid-column: 8 / span 5; grid-row: 1 / span 2; align-self: start; position: sticky; top: 92px; }
+}
+.mm-card .mm-intro { margin: 0 0 12px; font-size: 13px; }
+.mm-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(230px, 0.85fr); gap: 18px; align-items: start; }
+.mm-text { display: block; width: 100%; min-height: 156px; resize: vertical; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line-2); background: var(--panel-2); color: var(--text); font: 14px/1.5 var(--font); }
+.mm-text:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-color: transparent; }
+.mm-meta { display: flex; justify-content: flex-end; margin-top: 6px; }
+.mm-count { font: 500 11.5px var(--mono); color: var(--faint); font-variant-numeric: tabular-nums; } .mm-count.is-over { color: var(--s-overdue); }
+.mm-unknown { margin: 6px 0 0; padding: 8px 10px; border-radius: 10px; font-size: 12.5px; color: var(--text); background: color-mix(in srgb, var(--s-warn) 13%, var(--panel)); overflow-wrap: anywhere; }
+.mm-places .h4 { margin: 0 0 8px; }
+.mm-places ul { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 7px 10px; align-items: center; }
+.mm-places li { display: contents; }
+.mm-ph { justify-self: start; }
+.mm-ph { padding: 4px 8px; border-radius: 8px; border: 1px solid var(--line-2); background: var(--panel-2); color: var(--accent); font: 500 12px/1.3 var(--mono); cursor: pointer; white-space: nowrap; transition: border-color 140ms ease; }
+.mm-ph:hover { border-color: var(--accent); } .mm-ph:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
+.mm-ph-text { min-width: 0; display: flex; flex-direction: column; font-size: 12px; line-height: 1.3; color: var(--muted); }
+.mm-ph-text b { font: 500 12px/1.4 var(--mono); color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mm-card .mm-err { margin-top: 10px; }
+.mm-preview { white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 1200px) { .mm-body { grid-template-columns: minmax(0, 1fr); } }
 .steps { list-style: none; counter-reset: s; margin: 10px 0 0; padding: 0; display: grid; gap: 10px; }
 .steps li { counter-increment: s; display: flex; gap: 12px; align-items: flex-start; font-size: 13.5px; }
 .steps li::before { content: counter(s); flex: none; width: 24px; height: 24px; border-radius: 8px; display: grid; place-items: center; font: 600 12px var(--mono); background: var(--panel-2); color: var(--accent); }

@@ -1,4 +1,5 @@
 import { ControlError, type Audit } from '../control/errors.ts';
+import { DEFAULT_MESSAGE, MESSAGE_MAX_CHARS, messageProblem, normalizeMessage } from '../report/morningReport.ts';
 import { nextReport } from '../report/scheduler.ts';
 import type { ReportDays, ReportSettings } from '../report/types.ts';
 import type { Db } from '../store/db.ts';
@@ -17,6 +18,9 @@ import { HHMM, INDIAN_MOBILE, maskNumber, type Env } from './env.ts';
 // A customer's store has one more key, its daily Claude limit (DAILY_CAP_KEY, on its own key; S4.3). It applies when
 // that customer's runtime next starts.
 // The founder's number is never put in an error or an audit line in full: maskNumber shows its last 4 digits.
+// The morning message text (November release, change 5) is on its own key too (MESSAGE_KEY), in every workspace's store:
+// the owner's own text with placeholders (src/report/morningReport.ts). No row: the default text. Saving the default text,
+// or null, removes the row, so a later change to the default reaches a workspace that never wrote its own.
 
 /**
  * A customer's daily Claude limit (S4.3, owner decision D3): on the customer's own Anthropic key, so the customer sets it.
@@ -32,6 +36,9 @@ const DAILY_CAP_MAX = 1000;
 function checkCap(v: unknown): number | undefined {
   return typeof v === 'number' && Number.isFinite(v) && v >= DAILY_CAP_MIN && v <= DAILY_CAP_MAX && Math.round(v * 100) === v * 100 ? v : undefined;
 }
+
+/** The morning message text: a string checked by messageProblem, saved normalized; no row while the default is used. */
+export const MESSAGE_KEY = 'reportMessage';
 
 export const SETTING_KEYS = ['reportEnabled', 'reportDays', 'reportRecipient', 'reportTime', 'dashboardSend'] as const;
 export type SettingKey = (typeof SETTING_KEYS)[number];
@@ -67,6 +74,8 @@ export interface RuntimeSettings {
   dashboardSend: boolean;
   /** A customer store only: the customer's daily Claude limit, US$ (CUSTOMER_DEFAULT_CAP_USD until set). */
   dailySpendCapUsd?: number;
+  /** The owner's own morning message text; absent while the default (DEFAULT_MESSAGE) is used. */
+  reportMessage?: string;
   source: Record<SettingKey, SettingSource>;
 }
 
@@ -83,10 +92,12 @@ export interface SettingsView {
   dashboardSend: boolean;
   /** A customer store only. */
   dailySpendCapUsd?: number;
+  /** The owner's own morning message text; absent while the default is used. */
+  reportMessage?: string;
   source: Record<SettingKey, SettingSource>;
 }
 
-type Listener = (settings: RuntimeSettings, key: SettingKey) => void;
+type Listener = (settings: RuntimeSettings, key: SettingKey | typeof MESSAGE_KEY) => void;
 
 /** A stored or offered value for a key, checked; undefined when it is not valid. */
 function check(key: SettingKey, v: unknown): boolean | ReportDays | string | undefined {
@@ -187,6 +198,7 @@ export class SettingsStore {
     const time = this.#stored('reportTime');
     const timeOk = time !== undefined;
     const send = this.#stored('dashboardSend');
+    const message = this.#storedMessage();
     return {
       reportEnabled: enabled ? (enabled.value as boolean) : this.#env.REPORT_ENABLED,
       reportDays: days ? (days.value as ReportDays) : this.#env.REPORT_DAYS,
@@ -194,6 +206,7 @@ export class SettingsStore {
       reportTime: timeOk ? (time.value as string) : this.#env.REPORT_TIME,
       dashboardSend: send ? (send.value as boolean) : false,
       ...(this.#customer ? { dailySpendCapUsd: this.#storedCap() ?? CUSTOMER_DEFAULT_CAP_USD } : {}),
+      ...(message !== undefined ? { reportMessage: message } : {}),
       source: {
         reportEnabled: enabled ? 'dashboard' : 'env', reportDays: days ? 'dashboard' : 'env', reportRecipient: recipient ? 'dashboard' : 'env',
         reportTime: timeOk ? 'dashboard' : 'env', dashboardSend: send ? 'dashboard' : 'env',
@@ -207,6 +220,18 @@ export class SettingsStore {
     if (v === undefined) return undefined;
     try {
       return checkCap(JSON.parse(v));
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** The saved morning message, when there is a valid one (an invalid row reads as the default). */
+  #storedMessage(): string | undefined {
+    const v = this.#rows.get(MESSAGE_KEY);
+    if (v === undefined) return undefined;
+    try {
+      const parsed = JSON.parse(v) as unknown;
+      return typeof parsed === 'string' && messageProblem(parsed) === null ? normalizeMessage(parsed) : undefined;
     } catch {
       return undefined;
     }
@@ -235,6 +260,7 @@ export class SettingsStore {
       sendAt: s.reportTime, deadline: deadlineFor(s.reportTime, this.#env.REPORT_DEADLINE),
       nextReport: nextReport(await reportFor(this.#db, istDate(now)), now, this.reportSettings(), s.reportTime), dashboardSend: s.dashboardSend,
       ...(s.dailySpendCapUsd !== undefined ? { dailySpendCapUsd: s.dailySpendCapUsd } : {}),
+      ...(s.reportMessage !== undefined ? { reportMessage: s.reportMessage } : {}),
       source: s.source,
     };
   }
@@ -282,8 +308,49 @@ export class SettingsStore {
     return this.get();
   }
 
+  /**
+   * The morning message: checked (messageProblem), saved normalized and audited in one transaction, then kept in memory.
+   * null or the default text removes the row (back to the default). The audit line gives the length, not the text.
+   */
+  async #setMessage(raw: unknown, actor: string, audit: Audit): Promise<RuntimeSettings> {
+    let value: string | undefined;
+    if (raw !== null) {
+      const problem = messageProblem(raw);
+      if (problem) throw new ControlError(422, problem, MESSAGE_KEY);
+      const text = normalizeMessage(raw as string);
+      value = text === DEFAULT_MESSAGE ? undefined : text;
+    }
+    if (this.get().reportMessage === value) return this.get();
+    const detail = value === undefined
+      ? 'Morning briefing message reset to the default'
+      : `Morning briefing message changed (${Array.from(value).length} of ${MESSAGE_MAX_CHARS} characters)`;
+    const at = this.#clock.now().toISOString();
+    await this.#db.tx(async (q) => {
+      if (value === undefined) await q.run('DELETE FROM settings WHERE k = ?', [MESSAGE_KEY]);
+      else await q.run(PUT, [MESSAGE_KEY, JSON.stringify(value), at, actor]);
+      await audit(q, { actor, event: `settings.${MESSAGE_KEY}`, kind: 'config', detail });
+    });
+    if (value === undefined) this.#rows.delete(MESSAGE_KEY);
+    else this.#rows.set(MESSAGE_KEY, JSON.stringify(value));
+    const next = this.get();
+    this.#tell(next, MESSAGE_KEY);
+    return next;
+  }
+
+  /** Tells every listener; one that throws is logged and does not stop the others. */
+  #tell(next: RuntimeSettings, key: SettingKey | typeof MESSAGE_KEY): void {
+    for (const fn of this.#listeners) {
+      try {
+        fn(next, key);
+      } catch (err) {
+        this.#log?.error({ err, key }, 'a settings listener failed');
+      }
+    }
+  }
+
   async #set(rawKey: string, raw: unknown, actor: string, audit: Audit): Promise<RuntimeSettings> {
     if (rawKey === DAILY_CAP_KEY && this.#customer) return this.#setCap(raw, actor, audit);
+    if (rawKey === MESSAGE_KEY) return this.#setMessage(raw, actor, audit);
     if (!(SETTING_KEYS as readonly string[]).includes(rawKey)) throw new ControlError(422, 'That setting cannot be changed here', 'key');
     const key = rawKey as SettingKey;
     const value = key === 'reportRecipient' ? typedNumber(raw) : check(key, raw);
@@ -325,13 +392,7 @@ export class SettingsStore {
     if (keepToday) this.#rows.set(TODAY_KEY, JSON.stringify(keepToday));
     else if (key === 'reportTime') this.#rows.delete(TODAY_KEY);
     const next = this.get();
-    for (const fn of this.#listeners) {
-      try {
-        fn(next, key);
-      } catch (err) {
-        this.#log?.error({ err, key }, 'a settings listener failed');
-      }
-    }
+    this.#tell(next, key);
     return next;
   }
 }

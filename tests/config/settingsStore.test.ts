@@ -223,3 +223,61 @@ describe('SettingsStore.set', () => {
     expect(await rows(db)).toMatchObject([{ updatedAt: '2026-10-20T01:02:03.000Z' }]);
   });
 });
+
+describe('SettingsStore: the morning message text (November release, change 5)', () => {
+  const TEXT = 'Good morning! {open} open, {overdue} overdue.\n{tracker_link}';
+
+  it('saves the text, audits its length (not the text), and gives it to get() and view()', async () => {
+    const { db, store, audits, audit } = await setup();
+    expect(store.get().reportMessage).toBeUndefined();
+    expect('reportMessage' in (await store.view())).toBe(false);
+    await store.set('reportMessage', `  ${TEXT.replace('\n', '\r\n')}  `, OWNER, audit);
+    expect(store.get().reportMessage).toBe(TEXT);
+    expect((await store.view()).reportMessage).toBe(TEXT);
+    expect(await rows(db)).toMatchObject([{ k: 'reportMessage', v: JSON.stringify(TEXT), updatedBy: OWNER }]);
+    expect(audits).toEqual([{ actor: OWNER, event: 'settings.reportMessage', kind: 'config', detail: `Morning briefing message changed (${TEXT.length} of 1000 characters)` }]);
+  });
+
+  it('null or the default text goes back to the default: the row goes, audited once', async () => {
+    const { db, store, audits, audit } = await setup();
+    await store.set('reportMessage', TEXT, OWNER, audit);
+    await store.set('reportMessage', "{greeting}. {summary}. Today's tracker: {tracker_link}", OWNER, audit);
+    expect(store.get().reportMessage).toBeUndefined();
+    expect(await rows(db)).toEqual([]);
+    await store.set('reportMessage', null, OWNER, audit); // already the default: nothing changes
+    expect(audits.map((a) => a.detail)).toEqual([`Morning briefing message changed (${TEXT.length} of 1000 characters)`, 'Morning briefing message reset to the default']);
+  });
+
+  it('refuses a value that is not text, blank text, text over 1000 characters and control characters, writing nothing', async () => {
+    const { db, store, audits, audit } = await setup();
+    for (const [bad, message] of [
+      [42, 'The message must be text'], [['x'], 'The message must be text'], [' \n ', 'Write the message, or reset it to the default'],
+      ['x'.repeat(1001), 'The message can be at most 1000 characters'], ['bell\u0007', 'The message can have line breaks, but no other control characters'],
+      ['tab\there', 'The message can have line breaks, but no other control characters'],
+    ] as const) {
+      const e = await refusal(() => store.set('reportMessage', bad, OWNER, audit));
+      expect(e, JSON.stringify(bad)).toMatchObject({ status: 422, message, field: 'reportMessage' });
+    }
+    expect(await rows(db)).toEqual([]);
+    expect(audits).toEqual([]);
+  });
+
+  it('a saved row that is not a valid text reads as the default, and the same text again changes nothing', async () => {
+    const { db, store, audits, audit } = await setup();
+    await db.run('INSERT INTO settings (k, v, updated_at, updated_by) VALUES (?, ?, ?, ?)', ['reportMessage', JSON.stringify('bad\u0000'), NOW, OWNER]);
+    await store.load();
+    expect(store.get().reportMessage).toBeUndefined();
+    await store.set('reportMessage', TEXT, OWNER, audit);
+    await store.set('reportMessage', TEXT, OWNER, audit);
+    expect(audits).toHaveLength(1);
+  });
+
+  it('is kept in a customer store too, per workspace', async () => {
+    const db = await seededDb();
+    const store = new SettingsStore({ db, env: parseEnv({}), clock: manualClock(NOW), customer: true });
+    await store.set('reportMessage', TEXT, OWNER, async () => undefined);
+    expect(store.get()).toMatchObject({ reportMessage: TEXT, dailySpendCapUsd: 5 });
+    const other = new SettingsStore({ db: await seededDb(), env: parseEnv({}), clock: manualClock(NOW), customer: true });
+    expect(other.get().reportMessage).toBeUndefined();
+  });
+});

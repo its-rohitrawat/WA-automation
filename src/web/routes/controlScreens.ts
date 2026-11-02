@@ -5,6 +5,7 @@ import type { SettingsStore } from '../../config/settingsStore.ts';
 import { listAudit, parseAuditParams } from '../../control/auditQueries.ts';
 import { ControlError, type AuditEntry } from '../../control/errors.ts';
 import { usageSummary } from '../../control/usage.ts';
+import { messageEditorView } from '../../report/morningReport.ts';
 import type { UptimeLog } from '../../health/uptimeLog.ts';
 import { uptimeReport, type UptimeRobotClient } from '../../health/uptimeRobot.ts';
 import type { Db, Sql } from '../../store/db.ts';
@@ -65,6 +66,10 @@ export function registerControlApi(router: Router, d: ControlApiDeps): void {
   read('/dashboard/api/uptime', () => uptimeReport({ log: d.uptime.log, robot: d.uptime.robot, now: d.clock.now() }));
   read('/dashboard/api/audit', async ({ url }) => await listAudit(d.db, parseAuditParams(url.searchParams), d.isOwner));
   read('/dashboard/api/settings', () => d.settings.view());
+  // The morning message editor (November release, change 5): this workspace's text (or the default), the placeholders
+  // with today's real values from its own tracker view, and the limit. Read-only; the text is saved through POST
+  // /dashboard/api/settings (key reportMessage), which SettingsStore checks. Nothing private: no number, no client name.
+  read('/dashboard/api/settings/report-message', async () => await messageEditorView(d.db, d.clock.now(), (await d.settings.view()).reportMessage));
 
   router.post('/dashboard/api/settings', controlled(async (ctx) => {
     const s = await actionSession(ctx, d);

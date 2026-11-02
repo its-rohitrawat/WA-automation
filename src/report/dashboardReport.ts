@@ -90,7 +90,10 @@ export function spareDriver(o: {
   };
 }
 
-/** What LiveReport reads on every tick: the briefing's settings and its number, from the dashboard's store. */
+/** What LiveReport reads on every tick: the briefing's settings, its number and the owner's message text, from the dashboard's store. */
 export function briefingSettings(store: Pick<SettingsStore, 'get' | 'reportSettings'>): () => LiveReportSettings {
-  return () => ({ report: store.reportSettings(), recipient: store.get().reportRecipient });
+  return () => {
+    const s = store.get();
+    return { report: store.reportSettings(), recipient: s.reportRecipient, message: s.reportMessage };
+  };
 }
