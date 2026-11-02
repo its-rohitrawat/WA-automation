@@ -141,7 +141,7 @@ describe('the 08:00 send uses the saved text', () => {
   async function scheduler(message?: () => string | undefined) {
     const db = await busyDb();
     await setKv(db, TRACKER_ID_KEY, TRACKER_ID);
-    const clock = manualClock(NOW);
+    const clock = manualClock(NOW.toISOString());
     const sender = new FakeReportSender();
     const s = new ReportScheduler({ db, clock, log: silentLogger(), sender, settings: ON, healthLine: () => OK, ...(message ? { message } : {}) });
     await s.recover();
@@ -167,7 +167,7 @@ describe('the 08:00 send uses the saved text', () => {
   it('goes from the settings store through LiveReport to the sender', async () => {
     const db = await busyDb();
     await setKv(db, TRACKER_ID_KEY, TRACKER_ID);
-    const clock = manualClock(NOW);
+    const clock = manualClock(NOW.toISOString());
     const store = await SettingsStore.open({
       db, env: parseEnv({ REPORT_ENABLED: 'true', REPORT_RECIPIENT: '919812345678', REPORT_TIME: '06:00' }), clock, spareLinked: () => true,
     });
