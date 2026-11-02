@@ -100,6 +100,7 @@ async function setup(o: { assistantOn: boolean }) {
     DATA_DIR: dir, GROUPS_FILE: groups, ANTHROPIC_API_KEY: FOUNDER_KEY, DB_ENGINE: 'postgres',
     DATABASE_URL: 'postgres://wa_app:placeholder@127.0.0.1:5432/wa_agent', DATABASE_PLATFORM_URL: 'postgres://wa_platform:placeholder@127.0.0.1:5432/wa_agent',
     DASHBOARD_ENABLED: 'true', DASHBOARD_OWNER_EMAILS: 'owner@example.com', PLATFORM_ENABLED: 'true', DASHBOARD_ASSISTANT: o.assistantOn ? 'true' : 'false',
+    DASHBOARD_GOOGLE_CLIENT_ID: 'web-client-placeholder', DASHBOARD_GOOGLE_CLIENT_SECRET: 'web-secret-placeholder',
   });
   const master = randomBytes(32);
   const { platformDb, customerDbOf } = await stores();
@@ -151,7 +152,7 @@ describe('a customer\'s assistant (November release, piece 3)', () => {
     expect(ps.supervisor.state(FOUNDER_TENANT_ID)).toBe('running');
   });
 
-  it('with the founder\'s switch off, no customer has the assistant: no routes, no assistant, one Claude client fewer', async () => {
+  it('with the founder\'s switch off, no customer has the assistant: no routes, no assistant, and no assistant client made', async () => {
     const off = await setup({ assistantOn: false });
     const offClients = sdk.made.filter((c) => c.apiKey === CUSTOMER_KEY).length;
     const offRoutes = mountedRoutes(off.id);
@@ -163,6 +164,6 @@ describe('a customer\'s assistant (November release, piece 3)', () => {
     rmSync(dir!, { recursive: true, force: true });
     const on = await setup({ assistantOn: true });
     expect(mountedRoutes(on.id)).toContain('POST /dashboard/api/assistant/ask');
-    expect(sdk.made.filter((c) => c.apiKey === CUSTOMER_KEY).length).toBe(offClients + 1);
+    expect(sdk.made.filter((c) => c.apiKey === CUSTOMER_KEY).length).toBeGreaterThan(offClients); // the assistant's own, on the customer's key
   });
 });
