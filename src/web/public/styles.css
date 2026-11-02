@@ -597,5 +597,3 @@ button[disabled] { cursor: not-allowed; opacity: .55; }
 /* The confirm dialog's exact text (the message about to be sent) */
 .m-quote { margin: 12px 0 0; padding: 10px 12px; max-height: 40vh; overflow-y: auto; border-radius: 10px; border-left: 4px solid var(--green); background: var(--panel-2);
   white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.45; }
-/* A warning note (Settings: the ban risk) */
-.note.warn-note { background: color-mix(in srgb, var(--s-warn) 12%, var(--panel)); color: var(--text); } .note.warn-note svg { color: var(--s-warn); flex: none; }

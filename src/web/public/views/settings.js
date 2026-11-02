@@ -1,6 +1,6 @@
 // Settings (D5 Task 5): the owner, this session, Sign out and Sign out everywhere, the time zone (display only),
 // appearance, the security notes, Priority & sentiment (views/priorityPanel.js), and "Allow sending from the dashboard"
-// (Open chat), off until the owner switches it on after reading the ban-risk note. Owners are listed on the Mac, not here.
+// (Open chat), off until the owner switches it on and confirms. Owners are listed on the Mac, not here.
 import { get, post } from '../api.js';
 import { $, esc, icon, toast } from '../dom.js';
 import { initials, when } from '../format.js';
@@ -11,12 +11,12 @@ import { confirmDialog, errorText, failed, listen, loading, pill } from './ui.js
 /** @typedef {import('./priorityPanel.js').PriorityView} PriorityView */
 /** @typedef {import('./priorityPanel.js').Keywords} Keywords */
 
-/** The Open chat switch, with what it does and the ban risk. null: the agent did not say. @param {boolean | null} on */
-function sendingCard(on) {
+/** The Open chat switch, with what it does, its limits and the audit line. null: the agent did not say. @param {boolean | null} on */
+export function sendingCard(on) {
   return `<section class="card col-12" id="send-card"><div class="card-head"><h3>Sending from the dashboard</h3>${on === null ? '' : pill(on ? { cls: 'p-warn', label: 'On' } : { cls: 'p-muted', label: 'Off' })}</div>
     <div class="brief-toggle"><div class="grow-1"><b>Allow sending from the dashboard</b><small>Open chat can then reply in an approved client's group, as text, from the founder's WhatsApp. Each message is shown to you and sent only after you confirm it.</small></div>
       <button class="switch" type="button" role="switch" aria-checked="${on === true}" aria-label="Allow sending from the dashboard" data-send-switch${on === null ? ' disabled' : ''}></button></div>
-    <div class="note warn-note">${icon('alert', 16)}<span><b>Ban risk.</b> WhatsApp can restrict or ban a number that sends from a linked tool like this one, more so when it sends often. Keep this off unless you need it. Limits stay in place: one message every 3 seconds to a group, 30 an hour in all. Every change here and every message sent is in Audit logs, without the message text.</span></div></section>`;
+    <div class="note">${icon('info', 16)}<span><b>Limits.</b> One message every 3 seconds to a group, 30 an hour in all. Every change here and every message sent is in Audit logs, without the message text.</span></div></section>`;
 }
 
 /**
