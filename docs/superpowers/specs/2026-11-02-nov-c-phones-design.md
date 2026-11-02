@@ -66,12 +66,19 @@ ALTER TABLE wa_auth ADD CONSTRAINT wa_auth_phone_check
 - **No SQLite v14.** Nothing in tracker.db changes. Phone files 2-5 appear only when the founder on SQLite links a phone
   2-5.
 - **Backfill:** none. The missing kv document reads as phone 1, and a group with no `phone` reads as phone 1.
-- **Rollback (revert the PR, no restore):** the old code reads `founder` and `spare` only.
-  - Phones 2-5's rows, files and kv document stay unread, and the wider check is harmless.
-  - The old groups-file schema is a plain `z.object`, so it drops the unknown `phone` field and loads the file.
-  - Groups that were on phones 2-5 are then read only if phone 1 is in them: the old behaviour.
-  - Rollback A (`exportBack` to SQLite) must also carry phones 2-5's rows into `session-2.db` … `session-5.db`, or those
-    phones need a relink after it. That is task 12 (src/migrate). The copy tool's plan gets the same rows.
+- **Rollback depends on the engine.**
+  - **On Postgres (the Mac today), a revert alone does not work.** The old code refuses a database at a later version
+    (src/store/open.ts:55, `v !== PG_LATEST`). After the release's db-migrate, the database is at P7, so main's code
+    will not start on it. Rolling back on Postgres means either:
+    1. stopping the agent and restoring the pg_dump taken just before the release into a fresh database, then starting
+       main's code; or
+    2. rollback A: `exportBack` to SQLite. That must also carry phones 2-5's rows into `session-2.db` …
+       `session-5.db`, or those phones need a relink after it. That is task 12 (src/migrate). The copy tool's plan gets
+       the same rows.
+  - **On SQLite, a revert works with no restore.** The old code reads `founder` and `spare` only:
+    - phones 2-5's files and the kv document stay unread;
+    - the old groups-file schema is a plain `z.object`, so it drops the unknown `phone` field and loads the file;
+    - groups that were on phones 2-5 are then read only if phone 1 is in them: the old behaviour.
 - Go-live: db-migrate prints `Applied P6`, `Applied P7`, then the access-rules line. Nothing else.
 
 ## How a runtime holds N gateways
@@ -129,7 +136,9 @@ active phone it holds:
 
 ## Unlink
 
-`POST /dashboard/api/whatsapp/phones/:id/unlink { confirm: true }`, owner only:
+`POST /dashboard/api/whatsapp/phones/:id/unlink { confirm: true }`, owner only. The confirm names the phone (its label)
+and its masked number, and says what stays: messages, tasks and approvals. Phone 1 gets a stronger confirm that names it
+as the main phone. The spare phone and the morning briefing are not affected by any unlink. The steps:
 1. **Log out.** Baileys `sock.logout()` on that phone's socket, through a new gateway `logout()`. WhatsApp then drops the
    linked device from the phone's Linked devices.
 2. **Stop and clear.** The phone's gateway stops, and its session rows (or file rows) are cleared with today's
@@ -146,6 +155,8 @@ active phone it holds:
 ## Limits
 
 - At most 5 reading phones per workspace. The routes check it, and `wa_auth`'s check allows only those names.
+- **Send limits stay per workspace across all its phones:** 30 sends an hour in all, and one every 3 s per group, as
+  today. More phones never mean more sends. A test proves that phones 2 and 3 share one budget.
 - The spare is separate and not counted.
 - One link at a time per workspace.
 - Memory: each linked phone is one more WhatsApp socket. The Supervisor's existing `PLATFORM_MAX_RSS_MB` guard still
@@ -189,10 +200,16 @@ active phone it holds:
 - gateway.ts is shared with lane B. My `logout()` is one method in its own block, landed after B's, or before it by
   agreement.
 
-## Open points for the coordinator
+## Decisions from the review (coordinator, 2 Nov)
 
 1. When a group's phone is unlinked but another linked phone is in the group: **no automatic switch**. Its row offers
-   "Read through Phone 3", one click and audited. Is that right?
-2. The monitor: one WhatsApp part saying "2 of 3 phones connected", with each phone in its tooltip and on Connections.
-   The alternative is one part per phone. I propose the single part.
-3. Unlinking phone 1 is allowed (above). Should it be?
+   "Read through Phone N", one click and audited.
+2. The monitor keeps its one WhatsApp part, the same shape (lane D is fixing the collapsed monitor), with new text:
+   "2 of 3 phones connected". Each phone is in its tooltip and on Connections.
+3. Phone 1 may be unlinked, behind a stronger confirm that names it as the main phone.
+4. Rollback on Postgres needs the pre-release pg_dump or rollback A (see "Migration and backfill").
+5. Send limits are per workspace across all phones.
+6. Loans:
+   - gateway.ts and switchableGateway.ts are lane B's until B1 lands. `logout()` comes after that.
+   - pg/migrations.ts and src/migrate come after lane A's piece 2.
+   - senderLink.ts may come to lane C directly if lane D does not touch it.
