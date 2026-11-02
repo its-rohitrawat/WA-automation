@@ -357,3 +357,26 @@ export function readSendResult(raw) {
   const r = obj(raw);
   return { message: outboxOf(r.message), replayed: r.replayed === true };
 }
+
+/**
+ * GET /clients/:code/chat/members (November release, change 2): the group info panel. A member is a name (or null), the
+ * number WhatsApp shows (or null: hidden), the digits a mention uses, and whether it is an admin. Names are untrusted.
+ * @param {unknown} raw
+ */
+export function readMembers(raw) {
+  const r = obj(raw);
+  const reason = str(r.reason);
+  return {
+    known: r.known === true,
+    groupName: cut(str(r.groupName), 120),
+    reason: reason === 'whatsapp_not_connected' ? 'whatsapp_not_connected' : 'members_unavailable',
+    members: arr(r.members)
+      .map((m) => {
+        const x = obj(m);
+        const name = cut(str(x.name), 80);
+        const number = /^\+[\d ]{6,24}$/.test(str(x.number)) ? str(x.number) : null;
+        return { name: name || null, number, tag: /^\d{5,20}$/.test(str(x.tag)) ? str(x.tag) : '', admin: x.admin === true };
+      })
+      .filter((m) => m.tag !== ''),
+  };
+}

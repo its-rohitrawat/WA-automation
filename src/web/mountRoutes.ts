@@ -16,7 +16,7 @@ import { FOUNDER_TENANT_ID } from '../config/env.ts';
 import type { Guard, OwnerSession } from './guard.ts';
 import { HttpError, sendJson } from './http.ts';
 import { registerReadApi } from './routes/api.ts';
-import { chatReadHandler, chatSendHandler, type ChatDeps } from './routes/chat.ts';
+import { chatMembersHandler, chatReadHandler, chatSendHandler, type ChatDeps } from './routes/chat.ts';
 import { clientDetailHandler, clientsListHandler, type ClientsDeps } from './routes/clients.ts';
 import type { ApiResult, AuditFn, OwnerContext } from './routes/context.ts';
 import { registerControlApi } from './routes/controlScreens.ts';
@@ -181,6 +181,7 @@ export function mountAgentRoutes(m: DashboardMount, d: AgentRoutesDeps): void {
     const chat: ChatDeps = { ...d.chat, audit };
     read('/dashboard/api/clients/:code/chat', async ({ params, url }, o) =>
       await chatReadHandler(chat, o, params.code!, { before: url.searchParams.get('before'), limit: url.searchParams.get('limit') }));
+    read('/dashboard/api/clients/:code/chat/members', async ({ params }, o) => await chatMembersHandler(chat, o, params.code!));
     change('/dashboard/api/clients/:code/chat/send', ({ params }, o, body) => chatSendHandler(chat, o, params.code!, body));
   }
 

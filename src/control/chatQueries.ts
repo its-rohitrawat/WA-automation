@@ -1,6 +1,7 @@
 import type { ClientRow } from '../store/clients.ts';
 import type { Db } from '../store/db.ts';
 import { outboxToShow, type OutboxRow, type OutboxState } from '../store/outbox.ts';
+import { tagOf, type GroupMember } from '../wa/groupMembers.ts';
 import { messageKind, oneLine, senderLabel, type ClientMessage } from './clientQueries.ts';
 
 // Open chat (owner request, 29 Oct 2026): a client's group as stored, a page at a time, newest first. Least data: a
@@ -144,4 +145,49 @@ export async function chatPage(db: Db, c: ClientRow, now: Date, o: { before?: nu
 /** A dashboard message as the chat shows it. */
 export async function outboxItem(db: Db, row: OutboxRow): Promise<ChatOutboxItem> {
   return { uuid: row.uuid, at: row.createdAt, text: row.text, state: row.state, quote: row.replyTo === null ? null : await messageQuote(db, row.clientId, row.replyTo) };
+}
+
+/**
+ * A group member as the group info panel shows it (November release, change 2). The one place Open chat shows a phone
+ * number: a member the agent has no name for is shown by the number WhatsApp gives, as WhatsApp's own group info does
+ * (owner request, 2 Nov 2026). A hidden number (an @lid member WhatsApp gives no number for) stays hidden, never
+ * guessed. No WhatsApp id: `tag` is only the digits a mention uses.
+ */
+export interface ChatMember {
+  name: string | null;
+  number: string | null;
+  tag: string;
+  admin: boolean;
+}
+
+/** senderLabel's rule: one line, and never a "name" that is really a number. */
+const LOOKS_LIKE_NUMBER = /(?:\d[\s().+-]*){7,}/;
+
+function memberName(name: string | null): string | null {
+  const n = oneLine(name, 60);
+  return n && !LOOKS_LIKE_NUMBER.test(n) ? n : null;
+}
+
+/** A phone-number id as WhatsApp shows the number: "+91 98000 00001" for India, "+<digits>" otherwise. */
+export function shownNumber(phoneNumberId: string): string {
+  const d = phoneNumberId.split('@')[0]!;
+  return d.length === 12 && d.startsWith('91') ? `+91 ${d.slice(2, 7)} ${d.slice(7)}` : `+${d}`;
+}
+
+/**
+ * The members of this client's group as the panel lists them: admins first, then by name, then by number, then the
+ * hidden ones. Each is named from this client's people: by the id the group uses, its phone-number or hidden-number id,
+ * or its number. Parameterised reads only, and only this client's rows.
+ */
+export async function chatMembers(db: Db, c: ClientRow, members: readonly GroupMember[]): Promise<ChatMember[]> {
+  const people = await db.all<{ jid: string; number: string | null; name: string | null }>('SELECT jid, number, name FROM people WHERE client_id = ?', [c.id]);
+  const byJid = new Map(people.map((p) => [p.jid, p]));
+  const byNumber = new Map(people.filter((p) => p.number).map((p) => [p.number!, p]));
+  const out = members.map((m): ChatMember => {
+    const digits = m.phoneNumber ? m.phoneNumber.split('@')[0]! : null;
+    const p = byJid.get(m.id) ?? (m.phoneNumber ? byJid.get(m.phoneNumber) : undefined) ?? (m.lid ? byJid.get(m.lid) : undefined) ?? (digits ? byNumber.get(digits) : undefined);
+    return { name: memberName(p?.name ?? null), number: m.phoneNumber ? shownNumber(m.phoneNumber) : null, tag: tagOf(m.id), admin: m.admin };
+  });
+  const rank = (x: ChatMember) => (x.admin ? 0 : 3) + (x.name ? 0 : x.number ? 1 : 2);
+  return out.sort((a, b) => rank(a) - rank(b) || (a.name ?? a.number ?? '').localeCompare(b.name ?? b.number ?? '', 'en'));
 }

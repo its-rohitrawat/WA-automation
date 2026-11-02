@@ -563,6 +563,7 @@ export async function buildCustomerRuntime(
           chat: {
             db: trackerStore, configs: () => currentConfigs, sendingOn: () => store.get().dashboardSend,
             connected: () => gateway.status().state === 'open', groupSocket: (groupId) => gateway.groupSocket(groupId),
+            groupMembers: (groupId) => gateway.groupMembers(groupId),
             directory, log, clock: systemClock,
           },
           google: {

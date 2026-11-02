@@ -5,7 +5,7 @@
 // the founder's WhatsApp, once (the uuid made here makes a repeated request find the first one). Every text from the
 // agent is shown through esc(): group messages are untrusted.
 import { ApiError, get, post } from '../api.js';
-import { readChat, readSendResult } from '../contract.js';
+import { readChat, readMembers, readSendResult } from '../contract.js';
 import { $, esc, icon, toast } from '../dom.js';
 import { clock } from '../format.js';
 import { closeDrawer, openChatLayer, openDrawerElement } from './drawer.js';
@@ -205,7 +205,7 @@ async function loadNewest(first = false) {
     const footChanged = take(d, true);
     draw({ foot: first || footChanged, toEnd: first });
     if (first) {
-      $('.ch-head h2', c.el).textContent = c.groupName;
+      $('.ch-who', c.el).textContent = c.groupName;
       // Only now, at the end of the list: scrolling up near the top loads the page before.
       c.armed = true;
     }
@@ -299,16 +299,73 @@ function forget() {
 }
 
 /**
+ * The group info panel's body: the group, then a note (loading, or why the members can't be shown) or the members. A
+ * member is its name, else the number WhatsApp shows, else "Number hidden"; names are untrusted (esc).
+ * @param {string} groupName @param {{ note: string } | { members: ReturnType<typeof readMembers>['members'] }} s
+ */
+function infoBody(groupName, s) {
+  const top = `<div class="ch-info-top"><span class="ch-info-av" aria-hidden="true">${icon('users', 34)}</span><h3>${esc(groupName)}</h3>`;
+  if ('note' in s) return `${top}<p class="ch-info-count">${esc(s.note)}</p></div>`;
+  const n = s.members.length;
+  const rows = s.members
+    .map((m) => {
+      const title = m.name ?? m.number ?? 'Number hidden';
+      const sub = m.name ? m.number ?? 'Number hidden' : m.number ? '' : 'WhatsApp hides this member’s number';
+      return `<li class="ch-mem"><span class="ch-mem-av" aria-hidden="true">${icon('user', 18)}</span><span class="grow-1 ch-mem-text"><b>${esc(title)}</b>${sub ? `<small>${esc(sub)}</small>` : ''}</span>${m.admin ? '<span class="ch-admin">Group admin</span>' : ''}</li>`;
+    })
+    .join('');
+  return `${top}<p class="ch-info-count">Group · ${n} member${n === 1 ? '' : 's'}</p></div><ul class="ch-mems" aria-label="Members">${rows}</ul>`;
+}
+
+/** Opens the group info panel over the chat and reads the members (kept 5 minutes by the agent). */
+async function openInfo() {
+  const c = chat;
+  if (!c) return;
+  const panel = /** @type {HTMLElement} */ ($('.ch-info', c.el));
+  panel.innerHTML = `<div class="ch-info-head"><button class="icon-btn" type="button" data-info-back aria-label="Back to the chat">${icon('arrowL', 18)}</button><b>Group info</b></div>
+    <div class="ch-info-body">${infoBody(c.groupName, { note: 'Loading the members…' })}</div>`;
+  panel.hidden = false;
+  /** @type {HTMLElement | null} */ (panel.querySelector('[data-info-back]'))?.focus();
+  /** @type {{ note: string } | { members: ReturnType<typeof readMembers>['members'] }} */
+  let s;
+  let name = c.groupName;
+  try {
+    const d = readMembers(await get(`/clients/${encodeURIComponent(c.code)}/chat/members`));
+    name = d.groupName || name;
+    s = d.known
+      ? { members: d.members }
+      : { note: d.reason === 'whatsapp_not_connected' ? 'WhatsApp is not connected, so the members can’t be shown now.' : 'The members could not be read from WhatsApp just now. Try again in a minute.' };
+  } catch (e) {
+    s = { note: e instanceof ApiError ? e.message : 'The members could not be loaded.' };
+  }
+  if (chat !== c || panel.hidden) return;
+  const body = panel.querySelector('.ch-info-body');
+  if (body) body.innerHTML = infoBody(name, s);
+}
+
+/** Back to the chat from the group info panel. */
+function closeInfo() {
+  const c = chat;
+  if (!c) return;
+  const panel = /** @type {HTMLElement} */ ($('.ch-info', c.el));
+  panel.hidden = true;
+  panel.innerHTML = '';
+  /** @type {HTMLElement | null} */ (c.el.querySelector('.ch-who'))?.focus();
+}
+
+/**
  * Opens the chat of a client. `onBack` reopens what it came from (the client's panel).
  * @param {string} code @param {() => void} onBack
  */
 export function openChat(code, onBack) {
+  // The group's picture and name open its info, as in WhatsApp. The name is the sheet's title (the h2), as a button.
   const el = openChatLayer(`<div class="ch-head"><button class="icon-btn" type="button" data-chat-back aria-label="Back to the client">${icon('arrowL', 18)}</button>
-      <div class="ch-av" aria-hidden="true">${icon('users', 18)}</div><div class="grow-1 ch-title"><h2>Loading…</h2><small>${esc(code)} · stored messages</small></div>
+      <span class="ch-av" data-chat-info aria-hidden="true">${icon('users', 18)}</span><div class="grow-1 ch-title"><h2><button class="ch-who" type="button" data-chat-info aria-haspopup="dialog">Loading…</button></h2><small>${esc(code)} · stored messages</small></div>
       <button class="icon-btn" type="button" data-close aria-label="Close the chat">${icon('close', 18)}</button></div>
     <div class="ch-body" tabindex="0" aria-label="Messages"><button class="ch-older link" type="button" hidden>Load older messages</button>
       <div class="ch-list" aria-live="polite"><p class="ch-empty">Loading the messages…</p></div></div>
-    <div class="ch-foot"></div>`, { onClose: forget });
+    <div class="ch-foot"></div>
+    <section class="ch-info" aria-label="Group info" hidden></section>`, { onClose: forget });
   chat = {
     code, el, messages: new Map(), outbox: new Map(), hasOlder: false, loadingOlder: false, sendingOn: false, connected: false,
     groupName: code, clientName: '', replyTo: null, draft: '', armed: false, onBack,
@@ -330,6 +387,8 @@ export function openChat(code, onBack) {
       back();
       return;
     }
+    if (t.closest('[data-chat-info]')) return void openInfo();
+    if (t.closest('[data-info-back]')) return closeInfo();
     if (t.closest('.ch-older')) return void loadOlder();
     if (t.closest('[data-reply-cancel]')) {
       chat.replyTo = null;
@@ -367,6 +426,11 @@ export function openChat(code, onBack) {
     if (t.id === 'ch-text' && e.key === 'Enter' && !e.shiftKey && !e.isComposing && desk.matches) {
       e.preventDefault();
       void send();
+    }
+    // Escape in the group info goes back to the chat; the layer's own Escape (closing the chat) is not reached.
+    if (e.key === 'Escape' && !(/** @type {HTMLElement} */ ($('.ch-info', el))).hidden) {
+      e.stopPropagation();
+      closeInfo();
     }
   });
   void loadNewest(true);

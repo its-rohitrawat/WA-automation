@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { chatPage, outboxItem, type ChatOutboxItem, type ChatPage } from '../../control/chatQueries.ts';
+import { chatMembers, chatPage, outboxItem, type ChatMember, type ChatOutboxItem, type ChatPage } from '../../control/chatQueries.ts';
 import type { GroupDirectory } from '../../control/groups.ts';
 import type { ClientConfig } from '../../config/groups.ts';
 import { getClientByCode, type ClientRow } from '../../store/clients.ts';
@@ -7,6 +7,7 @@ import type { Db } from '../../store/db.ts';
 import { claimedSince, claimOutbox, finishOutbox, lastClaimedAt, markSending, outboxByUuid, type OutboxRow } from '../../store/outbox.ts';
 import type { Clock } from '../../util/clock.ts';
 import type { Logger } from '../../util/logger.ts';
+import type { GroupMembersSource } from '../../wa/groupMembers.ts';
 import { sendGroupText, type GroupSocketSource, type QuotedMessage, type SendOutcome } from '../../wa/groupSend.ts';
 import { fail, ok, type ApiError, type ApiResult, type AuditFn, type OwnerContext } from './context.ts';
 
@@ -27,6 +28,8 @@ export interface ChatDeps {
   connected: () => boolean;
   /** The founder gateway's socket for an approved group while open (gateway.groupSocket). */
   groupSocket: GroupSocketSource;
+  /** The founder gateway's members of an approved group while open (gateway.groupMembers); not wired: none known. */
+  groupMembers?: GroupMembersSource;
   /** Only its last list is read, for the group's name. */
   directory: Pick<GroupDirectory, 'cachedGroups'>;
   audit: AuditFn;
@@ -72,8 +75,29 @@ export async function chatReadHandler(deps: ChatDeps, _ctx: OwnerContext, code: 
   const before = whole(search.before);
   const limit = whole(search.limit);
   const page = await chatPage(deps.db, c, deps.clock.now(), { ...(before !== undefined ? { before } : {}), ...(limit !== undefined ? { limit } : {}) });
-  const groupName = (deps.directory.cachedGroups() ?? []).find((g) => g.id === c.groupId)?.subject || c.name;
-  return ok({ client: { code: c.code, name: c.name, groupName }, sendingOn: deps.sendingOn(), connected: deps.connected(), ...page });
+  return ok({ client: { code: c.code, name: c.name, groupName: groupNameOf(deps, c) }, sendingOn: deps.sendingOn(), connected: deps.connected(), ...page });
+}
+
+/** The group's name as WhatsApp last listed it, else the client's own name. */
+const groupNameOf = (deps: ChatDeps, c: ClientRow) => (deps.directory.cachedGroups() ?? []).find((g) => g.id === c.groupId)?.subject || c.name;
+
+export type MembersView =
+  | { known: true; groupName: string; members: ChatMember[] }
+  | { known: false; groupName: string; reason: 'whatsapp_not_connected' | 'members_unavailable'; members: [] };
+
+/**
+ * GET /dashboard/api/clients/:code/chat/members: the group info panel (November release, change 2). Only an approved
+ * client of this workspace (its own database), and only that client's group is asked about: one read of WhatsApp's group
+ * data through the founder gateway, kept 5 minutes there. Not connected: nothing is asked.
+ */
+export async function chatMembersHandler(deps: ChatDeps, _ctx: OwnerContext, code: string): Promise<ApiResult<MembersView | ApiError>> {
+  const c = await approvedClient(deps, code);
+  if (!c) return notFound();
+  const groupName = groupNameOf(deps, c);
+  if (!deps.connected()) return ok({ known: false, groupName, reason: 'whatsapp_not_connected', members: [] });
+  const found = deps.groupMembers ? await deps.groupMembers(c.groupId) : null;
+  if (!found) return ok({ known: false, groupName, reason: 'members_unavailable', members: [] });
+  return ok({ known: true, groupName, members: await chatMembers(deps.db, c, found) });
 }
 
 const SendBody = z.strictObject({
