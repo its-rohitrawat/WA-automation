@@ -197,7 +197,7 @@ describe('the one send from the founder’s WhatsApp (Open chat, 29 Oct 2026)', 
 
   it('only the dashboard’s chat route sends, and only the gateways hand out the socket', () => {
     expect(sources().filter((s) => /\bsendGroupText\(/.test(s.text)).map((s) => s.file).sort()).toEqual(['wa/groupSend.ts', 'web/routes/chat.ts']);
-    expect(sources().filter((s) => /\bgroupSocket\(/.test(s.text)).map((s) => s.file).sort()).toEqual(['runtime/customerRuntime.ts', 'wa/gateway.ts', 'wa/phoneSet.ts', 'wa/switchableGateway.ts']);
+    expect(sources().filter((s) => /\bgroupSocket\(/.test(s.text)).map((s) => s.file).sort()).toEqual(['runtime/phones.ts', 'wa/gateway.ts', 'wa/phoneSet.ts', 'wa/switchableGateway.ts']);
   });
 
   it('the phone set only passes on the group’s own phone’s socket: it makes none and sends nothing (lane C)', () => {
@@ -261,7 +261,7 @@ describe('the one change Delete chat makes on the founder’s WhatsApp (November
     // per-phone wiring (lane C, task 9) is in.
     expect(sources().filter((s) => /\bdeleteGroupChat\(/.test(s.text)).map((s) => s.file).sort()).toEqual([CHAT_DELETE, 'web/routes/chat.ts']);
     const givers = sources().filter((s) => /\bchatDeleteSocket\(/.test(s.text)).map((s) => s.file);
-    for (const f of givers) expect(['runtime/customerRuntime.ts', 'wa/gateway.ts', 'wa/phoneSet.ts', 'wa/switchableGateway.ts']).toContain(f);
+    for (const f of givers) expect(['runtime/phones.ts', 'wa/gateway.ts', 'wa/phoneSet.ts', 'wa/switchableGateway.ts']).toContain(f);
     expect(givers).toEqual(expect.arrayContaining(['wa/gateway.ts', 'wa/switchableGateway.ts']));
   });
 
