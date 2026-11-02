@@ -36,7 +36,7 @@ describe('the chat list', () => {
 });
 
 describe('the empty chat', () => {
-  it('shows the core's canvas, the heading with one green word, and the offered questions escaped, each with its icon', () => {
+  it('shows the core canvas, the heading with one green word, and the offered questions escaped, each with its icon', () => {
     const html: string = heroHtml(['Summarise today', '<img src=x onerror=alert(1)>']);
     expect(html).toContain('<div class="asst-core" data-core aria-hidden="true"><canvas></canvas></div>');
     expect(html).toContain('Ask your agent <em>anything.</em>');
@@ -47,7 +47,7 @@ describe('the empty chat', () => {
     expect(html.match(/<svg/g)).toHaveLength(2); // an icon each (an unknown question gets the spark)
   });
 
-  it('a message added now fades up once; a stored one draws still; the agent's orb thinks while it runs', () => {
+  it('a message added now fades up once; a stored one draws still; the agent orb thinks while it runs', () => {
     expect(entryHtml({ who: 'me', text: 'hi', fresh: true }, 0)).toBe('<div class="asst-msg me enter">hi</div>');
     expect(entryHtml(entryOf({ role: 'user', body: 'hi' }), 0)).toBe('<div class="asst-msg me">hi</div>');
     expect(entryHtml(entryOf({ role: 'assistant', body: 'x', status: 'running' }), 1)).toContain('class="asst-orb thinking"');

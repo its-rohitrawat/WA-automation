@@ -176,11 +176,9 @@ a { color: inherit; text-decoration: none; }
 }
 @media (min-width: 961px) and (hover: hover) and (pointer: fine) { .app.collapsed .collapse:hover { border-color: var(--accent); color: var(--accent); } }
 /* On a phone the menu is a drawer: nothing to collapse, and a menu collapsed on a laptop still shows its words there
-   (Ask the assistant's words too, which assistant.css hides whenever the menu is collapsed). */
+   (assistant.css hides Ask the assistant's words only when collapsed on a laptop). */
 @media (max-width: 960px) {
   .collapse { display: none; }
-  .app.collapsed .side .side-ask { justify-content: flex-start; padding: 10px 12px; }
-  .app.collapsed .side .side-ask span:last-child { display: inline; }
 }
 
 .top { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 14px; padding: 14px 28px; border-bottom: 1px solid var(--line);

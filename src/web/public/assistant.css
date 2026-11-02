@@ -23,8 +23,11 @@
 .side-ask[hidden] { display: none; }
 :root[data-theme="light"] .side-ask { background: rgba(0,168,132,.08); border-color: rgba(0,168,132,.28); box-shadow: none; }
 :root[data-theme="light"] .side-ask svg { color: #008069; }
-.app.collapsed .side-ask span:last-child { display: none; }
-.app.collapsed .side-ask { justify-content: center; padding: 10px; }
+/* Collapsed on a laptop only: on a phone the menu is a drawer and keeps its words. */
+@media (min-width: 961px) {
+  .app.collapsed .side-ask span:last-child { display: none; }
+  .app.collapsed .side-ask { justify-content: center; padding: 10px; }
+}
 
 /* The page: the conversation fills the height under the top bar, and scrolls on its own. */
 .view[data-screen="assistant"] { max-width: none; padding-bottom: 0; }
