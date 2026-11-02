@@ -21,7 +21,8 @@ import { silentLogger } from '../src/util/logger.ts';
 import { AuditLog } from '../src/web/audit.ts';
 import type { Guard, OwnerSession } from '../src/web/guard.ts';
 import { HttpError } from '../src/web/http.ts';
-import { chatReadHandler, chatSendHandler, type ChatDeps } from '../src/web/routes/chat.ts';
+import { chatDeleteHandler, chatMembersHandler, chatReadHandler, chatSendHandler, type ChatDeps } from '../src/web/routes/chat.ts';
+import type { GroupMember } from '../src/wa/groupMembers.ts';
 import { registerControlApi } from '../src/web/routes/controlScreens.ts';
 import { registerWorkApi } from '../src/web/routes/work.ts';
 import { Assistant } from '../src/assistant/assistant.ts';
@@ -123,6 +124,17 @@ export async function mountFakeScreens(web: WebServer, o: { signedIn: () => bool
       return { key: { id } };
     },
   };
+  // Group info and tagging (November release): Acme's members as WhatsApp's group data would give them, made up: the
+  // three people the agent knows, an admin, a member it has no name for, and one whose number WhatsApp hides (@lid).
+  const members: GroupMember[] = [
+    { id: '919800000011@s.whatsapp.net', phoneNumber: '919800000011@s.whatsapp.net', lid: null, admin: true },
+    { id: '919800000012@s.whatsapp.net', phoneNumber: '919800000012@s.whatsapp.net', lid: null, admin: false },
+    { id: '919800000013@s.whatsapp.net', phoneNumber: '919800000013@s.whatsapp.net', lid: null, admin: false },
+    { id: '919800000014@s.whatsapp.net', phoneNumber: '919800000014@s.whatsapp.net', lid: null, admin: false },
+    { id: '209900000000015@lid', phoneNumber: null, lid: '209900000000015@lid', admin: false },
+  ];
+  // Delete chat: a stand-in that answers as WhatsApp does and changes nothing anywhere.
+  const deleteSocket = { chatModify: async () => {} };
   const chat: ChatDeps = {
     db, clock, configs: () => [
       { groupId: ACME, name: 'Acme Traders', code: 'ACM', phases: PHASES, emailDomains: [], meetingKeywords: [] },
@@ -130,6 +142,8 @@ export async function mountFakeScreens(web: WebServer, o: { signedIn: () => bool
     ],
     sendingOn: () => settings.get().dashboardSend, connected: () => true,
     groupSocket: (groupId) => (groupId === ACME ? socket : null),
+    groupMembers: async (groupId) => (groupId === ACME ? members : null),
+    chatDeleteSocket: (groupId) => (groupId === ACME ? deleteSocket : null),
     directory: { cachedGroups: () => [{ id: ACME, subject: 'Acme Traders x Studio' }] },
     audit: (e) => audit.record({ ...e, detail: e.detail ?? '' }), log: silentLogger(),
   };
@@ -141,17 +155,26 @@ export async function mountFakeScreens(web: WebServer, o: { signedIn: () => bool
     await guard.requireOwner(req);
     answer(res, await chatReadHandler(chat, ownerCtx, params.code ?? '', { before: url.searchParams.get('before'), limit: url.searchParams.get('limit') }));
   });
-  web.router.post('/dashboard/api/clients/:code/chat/send', async ({ req, res, params }) => {
-    guard.requireCsrf(req, await guard.requireOwner(req));
-    let body: unknown = null;
+  web.router.get('/dashboard/api/clients/:code/chat/members', async ({ req, res, params }) => {
+    await guard.requireOwner(req);
+    answer(res, await chatMembersHandler(chat, ownerCtx, params.code ?? ''));
+  });
+  const bodyOf = async (req: AsyncIterable<unknown>): Promise<unknown> => {
     try {
       const chunks: Buffer[] = [];
       for await (const c of req) chunks.push(c as Buffer);
-      body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      return JSON.parse(Buffer.concat(chunks).toString('utf8'));
     } catch {
-      body = null;
+      return null;
     }
-    answer(res, await chatSendHandler(chat, ownerCtx, params.code ?? '', body));
+  };
+  web.router.post('/dashboard/api/clients/:code/chat/send', async ({ req, res, params }) => {
+    guard.requireCsrf(req, await guard.requireOwner(req));
+    answer(res, await chatSendHandler(chat, ownerCtx, params.code ?? '', await bodyOf(req)));
+  });
+  web.router.post('/dashboard/api/clients/:code/chat/delete', async ({ req, res, params }) => {
+    guard.requireCsrf(req, await guard.requireOwner(req));
+    answer(res, await chatDeleteHandler(chat, ownerCtx, params.code ?? '', await bodyOf(req)));
   });
 }
 
@@ -176,6 +199,8 @@ async function seedChat(db: Db): Promise<void> {
   for (let i = 0; i < 60; i++) await put({ minutesAgo: 3 * 24 * 60 - i * 70, who: i % 4 === 3 ? -1 : i % 3, text: lines[i % lines.length]! });
   const photo = await put({ minutesAgo: 95, who: 0, text: 'Site photos from today', media: 'image' });
   const voice = await put({ minutesAgo: 80, who: 2, text: null, media: 'voice' });
+  // A tagged message (November release): a member the agent knows shows as "@Rahul Kapoor"; one it doesn't keeps the text's digits.
+  await put({ minutesAgo: 70, who: 1, text: '@919800000011 can you send the final drawings? @919800000014 for your files too' });
   const rowId = async (waId: string) => (await db.get<{ id: number }>('SELECT id FROM messages WHERE wa_id = ?', [waId]))!.id;
   const stamp = at(80);
   await db.run("INSERT INTO media (message_id, client_id, kind, status, created_at, updated_at) VALUES (?, 1, 'image', 'done', ?, ?)", [await rowId(photo), stamp, stamp]);
