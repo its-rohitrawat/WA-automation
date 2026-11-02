@@ -227,10 +227,17 @@ async function main() {
         await p.waitForURL('**/dashboard/assistant', { timeout: WAIT_MS }).catch(() => fail(where, `the side button did not open the page: ${p.url()}`));
         if ((await p.locator('#nav [data-go="assistant"][aria-current="page"]').count()) !== 1) fail(where, 'the Assistant entry is not marked');
         if ((await p.locator('#asst-fab').count()) !== 0) fail(where, 'the floating button is still there');
-        await p.locator('.asst-page .asst-sugg .chip').first().waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'no suggested questions'));
-        await p.waitForTimeout(400);
+        await p.locator('.asst-page .asst-hero .asst-sugg-card').first().waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'no suggested questions'));
+        if ((await p.locator('.asst-page .asst-hero [data-core] canvas').count()) !== 1) fail(where, 'no core on the empty chat');
+        await p.waitForTimeout(700); // the core's first frames
         await p.screenshot({ path: join(OUT, `assistant-open-${tag}.png`) });
-        await p.locator('.asst-page .chip', { hasText: 'Summarise today' }).click();
+        await p.locator('.asst-page .asst-sugg-card', { hasText: 'Summarise today' }).click();
+        // While it streams: the orb thinks, and the hero (and its core) is gone.
+        await p.locator('.asst-page .asst-msg.bot .asst-orb.thinking').waitFor({ timeout: WAIT_MS }).then(async () => {
+          await p.locator('.asst-page .asst-msg.bot .asst-text').first().waitFor({ timeout: WAIT_MS });
+          await p.screenshot({ path: join(OUT, `assistant-streaming-${tag}.png`) });
+        }).catch(() => {}); // a fast answer may finish first: the steps below check it
+        if ((await p.locator('.asst-page [data-core]').count()) !== 0) fail(where, 'the core stayed after the first question');
         await p.locator('.asst-page .asst-meta').first().waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'the answer never finished'));
         if ((await p.locator('.asst-page .asst-msg.bot b', { hasText: '11 open tasks' }).count()) !== 1) fail(where, 'the answer was not drawn');
         await p.locator('#asst-q').fill('Add a task for Acme: book the photo shoot');

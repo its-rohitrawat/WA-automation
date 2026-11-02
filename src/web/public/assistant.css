@@ -1,15 +1,27 @@
-/* The AI assistant (views/assistant.js): its page (the chat list, the conversation and the composer), and the "Ask the
-   assistant" button at the foot of the side menu. The theme's tokens only, so it follows light and dark; the
-   conversation and the composer keep to a readable column on wide screens; on a phone the chat list is a drawer; motion
-   only without reduced motion. */
+/* The AI assistant (views/assistant.js): its page and the "Ask the assistant" button at the foot of the side menu. The
+   look follows the website's hero: an emerald glow on dark, the agent's particle core on an empty chat, mono uppercase
+   eyebrows, a tight heading with one green word, glass panels and glowing primary buttons. The theme's tokens, so light
+   mode is WhatsApp Web's light theme with the glow kept faint. The conversation keeps to a readable column; on a phone
+   the chat list is a drawer. Motion only without reduced motion, and none on keyboard-driven controls. */
+
+.asst-page {
+  --asst-glow: rgba(18,140,126,.30); --asst-glow-2: rgba(37,211,102,.12); --asst-glass: rgba(17,27,33,.62); --asst-glass-2: rgba(23,34,41,.72);
+  --asst-edge: rgba(233,237,239,.10); --asst-hi: rgba(255,255,255,.06); --asst-me: #005C4B; --asst-me-ink: #E9EDEF; --asst-send: #25D366; --asst-send-ink: #06251a;
+}
+:root[data-theme="light"] .asst-page {
+  --asst-glow: rgba(0,168,132,.10); --asst-glow-2: rgba(0,168,132,.05); --asst-glass: rgba(255,255,255,.86); --asst-glass-2: #FFFFFF;
+  --asst-edge: #E9EDEF; --asst-hi: rgba(255,255,255,.9); --asst-me: #D9FDD3; --asst-me-ink: #111B21; --asst-send: #008069; --asst-send-ink: #FFFFFF;
+}
 
 /* The side menu's button: above Collapse; only its icon when the menu is collapsed. */
 .side-ask { margin-top: 10px; display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 12px;
-  border: 1px solid var(--line-2); background: rgba(37,211,102,.10); color: var(--text); font: 600 13.5px var(--font); cursor: pointer; white-space: nowrap; }
+  border: 1px solid rgba(37,211,102,.28); background: linear-gradient(135deg, rgba(37,211,102,.16), rgba(18,140,126,.10)); color: var(--text);
+  font: 600 13.5px var(--font); cursor: pointer; white-space: nowrap; box-shadow: inset 0 1px 0 rgba(255,255,255,.06); }
 .side-ask svg { color: var(--green); flex: none; }
-.side-ask.on { background: rgba(37,211,102,.18); border-color: rgba(37,211,102,.35); }
+.side-ask.on { border-color: rgba(37,211,102,.5); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 10px 28px -16px rgba(37,211,102,.7); }
 .side-ask:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
 .side-ask[hidden] { display: none; }
+:root[data-theme="light"] .side-ask { background: rgba(0,168,132,.08); border-color: rgba(0,168,132,.28); box-shadow: none; }
 :root[data-theme="light"] .side-ask svg { color: #008069; }
 .app.collapsed .side-ask span:last-child { display: none; }
 .app.collapsed .side-ask { justify-content: center; padding: 10px; }
@@ -18,78 +30,142 @@
 .view[data-screen="assistant"] { max-width: none; padding-bottom: 0; }
 .asst-page { position: relative; display: grid; grid-template-columns: 264px minmax(0, 1fr); gap: 16px; height: calc(100dvh - 93px); min-height: 420px; }
 
-/* The chat list. */
-.asst-side { display: flex; flex-direction: column; min-height: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 18px; overflow: hidden; }
-.asst-side-head { display: flex; gap: 8px; align-items: center; padding: 12px; border-bottom: 1px solid var(--line); }
-.asst-newchat { flex: 1; display: inline-flex; gap: 8px; align-items: center; justify-content: center; }
+/* The chat list: glass, mono group labels, the open chat with an emerald edge. */
+.asst-side { display: flex; flex-direction: column; min-height: 0; border-radius: 18px; overflow: hidden;
+  background: linear-gradient(180deg, rgba(7,94,84,.20), var(--asst-glass) 40%); border: 1px solid var(--asst-edge); box-shadow: inset 0 1px 0 var(--asst-hi); }
+:root[data-theme="light"] .asst-side { background: var(--asst-glass-2); box-shadow: var(--shadow); }
+.asst-side-head { display: flex; gap: 8px; align-items: center; padding: 12px; border-bottom: 1px solid var(--asst-edge); }
+.asst-newchat { flex: 1; display: inline-flex; gap: 8px; align-items: center; justify-content: center; border-radius: 12px;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.35), 0 12px 32px -14px rgba(37,211,102,.65); }
+:root[data-theme="light"] .asst-newchat { box-shadow: none; }
 .asst-side-close, .asst-drawer-btn, .asst-scrim { display: none; }
 .asst-chats { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 8px 16px; }
-.asst-chats-group { display: grid; gap: 2px; margin-top: 10px; }
-.asst-chats-group .eyebrow { padding: 4px 10px 6px; }
+.asst-chats-group { display: grid; gap: 2px; margin-top: 12px; }
+.asst-chats-group .eyebrow { padding: 4px 10px 6px; font: 500 10.5px/1 var(--mono); letter-spacing: .2em; text-transform: uppercase; color: var(--faint); }
 .asst-chats-empty { margin: 14px 10px; color: var(--muted); font-size: 13px; }
-.asst-chat { display: flex; align-items: center; gap: 2px; border-radius: 10px; }
-.asst-chat a { flex: 1; min-width: 0; display: flex; gap: 8px; align-items: center; padding: 8px 10px; border-radius: 10px; color: var(--text); font-size: 13.5px; text-decoration: none; }
+.asst-chat { position: relative; display: flex; align-items: center; gap: 2px; border-radius: 10px; }
+.asst-chat a { flex: 1; min-width: 0; display: flex; gap: 8px; align-items: center; padding: 8px 10px; border-radius: 10px; color: var(--muted); font-size: 13.5px; text-decoration: none; }
 .asst-chat a span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.asst-chat.on, .asst-chat.on a { background: rgba(37,211,102,.12); }
+.asst-chat.on { background: rgba(37,211,102,.10); }
+.asst-chat.on a { color: var(--text); }
+.asst-chat.on::before { content: ""; position: absolute; left: -8px; top: 8px; bottom: 8px; width: 3px; border-radius: 0 3px 3px 0; background: var(--green); box-shadow: 0 0 12px rgba(37,211,102,.7); }
+:root[data-theme="light"] .asst-chat.on { background: #F0F2F5; }
+:root[data-theme="light"] .asst-chat.on::before { background: #00A884; box-shadow: none; }
 .asst-chat a:focus-visible, .asst-row-btn:focus-visible, .asst-rename:focus-visible { outline: 2px solid var(--link); outline-offset: -2px; }
 .asst-row-btn { flex: none; width: 30px; height: 30px; display: grid; place-items: center; border: 0; border-radius: 8px; background: none; color: var(--faint); cursor: pointer; opacity: 0; }
 .asst-chat:hover .asst-row-btn, .asst-chat:focus-within .asst-row-btn, .asst-chat.on .asst-row-btn { opacity: 1; }
 .asst-row-btn:hover { color: var(--text); background: var(--panel-2); }
-.asst-live { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--green); }
+.asst-live { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px rgba(37,211,102,.8); }
 .asst-rename { flex: 1; min-width: 0; height: 34px; padding: 0 10px; border-radius: 10px; border: 1px solid var(--line-2); background: var(--panel-2); color: var(--text); font: 400 13.5px var(--font); }
 @media (hover: none) { .asst-row-btn { opacity: 1; } }
-.asst-main { display: flex; flex-direction: column; min-height: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 18px; overflow: hidden; }
-.asst-bar { display: flex; align-items: center; gap: 12px; padding: 14px 20px; border-bottom: 1px solid var(--line); }
-.asst-bar-title { min-width: 0; }
-.asst-title { margin: 6px 0 0; font-size: 17px; letter-spacing: -0.02em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.asst-log { flex: 1; min-height: 0; overflow-y: auto; padding: 20px; }
-.asst-log:focus-visible { outline: 2px solid var(--link); outline-offset: -2px; }
-.asst-col { max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
-.asst-dock { border-top: 1px solid var(--line); padding: 12px 20px max(12px, env(safe-area-inset-bottom)); }
-.asst-dock > * { max-width: 760px; margin-left: auto; margin-right: auto; }
 
-.asst-msg { max-width: 92%; font-size: 14.5px; line-height: 1.55; }
-.asst-msg.me { align-self: flex-end; padding: 9px 13px; border-radius: 16px 16px 4px 16px; background: var(--panel-2); border: 1px solid var(--line); white-space: pre-wrap; overflow-wrap: anywhere; }
-.asst-msg.bot { align-self: flex-start; display: grid; gap: 8px; max-width: 100%; }
-.asst-text { white-space: pre-wrap; overflow-wrap: anywhere; }
-.asst-step { display: inline-flex; gap: 4px; align-items: center; color: var(--muted); font-size: 12.5px; min-height: 18px; }
-.asst-step::after { content: attr(data-label); margin-left: 6px; }
-.asst-step i { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); }
-.asst-open { justify-self: start; display: inline-flex; gap: 6px; align-items: center; padding: 6px 10px; border-radius: 10px;
-  border: 1px solid var(--line-2); background: var(--panel-2); color: var(--link); font: 500 13px var(--font); cursor: pointer; }
+/* The conversation: a soft emerald glow behind it, as the website's hero. */
+.asst-main { position: relative; isolation: isolate; display: flex; flex-direction: column; min-height: 0; border-radius: 18px; overflow: hidden;
+  background: var(--panel); border: 1px solid var(--asst-edge); }
+.asst-main::before { content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
+  background: radial-gradient(48% 46% at 50% 38%, var(--asst-glow), transparent 70%), radial-gradient(30% 30% at 92% 4%, rgba(52,183,241,.08), transparent 70%),
+    radial-gradient(35% 40% at 6% 96%, var(--asst-glow-2), transparent 70%); }
+:root[data-theme="light"] .asst-main { background: #FFFFFF; box-shadow: var(--shadow); }
+.asst-bar { display: flex; align-items: center; gap: 12px; padding: 12px 20px; border-bottom: 1px solid var(--asst-edge); }
+.asst-bar-title { min-width: 0; }
+.asst-bar-title .eyebrow { font: 500 10.5px/1 var(--mono); letter-spacing: .2em; text-transform: uppercase; color: var(--green); }
+:root[data-theme="light"] .asst-bar-title .eyebrow { color: #008069; }
+.asst-title { margin: 5px 0 0; font-size: 16px; letter-spacing: -0.02em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.asst-log { flex: 1; min-height: 0; overflow-y: auto; padding: 22px 20px; }
+.asst-log:focus-visible { outline: 2px solid var(--link); outline-offset: -2px; }
+.asst-col { max-width: 760px; min-height: 100%; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+.asst-loading { flex: 1; display: grid; place-items: center; }
+
+/* The agent's orb: the core in small, beside each answer and in the bar; it quickens while the agent thinks. */
+.asst-orb { position: relative; flex: none; width: 28px; height: 28px; border-radius: 50%;
+  background: radial-gradient(circle at 34% 30%, #9CF5C0 0%, #25D366 30%, #128C7E 62%, #075E54 100%);
+  box-shadow: 0 0 0 1px rgba(37,211,102,.35), 0 0 18px -2px rgba(37,211,102,.55); }
+.asst-orb::after { content: ""; position: absolute; inset: -4px; border-radius: 50%; border: 1px solid transparent;
+  border-top-color: rgba(52,183,241,.75); border-right-color: rgba(37,211,102,.45); }
+.asst-bar-orb { width: 26px; height: 26px; }
+:root[data-theme="light"] .asst-orb { box-shadow: 0 0 0 1px rgba(0,168,132,.3), 0 4px 12px -4px rgba(0,128,105,.45); }
+
+/* The empty chat: the core, the eyebrow, the heading with one green word, and the offered questions as glass cards. */
+.asst-hero { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 8px 0 12px; }
+.asst-core { width: min(240px, 52vw); aspect-ratio: 1; margin-bottom: 6px; }
+.asst-core canvas { width: 100%; height: 100%; display: block; }
+.asst-hero-eyebrow { display: inline-flex; align-items: center; gap: 8px; font: 500 11px/1 var(--mono); letter-spacing: .18em; text-transform: uppercase; color: var(--green); }
+:root[data-theme="light"] .asst-hero-eyebrow { color: #008069; }
+.asst-live-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; box-shadow: 0 0 10px currentColor; }
+.asst-hero-title { margin: 16px 0 0; font-size: clamp(30px, 3.6vw, 48px); font-weight: 800; letter-spacing: -.04em; line-height: 1; text-wrap: balance; }
+.asst-hero-title em { color: var(--green); font-style: normal; }
+:root[data-theme="light"] .asst-hero-title em { color: #008069; }
+.asst-hero-sub { margin: 14px 0 0; max-width: 46ch; font: 500 12px/1.7 var(--mono); letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+.asst-hero-sugg { width: 100%; margin-top: 26px; display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; text-align: left; }
+.asst-sugg-card { display: flex; align-items: center; gap: 12px; min-height: 56px; padding: 12px 14px; border-radius: 14px; cursor: pointer; color: var(--text);
+  font: 500 13.5px/1.35 var(--font); background: var(--asst-glass); border: 1px solid var(--asst-edge); box-shadow: inset 0 1px 0 var(--asst-hi);
+  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); }
+.asst-sugg-card:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+.asst-sugg-ic { flex: none; width: 32px; height: 32px; display: grid; place-items: center; border-radius: 10px; color: var(--green);
+  background: rgba(37,211,102,.12); box-shadow: inset 0 0 0 1px rgba(37,211,102,.22); }
+:root[data-theme="light"] .asst-sugg-card { box-shadow: 0 1px 2px rgba(11,20,26,.06); }
+:root[data-theme="light"] .asst-sugg-ic { color: #008069; background: rgba(0,168,132,.10); box-shadow: none; }
+
+/* Messages: the owner's in a WhatsApp-green bubble on the right; the agent's unboxed on the left, beside its orb. */
+.asst-msg { font-size: 14.5px; line-height: 1.6; }
+.asst-msg.me { align-self: flex-end; max-width: 82%; padding: 9px 14px; border-radius: 16px 16px 4px 16px; background: var(--asst-me); color: var(--asst-me-ink);
+  white-space: pre-wrap; overflow-wrap: anywhere; box-shadow: 0 1px 1px rgba(0,0,0,.12); }
+.asst-msg.bot { align-self: stretch; display: flex; gap: 12px; align-items: flex-start; }
+.asst-msg.bot .asst-orb { margin-top: 1px; }
+.asst-body { flex: 1; min-width: 0; display: grid; gap: 10px; justify-items: start; }
+.asst-text { white-space: pre-wrap; overflow-wrap: anywhere; max-width: 100%; }
+.asst-step { display: inline-flex; gap: 4px; align-items: center; min-height: 18px; color: var(--muted); }
+.asst-step::after { content: attr(data-label); margin-left: 8px; font: 500 11px/1 var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--green); }
+:root[data-theme="light"] .asst-step::after { color: #008069; }
+.asst-step i { width: 6px; height: 6px; border-radius: 50%; background: var(--green); opacity: .35; }
+.asst-open { display: inline-flex; gap: 6px; align-items: center; padding: 7px 12px; border-radius: 999px; cursor: pointer;
+  border: 1px solid rgba(52,183,241,.35); background: rgba(52,183,241,.08); color: var(--link); font: 500 13px var(--font); }
 .asst-open:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
-.asst-meta { color: var(--faint); font-size: 12px; }
+.asst-meta { color: var(--faint); font: 500 11px/1.4 var(--mono); letter-spacing: .04em; }
 .asst-meta.warn, .asst-card .warn { color: var(--s-warn); }
-.asst-card { padding: 12px 14px; border-radius: 14px; background: var(--panel-2); border: 1px solid var(--line-2); font-size: 13.5px; }
-.asst-card ul { margin: 8px 0 10px; padding-left: 18px; color: var(--muted); }
+.asst-card { width: min(100%, 460px); padding: 14px 16px; border-radius: 16px; font-size: 13.5px; background: var(--asst-glass); border: 1px solid var(--asst-edge);
+  box-shadow: inset 0 1px 0 var(--asst-hi), 0 18px 40px -28px rgba(0,0,0,.8); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
+:root[data-theme="light"] .asst-card { box-shadow: var(--shadow); }
+.asst-card ul { margin: 8px 0 12px; padding-left: 18px; color: var(--muted); }
 .asst-card ul li { overflow-wrap: anywhere; }
 .asst-card-acts { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .asst-card-acts small { color: var(--faint); font-size: 12px; }
 .asst-card .ok { color: var(--accent); display: inline-flex; gap: 6px; align-items: center; }
 
-.asst-sugg { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 0 12px; }
-.asst-sugg[hidden] { display: none; }
-.asst-hint { flex-basis: 100%; margin: 0 0 4px; color: var(--muted); font-size: 13.5px; line-height: 1.5; }
-.asst-sugg .chip { padding: 7px 12px; border-radius: 999px; border: 1px solid var(--line-2); background: var(--panel-2); color: var(--text); font: 500 13px var(--font); cursor: pointer; }
-.asst-sugg .chip:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
-.asst-form { display: flex; gap: 8px; align-items: end; }
-.asst-form textarea { flex: 1; min-width: 0; resize: none; min-height: 44px; max-height: 160px; field-sizing: content; padding: 11px 13px; border-radius: 14px;
-  border: 1px solid var(--line-2); background: var(--panel-2); color: var(--text); font: 400 14.5px/1.4 var(--font); }
-.asst-form textarea:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
-.asst-send, .asst-stop { height: 44px; width: 48px; display: grid; place-items: center; padding: 0; flex: none; }
+/* The composer: a glass panel that glows emerald when focused, a round glowing send button, and Stop in its place. */
+.asst-dock { padding: 10px 20px max(12px, env(safe-area-inset-bottom)); }
+.asst-dock > * { max-width: 760px; margin-left: auto; margin-right: auto; }
+.asst-form { display: flex; gap: 8px; align-items: end; padding: 6px 6px 6px 16px; border-radius: 22px; background: var(--asst-glass-2);
+  border: 1px solid var(--line-2); box-shadow: inset 0 1px 0 var(--asst-hi), 0 18px 40px -30px rgba(0,0,0,.9);
+  backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }
+.asst-form:focus-within { border-color: rgba(37,211,102,.55); box-shadow: inset 0 1px 0 var(--asst-hi), 0 0 0 4px rgba(37,211,102,.10), 0 16px 44px -22px rgba(37,211,102,.55); }
+:root[data-theme="light"] .asst-form { box-shadow: var(--shadow); }
+:root[data-theme="light"] .asst-form:focus-within { border-color: #00A884; box-shadow: 0 0 0 3px rgba(0,168,132,.14), var(--shadow); }
+.asst-form textarea { flex: 1; min-width: 0; resize: none; min-height: 40px; max-height: 160px; field-sizing: content; padding: 9px 0; border: 0; outline: none;
+  background: transparent; color: var(--text); font: 400 15px/1.45 var(--font); }
+.asst-send, .asst-stop { flex: none; width: 42px; height: 42px; border-radius: 50%; display: grid; place-items: center; padding: 0; }
+.asst-send { background: var(--asst-send); color: var(--asst-send-ink); border: 0; box-shadow: inset 0 1px 0 rgba(255,255,255,.35), 0 12px 32px -12px rgba(37,211,102,.75); }
+:root[data-theme="light"] .asst-send { box-shadow: 0 6px 16px -8px rgba(0,128,105,.6); }
+.asst-stop { background: var(--panel-2); border: 1px solid rgba(37,211,102,.45); color: var(--green); }
+:root[data-theme="light"] .asst-stop { color: #008069; border-color: rgba(0,168,132,.45); }
+.asst-send:focus-visible, .asst-stop:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
 .asst-send[hidden], .asst-stop[hidden] { display: none; }
-.asst-foot { margin: 6px auto 0; color: var(--faint); font-size: 11.5px; }
+.asst-stop:disabled { opacity: .55; cursor: progress; }
+.asst-foot { margin: 8px auto 0; text-align: center; color: var(--faint); font: 500 10.5px/1.4 var(--mono); letter-spacing: .06em; text-transform: uppercase; }
 
 @media (max-width: 960px) {
   .asst-page { height: calc(100dvh - 82px); grid-template-columns: minmax(0, 1fr); gap: 0; }
   .view[data-screen="assistant"] { padding-left: 0; padding-right: 0; padding-top: 0; }
   .asst-main { border-radius: 0; border-left: 0; border-right: 0; }
   .asst-log { padding: 16px; }
-  .asst-dock { padding: 10px 12px max(10px, env(safe-area-inset-bottom)); }
+  .asst-dock { padding: 8px 12px max(10px, env(safe-area-inset-bottom)); }
+  .asst-hero-sugg { grid-template-columns: minmax(0, 1fr); }
+  .asst-core { width: min(170px, 46vw); }
+  .asst-msg.me { max-width: 88%; }
   /* The chat list as a drawer over the conversation. */
   .asst-drawer-btn, .asst-side-close { display: grid; }
-  .asst-side { position: absolute; z-index: 6; top: 0; bottom: 0; left: 0; width: min(300px, 86vw); border-radius: 0 18px 18px 0;
-    border-left: 0; visibility: hidden; transform: translateX(-100%); box-shadow: 30px 0 60px -20px rgba(0,0,0,.5); }
+  .asst-side { position: absolute; z-index: 6; top: 0; bottom: 0; left: 0; width: min(300px, 86vw); border-radius: 0 18px 18px 0; border-left: 0;
+    background: var(--panel); visibility: hidden; transform: translateX(-100%); box-shadow: 30px 0 60px -20px rgba(0,0,0,.5); }
   .asst-page.side-open .asst-side { visibility: visible; transform: none; }
   .asst-scrim { position: absolute; z-index: 5; inset: 0; background: rgba(0,0,0,.35); }
   .asst-page.side-open .asst-scrim { display: block; }
@@ -97,13 +173,33 @@
 }
 
 @media (prefers-reduced-motion: no-preference) {
-  .side-ask { transition: background-color 160ms ease, border-color 160ms ease, transform 140ms var(--ease-out); }
+  .side-ask { transition: border-color 160ms ease, box-shadow 200ms ease, transform 140ms var(--ease-out); }
+  .side-ask:active { transform: scale(0.98); }
+  .asst-sugg-card { transition: border-color 160ms ease, transform 160ms var(--ease-out), background-color 160ms ease; }
+  .asst-sugg-card:active { transform: scale(0.98); }
+  .asst-send { transition: transform 140ms var(--ease-out), box-shadow 200ms ease; }
+  .asst-send:active { transform: scale(0.94); }
+  .asst-form { transition: border-color 200ms ease, box-shadow 240ms ease; }
   .asst-row-btn { transition: opacity 120ms ease, background-color 120ms ease; }
+  /* The drawer slides; opening it from the keyboard is the same slide, as the rest of the dashboard's drawers. */
   .asst-side { transition: transform 260ms var(--ease-drawer), visibility 0s linear 260ms; }
   .asst-page.side-open .asst-side { transition: transform 260ms var(--ease-drawer), visibility 0s; }
-  .asst-live { animation: asst-dot 1.2s ease-in-out infinite; }
-  .side-ask:active { transform: scale(0.98); }
+  /* A message added now fades up once (a chat opened again draws still). */
+  .asst-msg.enter { animation: asst-enter 200ms var(--ease-out) both; }
+  /* The orb turns slowly, and quickens and breathes while the agent thinks. */
+  .asst-orb::after { animation: asst-spin 6s linear infinite; }
+  .asst-orb.thinking::after { animation-duration: 1.1s; }
+  .asst-orb.thinking { animation: asst-breathe 1.4s ease-in-out infinite; }
   .asst-step i { animation: asst-dot 1.2s ease-in-out infinite; }
   .asst-step i:nth-child(2) { animation-delay: .15s; } .asst-step i:nth-child(3) { animation-delay: .3s; }
+  .asst-live, .asst-live-dot { animation: asst-dot 1.4s ease-in-out infinite; }
 }
+@media (hover: hover) and (pointer: fine) {
+  .asst-sugg-card:hover { border-color: rgba(37,211,102,.35); }
+  .asst-open:hover { background: rgba(52,183,241,.14); }
+}
+@keyframes asst-enter { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes asst-spin { to { transform: rotate(360deg); } }
+@keyframes asst-breathe { 0%, 100% { box-shadow: 0 0 0 1px rgba(37,211,102,.35), 0 0 14px -2px rgba(37,211,102,.45); }
+  50% { box-shadow: 0 0 0 1px rgba(37,211,102,.6), 0 0 26px 2px rgba(37,211,102,.7); } }
 @keyframes asst-dot { 0%, 100% { opacity: .3; } 50% { opacity: 1; } }

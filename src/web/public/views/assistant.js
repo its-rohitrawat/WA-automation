@@ -6,9 +6,12 @@
 // screen the agent names is an "Open …" link the owner taps: the page never jumps away on its own. A card with a drafted
 // change runs only on the owner's Confirm here, with this session's CSRF token. Leaving the page stops its work in the
 // browser (the stream's reading and the polls); an answer still running finishes on the agent and is saved, and a chat
-// opened while its answer runs is read again every 2 s until it ends.
+// opened while its answer runs is read again every 2 s until it ends. The look follows the website's hero: an empty
+// chat shows the agent's particle core (core3d.js, loaded only then, one still frame with reduced motion, nothing without
+// WebGL, stopped as soon as the chat has messages or the page is left); after that a small CSS orb stands beside each
+// answer and quickens while the agent is thinking.
 import { ApiError, get, post, postLines } from '../api.js';
-import { $, esc, icon } from '../dom.js';
+import { $, esc, icon, reduceMotion } from '../dom.js';
 import { confirmDialog } from './ui.js';
 
 /** The shell opens this screen and filter: detail { screen, search }. */
@@ -31,10 +34,16 @@ const PHONE = '(max-width: 960px)';
 /**
  * @typedef {{ id: string, title: string, lines: string[], expiresAt: string, state: 'live' | 'busy' | 'done' | 'cancelled' | 'expired' | 'failed', said?: string }} Card
  * @typedef {{ screen: string, search: string, label: string }} Link
- * @typedef {{ who: 'me', text: string }
- *   | { who: 'bot', text: string, links: Link[], cards: Card[], meta: string, warn: boolean, running: boolean, step: string }} Entry
+ * @typedef {{ who: 'me', text: string, fresh?: boolean }
+ *   | { who: 'bot', text: string, links: Link[], cards: Card[], meta: string, warn: boolean, running: boolean, step: string, fresh?: boolean }} Entry
  * @typedef {{ id: number, title: string, updatedAt: string, running: boolean }} ChatRow
  */
+
+/** An icon for each question the agent offers (others get the spark). */
+const SUGGESTION_ICONS = /** @type {Record<string, string>} */ ({
+  'Summarise today': 'cal', 'What needs my attention?': 'bell', 'Show overdue tasks': 'clock', 'Which client has the most open tasks?': 'users',
+  "Explain today's AI spend": 'ai', 'Summarise the latest meeting': 'video',
+});
 
 /** The questions offered before the first one, and the length limit (GET /assistant), once read while signed in. */
 let offer = /** @type {{ suggestions: string[], questionMax: number } | null} */ (null);
@@ -115,16 +124,42 @@ function cardActs(c) {
   return `<small class="warn">${esc(c.said ?? 'That did not work. Try again.')}</small>`;
 }
 
-/** @param {Entry} e @param {number} i */
+/** The agent's small orb: beside each answer, quickening while it thinks. @param {boolean} thinking */
+const orb = (thinking) => `<span class="asst-orb${thinking ? ' thinking' : ''}" aria-hidden="true"></span>`;
+
+/**
+ * An entry as HTML. `fresh` (added in this visit) fades up once as it enters; a chat opened again draws still.
+ * @param {Entry} e @param {number} i
+ */
 export function entryHtml(e, i) {
-  if (e.who === 'me') return `<div class="asst-msg me">${esc(e.text)}</div>`;
+  const enter = e.fresh ? ' enter' : '';
+  if (e.who === 'me') return `<div class="asst-msg me${enter}">${esc(e.text)}</div>`;
   const text = e.running ? esc(e.text) : rich(e.text.trim());
   const links = e.links.map((l, j) => `<button class="asst-open" type="button" data-open="${i}:${j}">${icon('arrowR', 14)}<span>Open ${esc(l.label)}</span></button>`).join('');
   const cards = e.cards.map((c, j) => `<div class="asst-card" data-card="${i}:${j}"><b>${esc(c.title)}</b><ul>${c.lines.map((l) => `<li>${esc(l)}</li>`).join('')}</ul>
       <div class="asst-card-acts">${cardActs(c)}</div></div>`).join('');
   const step = e.running ? `<div class="asst-step" aria-hidden="true" data-label="${esc(e.step)}"><i></i><i></i><i></i></div>` : '';
   const meta = e.meta ? `<small class="asst-meta${e.warn ? ' warn' : ''}">${esc(e.meta)}</small>` : '';
-  return `<div class="asst-msg bot" data-entry="${i}">${e.text.trim() || e.running ? `<div class="asst-text">${text}</div>` : ''}${links}${cards}${step}${meta}</div>`;
+  return `<div class="asst-msg bot${enter}" data-entry="${i}">${orb(e.running)}<div class="asst-body">${e.text.trim() || e.running ? `<div class="asst-text">${text}</div>` : ''}${links}${cards}${step}${meta}</div></div>`;
+}
+
+/**
+ * The empty chat: the agent's core, the heading in the website's style, and the questions it offers as cards.
+ * @param {string[]} suggestions
+ */
+export function heroHtml(suggestions) {
+  return `<div class="asst-hero">
+    <div class="asst-core" data-core aria-hidden="true"><canvas></canvas></div>
+    <div class="eyebrow asst-hero-eyebrow"><span class="asst-live-dot" aria-hidden="true"></span>Your agent · answers from your workspace</div>
+    <h3 class="asst-hero-title">Ask your agent <em>anything.</em></h3>
+    <p class="asst-hero-sub">Clients, tasks, messages, meetings and AI spend. Changes wait for your Confirm.</p>
+    <div class="asst-hero-sugg" data-sugg>${suggestionsHtml(suggestions)}</div>
+  </div>`;
+}
+
+/** @param {string[]} suggestions */
+function suggestionsHtml(suggestions) {
+  return suggestions.map((s) => `<button class="asst-sugg-card" type="button" data-ask="${esc(s)}"><span class="asst-sugg-ic">${icon(SUGGESTION_ICONS[s] ?? 'spark', 17)}</span><span>${esc(s)}</span></button>`).join('');
 }
 
 /** The chat list, grouped by when each was last used. @param {ChatRow[]} chats @param {number | null} on */
@@ -159,10 +194,10 @@ export function mountAssistant(ctx) {
     <div class="asst-scrim" data-scrim hidden></div>
     <section class="asst-main" aria-label="Assistant">
       <div class="asst-bar"><button class="icon-btn asst-drawer-btn" type="button" data-drawer aria-label="Past chats" aria-expanded="false">${icon('sidebar', 17)}</button>
+        <span class="asst-orb asst-bar-orb" data-bar-orb aria-hidden="true"></span>
         <div class="asst-bar-title"><div class="eyebrow">AI assistant</div><h2 class="asst-title" data-title>New chat</h2></div></div>
       <div class="asst-log" data-log role="log" aria-live="polite" tabindex="0" aria-label="Conversation"><div class="asst-col" data-col></div></div>
       <div class="asst-dock">
-        <div class="asst-sugg" data-sugg hidden></div>
         <form class="asst-form" data-form novalidate><label class="sr-only" for="asst-q">Your question</label>
           <textarea id="asst-q" rows="1" maxlength="2000" placeholder="Ask about clients, tasks, meetings…" autocomplete="off"></textarea>
           <button class="btn btn-primary asst-send" type="submit" aria-label="Send">${icon('arrowR', 18)}</button>
@@ -176,7 +211,7 @@ export function mountAssistant(ctx) {
   const titleEl = /** @type {HTMLElement} */ ($('[data-title]', page));
   const log = /** @type {HTMLElement} */ ($('[data-log]', page));
   const col = /** @type {HTMLElement} */ ($('[data-col]', page));
-  const sugg = /** @type {HTMLElement} */ ($('[data-sugg]', page));
+  const barOrb = /** @type {HTMLElement} */ ($('[data-bar-orb]', page));
   const form = /** @type {HTMLFormElement} */ ($('[data-form]', page));
   const input = /** @type {HTMLTextAreaElement} */ ($('#asst-q', page));
   const send = /** @type {HTMLButtonElement} */ ($('.asst-send', page));
@@ -193,23 +228,53 @@ export function mountAssistant(ctx) {
   let runningElsewhere = false;
   let pollTimer = /** @type {ReturnType<typeof setTimeout> | undefined} */ (undefined);
   let alive = true;
+  /** The particle core's stop, while the empty chat shows it; `coreTurn` drops a start that finishes too late. */
+  let stopCore = /** @type {(() => void) | null} */ (null);
+  let coreTurn = 0;
 
   const scrollDown = () => {
     log.scrollTop = log.scrollHeight;
   };
   const busy = () => reading !== null || runningElsewhere;
 
+  /** The empty chat's questions, once the agent has said them (the core is left as it is). */
   function drawSuggestions() {
-    const items = offer?.suggestions ?? [];
-    sugg.hidden = entries.length > 0 || items.length === 0;
-    sugg.innerHTML = '<p class="asst-hint">Ask about clients, tasks, messages, meetings or AI spend. It can point you to a screen, and draft a change that happens only when you press Confirm.</p>'
-      + items.map((s) => `<button class="chip" type="button" data-ask="${esc(s)}">${esc(s)}</button>`).join('');
+    const box = col.querySelector('[data-sugg]');
+    if (box) box.innerHTML = suggestionsHtml(offer?.suggestions ?? []);
+  }
+
+  /** The core, on the empty chat's canvas: loaded only now, and never left running when it is gone. */
+  function coreOn() {
+    const canvas = /** @type {HTMLCanvasElement | null} */ (col.querySelector('[data-core] canvas'));
+    if (!canvas || stopCore) return;
+    const turn = ++coreTurn;
+    const still = () => alive && turn === coreTurn && canvas.isConnected;
+    void import('../core3d.js').then(async ({ startCore }) => {
+      if (!still()) return;
+      const stop = await startCore(canvas, { reduceMotion });
+      if (still()) stopCore = stop;
+      else stop();
+    }).catch(() => {});
+  }
+
+  function coreOff() {
+    coreTurn++;
+    stopCore?.();
+    stopCore = null;
   }
 
   function drawChat() {
     titleEl.textContent = title;
-    col.innerHTML = entries.map(entryHtml).join('');
-    drawSuggestions();
+    coreOff();
+    if (entries.length === 0 && chatId !== null) {
+      col.innerHTML = '<div class="asst-loading" aria-hidden="true"><span class="asst-orb thinking"></span></div>'; // a past chat, being read
+    } else if (entries.length === 0) {
+      col.innerHTML = heroHtml(offer?.suggestions ?? []);
+      coreOn();
+    } else {
+      col.innerHTML = entries.map(entryHtml).join('');
+      for (const e of entries) e.fresh = false; // each fades up once
+    }
     drawDock();
     scrollDown();
   }
@@ -225,6 +290,7 @@ export function mountAssistant(ctx) {
     send.hidden = busy();
     stopBtn.hidden = !busy();
     stopBtn.disabled = chatId === null; // a new chat's Stop works once the agent has named it
+    barOrb.classList.toggle('thinking', busy());
   }
 
   function drawList() {
@@ -300,8 +366,8 @@ export function mountAssistant(ctx) {
     const q = question.trim();
     if (!q || busy()) return;
     input.value = '';
-    entries.push({ who: 'me', text: q });
-    const bot = /** @type {Extract<Entry, { who: 'bot' }>} */ ({ who: 'bot', text: '', links: [], cards: [], meta: '', warn: false, running: true, step: '' });
+    entries.push({ who: 'me', text: q, fresh: true });
+    const bot = /** @type {Extract<Entry, { who: 'bot' }>} */ ({ who: 'bot', text: '', links: [], cards: [], meta: '', warn: false, running: true, step: '', fresh: true });
     entries.push(bot);
     const at = entries.length - 1;
     const ctrl = new AbortController();
@@ -546,6 +612,7 @@ export function mountAssistant(ctx) {
   // answer itself runs on in the agent and is saved.
   return () => {
     alive = false;
+    coreOff();
     clearTimeout(pollTimer);
     reading?.abort();
     reading = null;

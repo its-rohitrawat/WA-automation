@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 // Browser module; its JSDoc types are checked by tsconfig.web.json, so the import is untyped here.
 // @ts-expect-error -- browser module (see above)
-import { chatGroup, entryHtml, entryOf, listHtml } from '../../src/web/public/views/assistant.js';
+import { chatGroup, entryHtml, entryOf, heroHtml, listHtml } from '../../src/web/public/views/assistant.js';
 
 // The assistant's page (November release, changes 1 and 8): the chat list's groups, and that every word from the agent
 // (titles, questions, answers, cards, links) reaches the page escaped.
@@ -32,6 +32,26 @@ describe('the chat list', () => {
     expect(html).toContain('class="asst-live"');
     expect(html).toContain('>Older<');
     expect(listHtml([], null)).toContain('Your chats show here.');
+  });
+});
+
+describe('the empty chat', () => {
+  it('shows the core's canvas, the heading with one green word, and the offered questions escaped, each with its icon', () => {
+    const html: string = heroHtml(['Summarise today', '<img src=x onerror=alert(1)>']);
+    expect(html).toContain('<div class="asst-core" data-core aria-hidden="true"><canvas></canvas></div>');
+    expect(html).toContain('Ask your agent <em>anything.</em>');
+    expect(html).toContain('data-ask="Summarise today"');
+    expect(html).not.toContain('<img');
+    expect(html).toContain('&lt;img src=x onerror=alert(1)&gt;');
+    expect(html.match(/class="asst-sugg-card"/g)).toHaveLength(2);
+    expect(html.match(/<svg/g)).toHaveLength(2); // an icon each (an unknown question gets the spark)
+  });
+
+  it('a message added now fades up once; a stored one draws still; the agent's orb thinks while it runs', () => {
+    expect(entryHtml({ who: 'me', text: 'hi', fresh: true }, 0)).toBe('<div class="asst-msg me enter">hi</div>');
+    expect(entryHtml(entryOf({ role: 'user', body: 'hi' }), 0)).toBe('<div class="asst-msg me">hi</div>');
+    expect(entryHtml(entryOf({ role: 'assistant', body: 'x', status: 'running' }), 1)).toContain('class="asst-orb thinking"');
+    expect(entryHtml(entryOf({ role: 'assistant', body: 'x', status: 'done' }), 1)).toContain('class="asst-orb"');
   });
 });
 
