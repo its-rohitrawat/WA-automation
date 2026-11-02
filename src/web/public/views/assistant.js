@@ -12,6 +12,7 @@
 // answer and quickens while the agent is thinking.
 import { ApiError, get, post, postLines } from '../api.js';
 import { $, esc, icon, reduceMotion } from '../dom.js';
+import { SCREENS } from '../router.js';
 import { confirmDialog } from './ui.js';
 
 /** The shell opens this screen and filter: detail { screen, search }. */
@@ -135,7 +136,9 @@ export function entryHtml(e, i) {
   const enter = e.fresh ? ' enter' : '';
   if (e.who === 'me') return `<div class="asst-msg me${enter}">${esc(e.text)}</div>`;
   const text = rich(e.running ? e.text : e.text.trim());
-  const links = e.links.map((l, j) => `<button class="asst-open" type="button" data-open="${i}:${j}">${icon('arrowR', 14)}<span>Open ${esc(l.label)}</span></button>`).join('');
+  // Only a screen this session has (a customer has no Connections or AI usage): no link to any other.
+  const links = e.links.map((l, j) => (SCREENS.has(l.screen)
+    ? `<button class="asst-open" type="button" data-open="${i}:${j}">${icon('arrowR', 14)}<span>Open ${esc(l.label)}</span></button>` : '')).join('');
   const cards = e.cards.map((c, j) => `<div class="asst-card" data-card="${i}:${j}"><b>${esc(c.title)}</b><ul>${c.lines.map((l) => `<li>${esc(l)}</li>`).join('')}</ul>
       <div class="asst-card-acts">${cardActs(c)}</div></div>`).join('');
   const step = e.running ? `<div class="asst-step" aria-hidden="true" data-label="${esc(e.step)}"><i></i><i></i><i></i></div>` : '';
@@ -228,6 +231,8 @@ export function mountAssistant(ctx) {
   let runningElsewhere = false;
   let pollTimer = /** @type {ReturnType<typeof setTimeout> | undefined} */ (undefined);
   let alive = true;
+  /** The platform has the assistant switched off (GET /assistant is a 404): the page says so instead of a chat. */
+  let switchedOff = false;
   /** The particle core's stop, while the empty chat shows it; `coreTurn` drops a start that finishes too late. */
   let stopCore = /** @type {(() => void) | null} */ (null);
   let coreTurn = 0;
@@ -266,7 +271,11 @@ export function mountAssistant(ctx) {
   function drawChat() {
     titleEl.textContent = title;
     coreOff();
-    if (entries.length === 0 && chatId !== null) {
+    input.disabled = switchedOff;
+    send.disabled = switchedOff;
+    if (switchedOff) {
+      col.innerHTML = '<div class="asst-off"><span class="asst-orb" aria-hidden="true"></span><h3>The assistant is switched off</h3><p>It is not on for this workspace. Ask the person who runs the dashboard to switch it on.</p></div>';
+    } else if (entries.length === 0 && chatId !== null) {
       col.innerHTML = '<div class="asst-loading" aria-hidden="true"><span class="asst-orb thinking"></span></div>'; // a past chat, being read
     } else if (entries.length === 0) {
       col.innerHTML = heroHtml(offer?.suggestions ?? []);
@@ -311,7 +320,12 @@ export function mountAssistant(ctx) {
           suggestions: Array.isArray(r?.suggestions) ? r.suggestions.filter((/** @type {unknown} */ s) => typeof s === 'string').slice(0, 8) : [],
           questionMax: Number.isInteger(r?.questionMax) ? r.questionMax : 2000,
         };
-      } catch {
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 404) {
+          switchedOff = true;
+          if (alive) drawChat();
+          return;
+        }
         offer = { suggestions: [], questionMax: 2000 };
       }
     }

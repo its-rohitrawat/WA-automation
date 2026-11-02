@@ -33,8 +33,11 @@ export const ASSISTANT_NAV = ['assistant', 'Assistant', 'spark'];
 /** The founder's own screens a customer never sees (plan S4.8 step 4); Customers and Invite are the founder's too. */
 const FOUNDER_ONLY = new Set(['connections', 'usage']);
 
-/** A customer's screens that stay locked until their workspace is active (plan S4.8 step 4). */
-export const LOCKED_UNTIL_ACTIVE = new Set(['clients', 'tasks', 'meetings', 'tracker']);
+/**
+ * A customer's screens that stay locked until their workspace is active (plan S4.8 step 4). The Assistant too (November
+ * release piece 3): it runs on the customer's own runtime and key, which start only then.
+ */
+export const LOCKED_UNTIL_ACTIVE = new Set(['clients', 'tasks', 'meetings', 'tracker', 'assistant']);
 
 /**
  * Who is signed in, as GET /dashboard/api/me says: `role` 'owner' is a customer's owner; anything else is the founder

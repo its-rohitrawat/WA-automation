@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 // Browser module; its JSDoc types are checked by tsconfig.web.json, so the import is untyped here.
 // @ts-expect-error -- browser module (see above)
 import { chatGroup, entryHtml, entryOf, heroHtml, listHtml } from '../../src/web/public/views/assistant.js';
+// @ts-expect-error -- browser module (see above)
+import { showScreens } from '../../src/web/public/router.js';
 
 // The assistant's page (November release, changes 1 and 8): the chat list's groups, and that every word from the agent
 // (titles, questions, answers, cards, links) reaches the page escaped.
@@ -72,6 +74,20 @@ describe('a stored chat on the page', () => {
     expect(card({ state: 'confirmed', said: '<b>ACM-006</b> added.' })).toContain('&lt;b&gt;ACM-006&lt;/b&gt; added.');
     expect(card({ state: 'cancelled' })).toContain('Cancelled. Nothing changed.');
     for (const c of [{ live: false }, { state: 'confirmed' }, { state: 'cancelled' }]) expect(card(c)).not.toContain('data-confirm');
+  });
+
+  it('a customer gets no link to a screen it does not have (Connections, AI usage); the founder does (Nov release piece 3)', () => {
+    const answer = entryOf({ role: 'assistant', body: 'x', status: 'done', links: [{ screen: 'usage', search: '', label: 'usage' }, { screen: 'tasks', search: '', label: 'tasks' }], cards: [] });
+    try {
+      showScreens({ role: 'owner', assistant: true });
+      const html: string = entryHtml(answer, 1);
+      expect(html).toContain('Open tasks');
+      expect(html).not.toContain('Open usage');
+      showScreens({ role: 'founder', assistant: true });
+      expect(entryHtml(answer, 1)).toContain('Open usage');
+    } finally {
+      showScreens({ role: 'founder' });
+    }
   });
 
   it('a screen link keeps only a plain query string; a running answer shows its dots; an interrupted one says so', () => {

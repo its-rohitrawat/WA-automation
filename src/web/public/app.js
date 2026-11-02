@@ -88,16 +88,18 @@ const session = () => ({ role: owner?.role, platform: owner?.platform === true, 
  */
 function syncAskButton() {
   const fab = $('#asst-fab');
-  fab.hidden = !owner || !session().assistant || current.screen === 'assistant';
+  fab.hidden = !owner || !session().assistant || current.screen === 'assistant' || locked('assistant');
   document.body.classList.toggle('has-asst', !fab.hidden);
 }
 
 /**
- * Whether this workspace has the assistant: its API answers. A customer's runtime has none yet (the November release's
- * piece 3 turns it on), so a customer is not asked.
+ * Whether this workspace has the assistant. The founder's: its API answers. A customer's: yes, locked until its workspace
+ * is active (its runtime, on its own key, starts only then); it is not asked, since its runtime may still be starting. A
+ * platform with the assistant switched off says so on the page.
  */
 async function hasAssistant() {
-  if (!owner || owner.role === 'owner') return false;
+  if (!owner) return false;
+  if (owner.role === 'owner') return true;
   try {
     await get('/assistant');
     return true;
@@ -146,6 +148,7 @@ async function refreshActive() {
   active = next;
   buildNav();
   markNav(current.screen);
+  syncAskButton();
 }
 
 /**

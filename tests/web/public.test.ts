@@ -151,7 +151,7 @@ describe('router', () => {
       expect(group(s, 'System')).toEqual(['automations', 'audit', 'settings']);
       for (const id of FOUNDER_ONLY) expect(ids(s)).not.toContain(id);
     }
-    expect([...LOCKED_UNTIL_ACTIVE]).toEqual(['clients', 'tasks', 'meetings', 'tracker']);
+    expect([...LOCKED_UNTIL_ACTIVE]).toEqual(['clients', 'tasks', 'meetings', 'tracker', 'assistant']); // the Assistant too (Nov release piece 3)
   });
 
   it('Switch workspace: first in System for a member of 2 or more workspaces only, never the founder’s', () => {
