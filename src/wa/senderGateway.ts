@@ -44,9 +44,11 @@ export function recipientJid(digits: string): string {
   return `${digits}@s.whatsapp.net`;
 }
 
-/** The founder reader's number, as given or read now. */
-const founderOf = (o: Pick<SenderGatewayOptions, 'founderNumber'>): string | undefined =>
-  typeof o.founderNumber === 'function' ? o.founderNumber() : o.founderNumber;
+/** The reading phones' numbers (one, or several: lane C, change 7), as given or read now. */
+const foundersOf = (o: Pick<SenderGatewayOptions, 'founderNumber'>): string[] => {
+  const n = typeof o.founderNumber === 'function' ? o.founderNumber() : o.founderNumber;
+  return n === undefined ? [] : Array.isArray(n) ? n : [n];
+};
 
 /**
  * The phone number a saved link belongs to: the digits of creds.me.id before the device part (":5") or "@".
@@ -229,9 +231,10 @@ export interface SenderGatewayOptions {
   /**
    * The number the founder-number reader is linked to (digits of its creds.me.id), which may differ from recipient. Like
    * recipient, it never sends: a spare-number link to it is refused ('self_send'). A function is read at each check, so a
-   * founder relink from the dashboard is followed without making the sender again.
+   * founder relink from the dashboard is followed without making the sender again. Several numbers: every reading phone
+   * of the workspace (lane C, change 7); none of them sends.
    */
-  founderNumber?: string | (() => string | undefined);
+  founderNumber?: string | string[] | (() => string | string[] | undefined);
   factory: SenderSocketFactory;
   /** The spare number's session. Undefined when the stored session could not be opened or read. */
   auth: EncryptedAuth | undefined;
@@ -391,7 +394,7 @@ export class SenderGateway implements ReportSender {
   /** True when the saved link is the recipient's number or the founder reader's number. The founder's number never sends. */
   #linkedToFounder(auth: EncryptedAuth): boolean {
     const linked = linkedNumber(auth);
-    return linked !== undefined && (linked === this.#opts.recipient || linked === founderOf(this.#opts));
+    return linked !== undefined && (linked === this.#opts.recipient || foundersOf(this.#opts).includes(linked));
   }
 
   #setState(state: SenderState, code: number | null): void {

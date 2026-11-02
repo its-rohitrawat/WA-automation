@@ -184,6 +184,16 @@ describe.runIf(onSqlite)('spare phone link', () => {
     expect(await linkedOnDisk()).toBe(OLD_SPARE);
   });
 
+  it('with several reading phones, a spare scanned with phone 2 is refused as phone 1 is (lane C)', async () => {
+    const PHONE2 = '919833334444';
+    for (const number of [FOUNDER, PHONE2]) {
+      const t = sessions(scan(number), { founderNumber: () => [FOUNDER, PHONE2] });
+      const link = t.s.start({ target: 'spare', actor: 'a@b.in' });
+      await t.s.settled(link.id);
+      expect(t.s.info(link.id)!.errorCode, number).toBe('founder_number');
+    }
+  });
+
   it('a database the driver opened is handed over when a scheduler takes the new sender (no stand-in: it shared nothing)', async () => {
     const adopted: Db[] = [];
     const f = fakeScheduler();

@@ -68,8 +68,8 @@ export interface SpareLinkDeps {
   /** The master key; the spare session's own key is derived from it (useSenderAuthState). */
   key: Buffer;
   factory: SenderSocketFactory;
-  /** The number the founder's session is linked to, read at link time (readFounderNumber). */
-  founderNumber: () => string | undefined;
+  /** The number the founder's session is linked to, read at link time (readFounderNumber); or every reading phone's (lane C). */
+  founderNumber: () => string | string[] | undefined;
   /** REPORT_RECIPIENT (digits) when set: a spare link to it is refused too, as SenderGateway refuses it. */
   recipient: () => string | undefined;
   /** When the morning report runs: its open spare-session database. Otherwise the driver opens the file itself. */
@@ -167,7 +167,8 @@ export function spareLinkDriver(d: SpareLinkDeps): LinkDriver {
         // The founder's number must never send: neither REPORT_RECIPIENT nor the number the founder reader is linked to.
         const linked = linkedNumber(auth);
         const recipient = d.recipient();
-        if (linked !== undefined && (linked === d.founderNumber() || (recipient !== undefined && linked === recipient))) {
+        const founders = [d.founderNumber() ?? []].flat();
+        if (linked !== undefined && (founders.includes(linked) || (recipient !== undefined && linked === recipient))) {
           await undo(); // this link is never kept
           return { ok: false, code: 'founder_number' };
         }

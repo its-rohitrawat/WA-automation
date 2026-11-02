@@ -172,6 +172,26 @@ describe('SenderGateway', () => {
     expect(sockets).toHaveLength(0);
   });
 
+  it('with several reading phones, a spare linked to any of them never sends: phone 2’s number as well as phone 1’s (lane C)', async () => {
+    const PHONE1 = '919811112222';
+    const PHONE2 = '919833334444';
+    for (const number of [PHONE1, PHONE2]) {
+      const auth = await senderAuth(true);
+      auth.state.creds.me = { id: `${number}:3@s.whatsapp.net`, name: 'A reading phone' };
+      const { factory, sockets } = scriptedFactory();
+      const gw = new SenderGateway({ recipient: RECIPIENT, founderNumber: () => [PHONE1, PHONE2], factory, auth, connectTimeoutMs: 1_000, lingerMs: 0 });
+      expect(gw.status().state, number).toBe('self_send');
+      expect(await gw.sendReport('hi')).toEqual({ status: 'failed', code: 'self_send' });
+      expect(sockets).toHaveLength(0);
+    }
+    // A third number still sends; an empty list refuses nothing but the recipient.
+    const auth = await senderAuth(true);
+    auth.state.creds.me = { id: '919800000099:2@s.whatsapp.net', name: 'Spare' };
+    const { factory } = scriptedFactory();
+    expect(new SenderGateway({ recipient: RECIPIENT, founderNumber: () => [PHONE1, PHONE2], factory, auth, connectTimeoutMs: 1_000, lingerMs: 0 }).status().state).toBe('idle');
+    expect(new SenderGateway({ recipient: RECIPIENT, founderNumber: () => [], factory, auth, connectTimeoutMs: 1_000, lingerMs: 0 }).status().state).toBe('idle');
+  });
+
   it('sends normally with a founder number set when the saved link is a third number', async () => {
     const auth = await senderAuth(true);
     auth.state.creds.me = { id: '919800000099:2@s.whatsapp.net', name: 'Spare' };

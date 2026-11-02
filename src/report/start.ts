@@ -27,7 +27,7 @@ export async function openMorningReport(o: {
   masterKey: Buffer;
   log: Logger;
   factory: SenderSocketFactory;
-  founderNumber?: string | (() => string | undefined);
+  founderNumber?: string | string[] | (() => string | string[] | undefined);
   /** Where the sessions live (sessionHomeOf); data/sender-session.db when not given. */
   sessions?: SessionHome;
 }): Promise<MorningReportStart> {
@@ -63,7 +63,7 @@ export function senderOpener(o: {
   masterKey: Buffer;
   log: Logger;
   factory: SenderSocketFactory;
-  founderNumber?: string | (() => string | undefined);
+  founderNumber?: string | string[] | (() => string | string[] | undefined);
   sessions?: SessionHome;
 }): (recipient: string) => Promise<{ sender: ReportSender; close: () => Promise<void>; db: Db | undefined }> {
   return async (recipient) => {

@@ -49,7 +49,7 @@ export function spareDriver(o: {
   dataDir: string;
   key: Buffer;
   factory: SenderSocketFactory;
-  founderNumber: () => string | undefined;
+  founderNumber: () => string | string[] | undefined;
   briefing: Pick<LiveReport, 'pause' | 'reportDb' | 'scheduler' | 'recipient'>;
   /** The briefing's number in the settings (digits): a spare link to it is refused too. */
   settingsNumber: () => string | undefined;
