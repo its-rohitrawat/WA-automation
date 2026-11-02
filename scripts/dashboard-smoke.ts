@@ -219,9 +219,23 @@ async function main() {
         // The AI assistant's page (November release), on a scripted Claude (scripts/assistantFake.ts: no API call): open it
         // from the side menu's button, ask, Confirm a card, and follow an answer's "Open …" link (it never jumps by itself).
         where = `assistant ${tag}`;
+        const askWords = p.locator('#side-ask > span:last-child');
         if (vp.name === 'phone') {
+          // In the phone's drawer the button keeps its words, even with the menu collapsed earlier on a laptop.
           await p.locator('#mnav').click();
           await p.waitForTimeout(400);
+          if (!(await askWords.isVisible())) fail(where, 'the drawer hides the Ask button\'s words');
+          await p.screenshot({ path: join(OUT, `menu-drawer-${tag}.png`) });
+        } else {
+          // Collapsed on a laptop: the button shows its icon only, and the menu opens again.
+          await p.locator('#collapse').click();
+          await p.waitForTimeout(400);
+          if (await askWords.isVisible()) fail(where, 'the collapsed menu still shows the Ask button\'s words');
+          if (!(await p.locator('#side-ask').isVisible())) fail(where, 'the collapsed menu lost the Ask button');
+          await p.screenshot({ path: join(OUT, `menu-collapsed-${tag}.png`) });
+          await p.locator('#collapse').click();
+          await p.waitForTimeout(400);
+          if (!(await askWords.isVisible())) fail(where, 'the menu opened again without the Ask button\'s words');
         }
         await p.locator('#side-ask').click();
         await p.waitForURL('**/dashboard/assistant', { timeout: WAIT_MS }).catch(() => fail(where, `the side button did not open the page: ${p.url()}`));
@@ -235,6 +249,7 @@ async function main() {
         // While it streams: the orb thinks, and the hero (and its core) is gone.
         await p.locator('.asst-page .asst-msg.bot .asst-orb.thinking').waitFor({ timeout: WAIT_MS }).then(async () => {
           await p.locator('.asst-page .asst-msg.bot .asst-text').first().waitFor({ timeout: WAIT_MS });
+          await p.waitForTimeout(220); // past the 200 ms fade-up, still within the answer
           await p.screenshot({ path: join(OUT, `assistant-streaming-${tag}.png`) });
         }).catch(() => {}); // a fast answer may finish first: the steps below check it
         if ((await p.locator('.asst-page [data-core]').count()) !== 0) fail(where, 'the core stayed after the first question');

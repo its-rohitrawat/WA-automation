@@ -79,6 +79,8 @@ describe('a stored chat on the page', () => {
     expect(links).toContain('Open &lt;b&gt;tasks&lt;/b&gt;');
     expect(entryOf({ role: 'assistant', body: '', links: [{ screen: 'tasks', search: '"><script>', label: 'x' }] }).links[0].search).toBe('');
     expect(entryHtml(entryOf({ role: 'assistant', body: 'Part one', status: 'running' }), 3)).toContain('class="asst-step"');
+    // While it streams, a closed **bold** shows bold and an open one stays text; the rest is escaped as ever.
+    expect(entryHtml(entryOf({ role: 'assistant', body: '**11 open** and **par <i>', status: 'running' }), 3)).toContain('<b>11 open</b> and **par &lt;i&gt;');
     expect(entryHtml(entryOf({ role: 'assistant', body: 'Part one', status: 'interrupted' }), 3)).toContain('cut off when the agent restarted');
   });
 });

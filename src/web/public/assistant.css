@@ -92,9 +92,10 @@
 .asst-hero { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 8px 0 12px; }
 .asst-core { width: min(240px, 52vw); aspect-ratio: 1; margin-bottom: 6px; }
 .asst-core canvas { width: 100%; height: 100%; display: block; }
-.asst-hero-eyebrow { display: inline-flex; align-items: center; gap: 8px; font: 500 11px/1 var(--mono); letter-spacing: .18em; text-transform: uppercase; color: var(--green); }
+.asst-hero-eyebrow { max-width: 40ch; margin: 0 auto; font: 500 11px/1.6 var(--mono); letter-spacing: .18em; text-transform: uppercase; color: var(--green); text-wrap: balance; }
 :root[data-theme="light"] .asst-hero-eyebrow { color: #008069; }
-.asst-live-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; box-shadow: 0 0 10px currentColor; }
+/* Inline with the words, so a line that wraps keeps its dot at the start. */
+.asst-live-dot { display: inline-block; width: 7px; height: 7px; margin-right: 9px; vertical-align: 1px; border-radius: 50%; background: currentColor; box-shadow: 0 0 10px currentColor; }
 .asst-hero-title { margin: 16px 0 0; font-size: clamp(30px, 3.6vw, 48px); font-weight: 800; letter-spacing: -.04em; line-height: 1; text-wrap: balance; }
 .asst-hero-title em { color: var(--green); font-style: normal; }
 :root[data-theme="light"] .asst-hero-title em { color: #008069; }

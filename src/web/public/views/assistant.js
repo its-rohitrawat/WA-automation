@@ -134,7 +134,7 @@ const orb = (thinking) => `<span class="asst-orb${thinking ? ' thinking' : ''}" 
 export function entryHtml(e, i) {
   const enter = e.fresh ? ' enter' : '';
   if (e.who === 'me') return `<div class="asst-msg me${enter}">${esc(e.text)}</div>`;
-  const text = e.running ? esc(e.text) : rich(e.text.trim());
+  const text = rich(e.running ? e.text : e.text.trim());
   const links = e.links.map((l, j) => `<button class="asst-open" type="button" data-open="${i}:${j}">${icon('arrowR', 14)}<span>Open ${esc(l.label)}</span></button>`).join('');
   const cards = e.cards.map((c, j) => `<div class="asst-card" data-card="${i}:${j}"><b>${esc(c.title)}</b><ul>${c.lines.map((l) => `<li>${esc(l)}</li>`).join('')}</ul>
       <div class="asst-card-acts">${cardActs(c)}</div></div>`).join('');
@@ -387,7 +387,7 @@ export function mountAssistant(ctx) {
         } else if (e.type === 'text' && typeof e.text === 'string') {
           bot.text += e.text;
           const t = textEl();
-          if (t) t.textContent = bot.text;
+          if (t) t.innerHTML = rich(bot.text); // escaped first; a **bold** shows as soon as it closes
         } else if (e.type === 'tool' && typeof e.label === 'string') {
           bot.step = `${e.label}…`;
           col.querySelector(`[data-entry="${at}"] .asst-step`)?.setAttribute('data-label', bot.step);
