@@ -9,6 +9,7 @@ import { readChat, readDeleteResult, readMembers, readSendResult } from '../cont
 import { $, esc, icon, toast } from '../dom.js';
 import { clock } from '../format.js';
 import { closeDrawer, openChatLayer, openDrawerElement } from './drawer.js';
+import { toWhatsApp } from './chatTags.js';
 import { confirmDialog } from './ui.js';
 
 const PAGE = 50;
@@ -529,24 +530,6 @@ function insertTag(c, tag) {
   hidePicker(c);
   grow();
   t.focus();
-}
-
-/**
- * The text as WhatsApp gets it: each tagged "@Label" as "@<digits>" (longest labels first, so one never eats another);
- * and who it tags, by label. A label the owner edited away is no tag.
- * @param {string} shown @param {Map<string, string>} picks
- */
-function toWhatsApp(shown, picks) {
-  let text = shown;
-  /** @type {string[]} */
-  const tagged = [];
-  for (const [label, tag] of [...picks].sort((a, b) => b[0].length - a[0].length)) {
-    const re = new RegExp(`@${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}])`, 'gu');
-    const next = text.replace(re, `@${tag}`);
-    if (next !== text) tagged.push(label);
-    text = next;
-  }
-  return { text, tagged };
 }
 
 /** Opens or closes the chat's menu (the header's dots). @param {NonNullable<typeof chat>} c @param {boolean} show */
