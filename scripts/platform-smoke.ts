@@ -243,7 +243,7 @@ try {
       // active, and none of the founder's screens.
       const customerNav = await navOf(p);
       if (customerNav.group('workspace')[0] !== 'onboarding') fail(where, `the customer's Workspace starts with ${customerNav.group('workspace')[0]}`);
-      if (customerNav.locked.join() !== 'clients,meetings,tasks,tracker') fail(where, `locked: ${customerNav.locked}`);
+      if (customerNav.locked.join() !== 'assistant,clients,meetings,tasks,tracker') fail(where, `locked: ${customerNav.locked}`); // the Assistant too (Nov release piece 3)
       for (const id of ['customers', 'invite', 'connections', 'usage']) if (customerNav.all.includes(id)) fail(where, `${id} in a customer's nav`);
       if ((await p.locator('.pf-step.locked').count()) !== 4) fail(where, 'expected 4 locked steps');
       await p.locator('.pf-step.open .pf-coming', { hasText: 'Coming with the customer workspace.' }).waitFor();
@@ -252,8 +252,10 @@ try {
       await p.locator('.pf-step.locked .pf-step-head').first().click({ force: true });
       await p.locator('.toast', { hasText: 'Finish WhatsApp and your API key first.' }).waitFor();
       await shot(p, where, `onboarding-${tag}`);
-      // A customer's workspace has no assistant yet: no Ask button.
-      if (await p.locator('#asst-fab').isVisible()) fail(where, 'an Ask button for a customer without the assistant');
+      // A customer still onboarding (November release piece 3): its Assistant is listed but locked, and there is no Ask
+      // button until its workspace is active.
+      if ((await p.locator('#nav [data-go="assistant"].locked').count()) !== 1) fail(where, 'the Assistant is not listed locked for a customer still onboarding');
+      if (await p.locator('#asst-fab').isVisible()) fail(where, 'an Ask button before the workspace is active');
 
       // (S4.6 C) Step 1, the customer's own WhatsApp: the QR shows inline; Cancel gives the button back; a scan links.
       // The preview's link is the fake dashboard's (two codes, a scan, done); the real one is the customer's own link
