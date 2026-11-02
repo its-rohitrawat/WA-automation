@@ -277,10 +277,11 @@ function phoneWhere(o) {
 }
 
 /**
- * The workspace's reading phones on the Groups screen: id, label (owner text, shown with esc()), linked or not.
+ * The workspace's reading phones on the Groups screen: id, label (owner text, shown with esc()), linked or not. (Not
+ * readPhones below, which reads Connections' own answer.)
  * @param {unknown} v @returns {{ id: number, label: string, unlinked: boolean }[]}
  */
-function readPhones(v) {
+function readGroupPhones(v) {
   /** @type {{ id: number, label: string, unlinked: boolean }[]} */
   const out = [];
   for (const p of arr(v)) {
@@ -317,7 +318,7 @@ export function readGroups(raw) {
         };
       })
       .filter((row) => row.key),
-    phones: readPhones(r.phones),
+    phones: readGroupPhones(r.phones),
     total: num(r.total),
     counts: { all: num(c.all), approved: num(c.approved), notApproved: num(c.notApproved), ignored: num(c.ignored) },
     stale: r.stale === true,

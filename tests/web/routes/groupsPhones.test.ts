@@ -121,6 +121,11 @@ describe('Groups: each group and its phone', () => {
 });
 
 describe('Groups: approving on a phone', () => {
+  // As the dashboard: the list first (a save names groups by the keys of the list it showed).
+  beforeEach(async () => {
+    await list();
+  });
+
   it('approve with no phone takes the lowest linked phone that sees the group (phone 1 writes no field)', async () => {
     expect((await apply({ approve: [{ key: k(DESAI), name: 'Desai Foods', code: 'DES' }, { key: k(PATEL), name: 'Patel Builders', code: 'PAT' }] })).status).toBe(200);
     expect(fileEntry(DESAI)!.phone).toBe(2);
@@ -146,6 +151,10 @@ describe('Groups: approving on a phone', () => {
 });
 
 describe('Groups: read through another phone', () => {
+  beforeEach(async () => {
+    await list();
+  });
+
   it('is one edit: the group moves to that phone, with one audit line naming it, and is read as ok from then on', async () => {
     const r = await apply({ edit: [{ key: k(MEHTA.groupId), phone: 2 }] });
     expect(r.status).toBe(200);

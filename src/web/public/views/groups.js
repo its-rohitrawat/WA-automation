@@ -595,7 +595,7 @@ export function mountGroups(ctx, toolbar) {
     const startPhone = change?.kind === 'approve' && change.phone && choices.includes(change.phone) ? change.phone : choices[0];
     const phonePart = choices.length > 1
       ? `<label class="h4 g-label" for="g-phone-pick">Read through</label>
-        <div class="field"><select class="sel grow-1" id="g-phone-pick">${choices.map((p) => `<option value="${p}"${p === startPhone ? ' selected' : ''}>${esc(labelOf(p))}</option>`).join('')}</select></div>
+        <select class="sel" id="g-phone-pick">${choices.map((p) => `<option value="${p}"${p === startPhone ? ' selected' : ''}>${esc(labelOf(p))}</option>`).join('')}</select>
         <p class="muted-note">The phone the agent reads this group through. Only linked phones in the group are listed.</p>`
       : choices.length === 1 ? `<p class="muted-note">Read through ${esc(labelOf(choices[0] ?? 1))}.</p>` : '';
     const d = openDrawer(`<div class="dr-head"><div><span class="eyebrow">${editing ? 'Edit client' : 'Track this group'}</span><h2>${esc(row.name)}</h2></div>
