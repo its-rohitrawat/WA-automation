@@ -8,9 +8,10 @@ import { sttEnvFor } from './customerRuntime.ts';
 // built with. DENY BY DEFAULT: only the keys in CUSTOMER_KEYS are copied from the founder's env; every other key (the
 // founder's Claude and speech keys, the groups file, the report, the heartbeat, UptimeRobot, the owner list, the Google
 // client secrets, the database URLs) is absent. Then the customer's own values go in: its data folder
-// (DATA_DIR/tenants/<id>), its id, its Claude key when it has one, and the D2 speech settings. Report, meetings, invites,
-// the platform and the assistant are off. Not built with parseEnv: its defaults would bring founder paths back (the
-// groups file).
+// (DATA_DIR/tenants/<id>), its id, its Claude key when it has one, and the D2 speech settings. Report, meetings, invites
+// and the platform are off. The assistant follows the founder's DASHBOARD_ASSISTANT (one switch for the platform; November
+// release piece 3): on the customer's own key, cap and rows. Not built with parseEnv: its defaults would bring founder
+// paths back (the groups file).
 
 /** What a customer's runtime may read of the founder's env, as is: the machine and the model, nothing of the founder's. */
 export const CUSTOMER_KEYS = [
@@ -23,7 +24,7 @@ export const CUSTOMER_KEYS = [
 ] as const satisfies readonly (keyof Env)[];
 
 /** Set to off for every customer runtime (Phase B): its own settings for these come later. */
-const OFF = { REPORT_ENABLED: false, MEETINGS_ENABLED: false, INVITES_GMAIL: false, PLATFORM_ENABLED: false, DASHBOARD_ASSISTANT: false } as const;
+const OFF = { REPORT_ENABLED: false, MEETINGS_ENABLED: false, INVITES_GMAIL: false, PLATFORM_ENABLED: false } as const;
 
 /** The customer's data folder: DATA_DIR/tenants/<id>, refused unless the id is a customer id and the path stays inside. */
 export function customerDataDir(dataDir: string, tenantId: string): string {
@@ -51,6 +52,8 @@ export function customerProfile(env: Env, o: { tenantId: string; aiKey: string |
   const out: Partial<Record<keyof Env, unknown>> = {
     ...copied,
     ...OFF,
+    // The founder's switch, a flag only (no key): a customer's assistant runs on its own key, cap and rows.
+    DASHBOARD_ASSISTANT: env.DASHBOARD_ASSISTANT === true,
     DATA_DIR: dataDir,
     TENANT_ID: o.tenantId,
     STT_PROVIDER: speech.STT_PROVIDER,

@@ -3,8 +3,9 @@ import { z } from 'zod';
 import { DomainSchema } from '../../config/domains.ts';
 import type { ClientConfig } from '../../config/groups.ts';
 import type { GroupsStore } from '../../config/groupsStore.ts';
-import { GroupChangeError, type GroupChangeResult, type GroupChanges } from '../../config/groupsWriter.ts';
-import { groupsOverview, type GroupDirectory, type GroupFilter, type GroupRow, type GroupsOverview } from '../../control/groups.ts';
+import { GroupChangeError, type ApproveChange, type EditChange, type GroupChangeResult, type GroupChanges } from '../../config/groupsWriter.ts';
+import { noteReadingPhoneChange } from '../../control/chatQueries.ts';
+import { groupsOverview, ONE_PHONE, seenByOf, type GroupDirectory, type GroupFilter, type GroupRow, type GroupsOverview, type PhoneInfo } from '../../control/groups.ts';
 import { getClientByGroupId, listClients } from '../../store/clients.ts';
 import type { Db } from '../../store/db.ts';
 import { deleteKv, setKv } from '../../store/kv.ts';
@@ -33,6 +34,8 @@ export interface GroupsDeps {
   audit: AuditFn;
   log: Logger;
   clock: Clock;
+  /** The workspace's reading phones (more phones, lane C: its PhoneList's list()); not wired: phone 1 alone, as before. */
+  phones?: () => readonly PhoneInfo[];
 }
 
 /** The URL search parameters as given. */
@@ -82,7 +85,26 @@ async function ignoredCheck(deps: GroupsDeps): Promise<(groupId: string) => bool
 
 /** The list from the cached listing (never waiting on WhatsApp) with these configs. */
 async function cachedView(deps: GroupsDeps, configs: ClientConfig[]): Promise<GroupsView> {
-  return keyed(deps, await groupsOverview({ db: deps.db, listing: deps.directory.cachedListing(), configs, ignored: await ignoredCheck(deps) }));
+  return keyed(deps, await groupsOverview({ db: deps.db, listing: deps.directory.cachedListing(), configs, ignored: await ignoredCheck(deps), phones: phonesOf(deps) }));
+}
+
+const phonesOf = (deps: GroupsDeps): readonly PhoneInfo[] => deps.phones?.() ?? ONE_PHONE;
+
+/**
+ * Which phone a group may be read through (more phones, November release): the one asked for, when it is linked and in
+ * the group (as far as the last list says); none asked: the lowest linked phone in the group, else phone 1. A phone it
+ * may not use is a refusal the owner can read: field 'phone'.
+ */
+function phoneFor(deps: GroupsDeps, groupId: string, asked: number | undefined): number | GroupChangeError {
+  const phones = phonesOf(deps);
+  const linked = new Set(phones.filter((p) => p.state === 'active').map((p) => p.id));
+  const live = (deps.directory.cachedGroups() ?? []).find((g) => g.id === groupId);
+  const seenBy = live ? seenByOf(live) : null;
+  if (asked === undefined) return seenBy?.find((p) => linked.has(p)) ?? 1;
+  const label = phones.find((p) => p.id === asked)?.label ?? `Phone ${asked}`;
+  if (!linked.has(asked)) return new GroupChangeError(`${label} is not linked, so it can't read this group. Choose a linked phone.`, 'phone', groupId);
+  if (seenBy && !seenBy.includes(asked)) return new GroupChangeError(`${label} is not in this group, so it can't read it. Choose a phone that is.`, 'phone', groupId);
+  return asked;
 }
 
 /** One audit line; a failing write is logged (by error type only) and the caller carries on. */
@@ -106,7 +128,7 @@ export async function groupsListHandler(deps: GroupsDeps, _ctx: OwnerContext, se
     refresh = fetchedAt === null || deps.clock.now().getTime() - Date.parse(fetchedAt) >= REFRESH_MIN_MS;
   }
   const listing = await deps.directory.list({ refresh });
-  return ok(keyed(deps, await groupsOverview({ db: deps.db, listing, configs: deps.configs(), q, filter: filter as GroupFilter, ignored: await ignoredCheck(deps) })));
+  return ok(keyed(deps, await groupsOverview({ db: deps.db, listing, configs: deps.configs(), q, filter: filter as GroupFilter, ignored: await ignoredCheck(deps), phones: phonesOf(deps) })));
 }
 
 // The rules of ClientSchema (config/groups.ts), plus the matchable-keyword rule parseGroupsFile applies. The code is only
@@ -124,8 +146,10 @@ const Keywords = z
   .max(20, 'at most 20 per client');
 const Domains = z.array(DomainSchema);
 
-const Approve = z.strictObject({ key: Key, name: Name, code: z.string().max(10), emailDomains: Domains.optional(), meetingKeywords: Keywords.optional() });
-const Edit = z.strictObject({ key: Key, name: Name.optional(), emailDomains: Domains.optional(), meetingKeywords: Keywords.optional() });
+/** A reading phone (more phones): a whole number from 1 to 5. */
+const Phone = z.number().int('must be a whole number from 1 to 5').min(1, 'must be from 1 to 5').max(5, 'must be from 1 to 5');
+const Approve = z.strictObject({ key: Key, name: Name, code: z.string().max(10), emailDomains: Domains.optional(), meetingKeywords: Keywords.optional(), phone: Phone.optional() });
+const Edit = z.strictObject({ key: Key, name: Name.optional(), emailDomains: Domains.optional(), meetingKeywords: Keywords.optional(), phone: Phone.optional() });
 
 const ApplyBody = z
   .strictObject({
@@ -153,7 +177,7 @@ function problemTarget(error: z.ZodError, body: unknown): { key: string | null; 
   if ((list !== 'approve' && list !== 'edit' && list !== 'unapprove') || typeof index !== 'number') return { key: null, field: null };
   const item = (body as Record<string, unknown[]> | null)?.[list]?.[index];
   const key = list === 'unapprove' ? item : (item as { key?: unknown } | null | undefined)?.key;
-  const known = typeof field === 'string' && ['name', 'code', 'emailDomains', 'meetingKeywords'].includes(field) ? field : null;
+  const known = typeof field === 'string' && ['name', 'code', 'emailDomains', 'meetingKeywords', 'phone'].includes(field) ? field : null;
   return { key: typeof key === 'string' && KEY.test(key) ? key : null, field: known };
 }
 
@@ -175,35 +199,67 @@ export async function groupsApplyHandler(deps: GroupsDeps, ctx: OwnerContext, bo
   const idOf = (key: string) => index.get(key);
   const { approve, unapprove, edit } = parsed.data;
   if (![...approve, ...edit].every((c) => idOf(c.key)) || !unapprove.every((key) => idOf(key))) return unknown();
-  const changes: GroupChanges = {
-    approve: approve.map(({ key, ...c }) => ({ groupId: idOf(key)!, ...c })),
-    unapprove: unapprove.map((key) => idOf(key)!),
-    edit: edit.map(({ key, ...c }) => ({ groupId: idOf(key)!, ...c })),
-  };
+  const refused = (e: GroupChangeError) => fail(422, 'group_change', withoutIds(e.message), { field: e.field, key: e.groupId === null ? null : deps.groupKey(e.groupId) });
+
+  // Each approved group gets its phone (asked, or the default); a move to another phone is checked the same way.
+  const approveChanges: ApproveChange[] = [];
+  for (const { key, phone: asked, ...c } of approve) {
+    const groupId = idOf(key)!;
+    const phone = phoneFor(deps, groupId, asked);
+    if (phone instanceof GroupChangeError) return refused(phone);
+    approveChanges.push({ groupId, ...c, phone });
+  }
+  /** The groups an edit moves to another phone ("Read through Phone N"), and whether the edit changes anything else. */
+  const moves = new Map<string, { phone: number; more: boolean }>();
+  const editChanges: EditChange[] = [];
+  for (const { key, phone: asked, ...c } of edit) {
+    const groupId = idOf(key)!;
+    if (asked !== undefined) {
+      const phone = phoneFor(deps, groupId, asked);
+      if (phone instanceof GroupChangeError) return refused(phone);
+      moves.set(groupId, { phone, more: Object.keys(c).length > 0 });
+      editChanges.push({ groupId, ...c, phone });
+    } else editChanges.push({ groupId, ...c });
+  }
+  const changes: GroupChanges = { approve: approveChanges, unapprove: unapprove.map((key) => idOf(key)!), edit: editChanges };
 
   let result: GroupChangeResult;
   try {
     result = await deps.store.apply(changes);
   } catch (e) {
-    if (e instanceof GroupChangeError) {
-      return fail(422, 'group_change', withoutIds(e.message), { field: e.field, key: e.groupId === null ? null : deps.groupKey(e.groupId) });
-    }
+    if (e instanceof GroupChangeError) return refused(e);
     throw e;
   }
 
-  // The save is done: a failing audit line is logged (by error type only) and the rest carry on.
-  const lines: [string, GroupChangeResult['approved']][] = [
-    ['Group approved', result.approved],
-    ['Group removed', result.removed],
-    ['Client edited', result.edited],
-  ];
-  for (const [what, groups] of lines) {
-    for (const g of groups) await auditLine(deps, ctx, `${what} · ${g.name} (${g.code})`);
+  // The save is done: a failing audit line is logged (by error type only) and the rest carry on. A move names the
+  // phone the group is now read through (owner text, as the owner wrote it; the audit page shows it as text).
+  const labelOf = (id: number) => phonesOf(deps).find((p) => p.id === id)?.label ?? `Phone ${id}`;
+  for (const g of result.approved) await auditLine(deps, ctx, `Group approved · ${g.name} (${g.code})`);
+  for (const g of result.removed) await auditLine(deps, ctx, `Group removed · ${g.name} (${g.code})`);
+  for (const g of result.edited) {
+    const move = moves.get(g.groupId);
+    if (move) await auditLine(deps, ctx, `Group now read through ${labelOf(move.phone)} · ${g.name} (${g.code})`);
+    if (!move || move.more) await auditLine(deps, ctx, `Client edited · ${g.name} (${g.code})`);
   }
   // A group approved is no longer set aside.
   for (const g of result.approved) await deleteKv(deps.db, IGNORED + deps.groupKey(g.groupId));
+  for (const g of [...result.approved, ...result.edited.filter((x) => moves.has(x.groupId))]) await notePhoneChange(deps, ctx, g.groupId);
   // From the cached list: the answer never waits on WhatsApp.
   return ok(await cachedView(deps, result.configs));
+}
+
+/**
+ * Delete chat's key (final review, item 2): a group moved to another phone, or approved again with messages already
+ * stored, had those read by another phone, whose own messages are not this phone's. Noted per client; the save is done,
+ * so a failure here is logged (by error type only) and the rest carry on.
+ */
+async function notePhoneChange(deps: GroupsDeps, ctx: OwnerContext, groupId: string): Promise<void> {
+  try {
+    const client = await getClientByGroupId(deps.db, groupId);
+    if (client) await noteReadingPhoneChange(deps.db, client.id);
+  } catch (e) {
+    deps.log.warn({ code: (e as Error | null)?.name ?? 'Error', requestId: ctx.requestId }, "a group's change of phone could not be noted for Delete chat");
+  }
 }
 
 const BulkBody = z.strictObject({
@@ -289,11 +345,14 @@ export async function groupsBulkHandler(deps: GroupsDeps, ctx: OwnerContext, bod
       failed(key, 'No code could be made from its name. Approve it on its own to choose one.');
       continue;
     }
+    // Its phone: the lowest linked phone in the group, as the single approve's default.
+    const phone = phoneFor(deps, groupId, undefined) as number;
     try {
-      const result = await deps.store.apply({ approve: [{ groupId, name, code }] });
+      const result = await deps.store.apply({ approve: [{ groupId, name, code, phone }] });
       configs = result.configs;
       await deleteKv(deps.db, IGNORED + key);
       for (const g of result.approved) await auditLine(deps, ctx, `Group approved · ${g.name} (${g.code})`);
+      await notePhoneChange(deps, ctx, groupId);
       done(key);
     } catch (e) {
       if (e instanceof GroupChangeError) failed(key, withoutIds(e.message));

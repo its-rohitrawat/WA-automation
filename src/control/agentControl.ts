@@ -37,7 +37,8 @@ export interface AgentStatus {
 
 export interface Connections {
   founder: { state: PartState; label: string; groups: number; lastActivityAt: string | null; device: string };
-  spare: { state: PartState; label: string; device: string; recipientMasked: string | null };
+  /** accountName: WhatsApp's own name for the spare's account while it is linked; null otherwise or when not known. */
+  spare: { state: PartState; label: string; device: string; recipientMasked: string | null; accountName: string | null };
   google: { label: string; email: string | null; usedFor: string[]; state: PartState; stateLabel: string }[];
   /** The tracker file: its name, folder, the main account's email (when known) and its Drive link (once uploaded). */
   drive: { state: PartState; label: string; lastUploadAt: string | null; file: string; folder: string; account: string | null; url: string | null };
@@ -50,6 +51,11 @@ export interface AgentControlDeps {
   db: Db;
   /** The founder-number gateway: its status only. */
   gateway: { status(): GatewayStatus };
+  /**
+   * The workspace's reading phones and each one's state (lane C, change 7). With more than one, the WhatsApp part says
+   * how many are connected; each phone is on Connections. Absent or one phone: the part as before.
+   */
+  phones?: () => { id: number; label: string; status: GatewayStatus }[];
   env: Pick<Env, 'MEETINGS_ENABLED' | 'VOICE_STT_PROVIDER'>;
   clock: Clock;
   /**
@@ -62,6 +68,11 @@ export interface AgentControlDeps {
    * given: the spare phone shows as switched off then, as before.
    */
   spareLinked?: () => boolean | Promise<boolean>;
+  /**
+   * WhatsApp's own name for the spare's account, from its saved link (wa/authState.ts spareAccountNameIn, already
+   * cleaned; null when not known). Read only while the spare shows as linked; a failed read is no name.
+   */
+  spareName?: () => Promise<string | null>;
   /** The uptime heartbeat, when HEARTBEAT_URL is set. */
   heartbeat?: { lastBeatAt(): Date | null };
 }
@@ -84,6 +95,17 @@ export class AgentControl {
   }
 
   #whatsapp(): { state: PartState; label: string } {
+    const one = this.#oneWhatsApp();
+    const phones = this.#d.phones?.() ?? [];
+    if (phones.length <= 1) return one;
+    // Several phones: the same part (the monitor keeps its shape), saying how many are connected. All of them: as the
+    // set's status says; some: needs attention; none: as the worst phone's.
+    const open = phones.filter((p) => p.status.state === 'open').length;
+    const state: PartState = open === phones.length ? one.state : open > 0 ? 'warn' : one.state;
+    return { state, label: `${open} of ${phones.length} phones connected` };
+  }
+
+  #oneWhatsApp(): { state: PartState; label: string } {
     const s = this.#d.gateway.status();
     switch (s.state) {
       case 'logged_out':
@@ -216,12 +238,14 @@ export class AgentControl {
     const calls = (await db.get<{ n: number }>("SELECT COUNT(*) AS n FROM spend WHERE day = ? AND kind = 'ai'", [istDate(now)]))!.n;
     const beat = heartbeat?.lastBeatAt() ?? null;
     const file = await trackerFile(db);
+    const spare = sender ? { ...spareState(sender.status()), device: SPARE_DEVICE, recipientMasked: sender.maskedRecipient() }
+      : this.#d.spareLinked
+        ? { ...((await this.#d.spareLinked()) ? { state: 'ok' as const, label: 'Linked' } : { state: 'warn' as const, label: 'Not linked' }), device: SPARE_DEVICE, recipientMasked: null }
+        : { state: 'off' as const, label: 'Switched off', device: SPARE_DEVICE, recipientMasked: null };
+    const spareName = this.#d.spareName;
     return {
       founder: { ...this.#whatsapp(), groups, lastActivityAt: await this.#lastMessageAt(), device: FOUNDER_DEVICE },
-      spare: sender ? { ...spareState(sender.status()), device: SPARE_DEVICE, recipientMasked: sender.maskedRecipient() }
-        : this.#d.spareLinked
-          ? { ...((await this.#d.spareLinked()) ? { state: 'ok' as const, label: 'Linked' } : { state: 'warn' as const, label: 'Not linked' }), device: SPARE_DEVICE, recipientMasked: null }
-          : { state: 'off', label: 'Switched off', device: SPARE_DEVICE, recipientMasked: null },
+      spare: { ...spare, accountName: spare.state === 'ok' && spareName ? await spareName().catch(() => null) : null },
       google,
       drive: {
         ...(await this.#tracker(snap)), lastUploadAt: await lastTrackerUpload(db, snap.lastPublishedAt), file: file.name, folder: file.folder, account: file.account,

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 // Browser modules; their JSDoc types are checked by tsconfig.web.json, so the imports are untyped here.
 // @ts-expect-error -- browser module (see above)
-import { addTyped, draftOf, renderPriority, sameKeywords } from '../../src/web/public/views/priorityPanel.js';
+import { addTyped, addWords, draftOf, keywordAdder, keywordChips, renderPriority, sameKeywords, splitKeywords } from '../../src/web/public/views/priorityPanel.js';
 // @ts-expect-error -- browser module (see above)
 import { moodLabel, priorityPill, prioritySourceText } from '../../src/web/public/views/workLib.js';
 
@@ -63,6 +63,55 @@ describe('the keyword chips', () => {
     expect(html).toContain('value="&quot;&gt;&lt;b&gt;"');
     expect(html).toContain('role="switch" data-sentiment aria-checked="false"');
     expect(html).toContain('It adds a little to each AI read.');
-    expect(html).toContain('data-kw-save disabled');
+    // Text still in a box counts as a change (Save adds it first); with nothing typed and nothing changed, Save waits.
+    expect(html).not.toContain('data-kw-save disabled');
+    expect(renderPriority(view, draftOf(view.keywords), { dirty: false, problem: null, typed: { low: '  ' } })).toContain('data-kw-save disabled');
+  });
+});
+
+describe('adding keywords one at a time (November release, change 6)', () => {
+  it('splits what is typed or pasted at commas, trimmed and single-spaced', () => {
+    expect(splitKeywords(' a ,  b   c,, d ,')).toEqual(['a', 'b c', 'd']);
+    expect(splitKeywords('   ')).toEqual([]);
+  });
+
+  it('adds "a, b" as two keywords and ignores one already there, in any case', () => {
+    const list = ['Iyer'];
+    expect(addWords(list, 'dental website, IYER, iyer , Dental Website', { max: 20, full: 'full' })).toBe('');
+    expect(list).toEqual(['Iyer', 'dental website']);
+  });
+
+  it('stops at the first keyword refused, keeping the ones before it', () => {
+    const list: string[] = [];
+    const check = (k: string) => (k.length < 3 ? `The keyword "${k}" needs at least 3 letters.` : '');
+    expect(addWords(list, 'iyer, ab, dental', { max: 20, full: 'full', check })).toBe('The keyword "ab" needs at least 3 letters.');
+    expect(list).toEqual(['iyer']);
+    expect(addWords(['one', 'two'], 'three', { max: 2, full: 'At most 2 meeting keywords.' })).toBe('At most 2 meeting keywords.');
+  });
+
+  it('draws an input with an Add button, and the chips below it, each with a remove button, as text only', () => {
+    const add: string = keywordAdder({ input: 'data-kw-input="low"', button: 'data-kw-add="low"', value: '"><b>', maxlength: 40, label: 'New Low keyword', buttonLabel: 'Add Low keyword', placeholder: 'Add a keyword' });
+    expect(add).toContain('value="&quot;&gt;&lt;b&gt;"');
+    expect(add).toContain('aria-label="New Low keyword"');
+    expect(add).toMatch(/<button class="btn btn-ghost btn-sm" type="button" data-kw-add="low" aria-label="Add Low keyword">Add<\/button>/);
+    expect(add.indexOf('<input')).toBeLessThan(add.indexOf('<button'));
+    const chips: string = keywordChips(['<img src=x>', 'site down'], (i: number) => `data-kw-remove="low" data-i="${i}"`, { empty: 'No keywords yet', label: 'Low keywords' });
+    expect(chips).not.toContain('<img');
+    expect(chips).toContain('<span>&lt;img src=x&gt;</span>');
+    expect(chips).toContain('data-kw-remove="low" data-i="1" aria-label="Remove site down"');
+    expect(chips).toContain('aria-label="Low keywords"');
+    expect(keywordChips([], () => '', { empty: 'No keywords yet', label: 'Low keywords' })).toContain('No keywords yet');
+  });
+
+  it("puts each level's box and Add button above its chips, and says how to add", () => {
+    const view = { keywords: { ...empty(), major: ['asap'] }, sentimentEnabled: true, source: { priorityKeywords: 'dashboard', sentimentEnabled: 'default' }, limits: LIMITS };
+    const html: string = renderPriority(view, draftOf(view.keywords), { dirty: false, problem: null });
+    for (const level of ['critical', 'major', 'medium', 'low']) {
+      expect(html).toContain(`data-kw-input="${level}"`);
+      expect(html).toContain(`data-kw-add="${level}"`);
+    }
+    expect(html.indexOf('data-kw-add="major"')).toBeLessThan(html.indexOf('data-kw-remove="major" data-i="0"'));
+    expect(html).toContain('Type a keyword and press Add or Enter. Paste several with commas between them.');
+    expect(html).not.toContain('type a comma to add');
   });
 });

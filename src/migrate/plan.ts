@@ -1,13 +1,17 @@
 import { PLATFORM_TABLES } from '../platform/pgSchema.ts';
 import type { Sql } from '../store/engine/types.ts';
+import type { Phone } from '../wa/authState.ts';
 
 // What the copy tool (S3) copies, as data: each SQLite table with its target table, its columns and whether it is a
 // platform table, in foreign-key order (parents first). Every table in tracker.db is either planned or in SKIPPED with
 // a reason, so a table added later cannot be missed silently (tests/migrate/plan.test.ts). The table names come only
 // from the file's own sqlite_master, never from outside input.
 
+/** The session files, each by its source name: phone 1's session.db, phones 2 to 5's, and the spare's sender-session.db. */
+export type SessionSource = 'session' | 'phone2' | 'phone3' | 'phone4' | 'phone5' | 'sender';
+
 export interface TablePlan {
-  source: 'tracker' | 'session' | 'sender';
+  source: 'tracker' | SessionSource;
   table: string;
   target: string;
   columns: string[];
@@ -53,10 +57,17 @@ export async function copyPlan(tracker: Sql): Promise<TablePlan[]> {
   return out;
 }
 
-/** The WhatsApp session files (session.db, sender-session.db) into wa_auth: each phone, live and backup (gap G2). */
-export const SESSION_PLANS: readonly TablePlan[] = [
-  { source: 'session', table: 'auth', target: 'wa_auth', columns: ['k', 'v'], fixed: { phone: 'founder', slot: 'live' }, platform: false, key: ['k'] },
-  { source: 'session', table: 'auth_backup', target: 'wa_auth', columns: ['k', 'v'], fixed: { phone: 'founder', slot: 'backup' }, platform: false, key: ['k'] },
-  { source: 'sender', table: 'auth', target: 'wa_auth', columns: ['k', 'v'], fixed: { phone: 'spare', slot: 'live' }, platform: false, key: ['k'] },
-  { source: 'sender', table: 'auth_backup', target: 'wa_auth', columns: ['k', 'v'], fixed: { phone: 'spare', slot: 'backup' }, platform: false, key: ['k'] },
-];
+/**
+ * Each session file's phone in wa_auth. Phones 2 to 5 (lane C, change 7) are carried as phone 1 is, so a switch to
+ * Postgres, or the export back to SQLite (the guide's rollback B), keeps them linked; their list is a kv row, carried
+ * with tracker.db.
+ */
+export const SESSION_PHONE: Readonly<Record<SessionSource, Phone>> = {
+  session: 'founder', phone2: 'phone2', phone3: 'phone3', phone4: 'phone4', phone5: 'phone5', sender: 'spare',
+};
+
+/** The WhatsApp session files into wa_auth: each phone, live and backup (gap G2). */
+export const SESSION_PLANS: readonly TablePlan[] = (Object.keys(SESSION_PHONE) as SessionSource[]).flatMap((source) => [
+  { source, table: 'auth', target: 'wa_auth', columns: ['k', 'v'], fixed: { phone: SESSION_PHONE[source], slot: 'live' }, platform: false, key: ['k'] },
+  { source, table: 'auth_backup', target: 'wa_auth', columns: ['k', 'v'], fixed: { phone: SESSION_PHONE[source], slot: 'backup' }, platform: false, key: ['k'] },
+]);

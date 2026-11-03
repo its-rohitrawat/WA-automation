@@ -1,9 +1,11 @@
 import { randomBytes } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
-import { proto, WAMessageStubType, type WAMessageUpdate } from 'baileys';
+import { proto, WAMessageStubType, type GroupMetadata, type WAMessageUpdate } from 'baileys';
+import { manualClock } from '../../src/util/clock.ts';
 import { AllowList } from '../../src/wa/allowlist.ts';
 import { openSessionDb, useEncryptedAuthState } from '../../src/wa/authState.ts';
 import { WhatsAppGateway, type GatewayOptions } from '../../src/wa/gateway.ts';
+import { MEMBERS_CACHE_MS, MEMBERS_FAILED_MS, MEMBERS_READ_MS } from '../../src/wa/groupMembers.ts';
 import { Ingestor } from '../../src/wa/ingest.ts';
 import type { NormalizedEvent } from '../../src/wa/normalize.ts';
 import { OTHER_GROUP, seededDb, SHARMA } from '../helpers/db.ts';
@@ -76,9 +78,18 @@ describe('WhatsAppGateway privacy', () => {
     for (const name of SEND_METHODS) expect(sock[name]).not.toHaveBeenCalled();
   });
 
-  it('exposes no send-type methods', () => {
+  it('exposes no send-type methods (one named exception: chatDeleteSocket, which only hands over its socket behind the group guard)', async () => {
     const names = Object.getOwnPropertyNames(WhatsAppGateway.prototype);
-    expect(names.filter((n) => /send|read|presence|react|receipt|chatmodify|delete/i.test(n))).toEqual([]);
+    // Delete chat (November release, 2 Nov 2026): this one exact name, and no other. The gateway deletes nothing itself;
+    // the guard right before it hands the socket over is also locked in tests/wa/sendScan.test.ts.
+    expect(names.filter((n) => n !== 'chatDeleteSocket' && /send|read|presence|react|receipt|chatmodify|delete/i.test(n))).toEqual([]);
+    expect(names.filter((n) => /delete/i.test(n))).toEqual(['chatDeleteSocket']);
+    const { gw, sock } = await setup();
+    expect(gw.chatDeleteSocket(SHARMA.groupId)).toBeNull(); // not open
+    sock.emit('connection.update', { connection: 'open' });
+    expect(gw.chatDeleteSocket(OTHER_GROUP)).toBeNull(); // not an approved group
+    expect(gw.chatDeleteSocket(SHARMA.groupId)).toBe(sock); // only the socket itself
+    for (const m of SEND_METHODS) expect(sock[m]).not.toHaveBeenCalled();
   });
 });
 
@@ -307,6 +318,134 @@ describe('WhatsAppGateway: the socket for Open chat', () => {
     for (const m of SEND_METHODS) expect(sock[m]).not.toHaveBeenCalled();
     await gw.stop();
     expect(gw.groupSocket(SHARMA.groupId)).toBeNull();
+  });
+});
+
+describe('WhatsAppGateway: group members for Open chat (November release)', () => {
+  const PN1 = '919800000001@s.whatsapp.net';
+  const HIDDEN = '203333333333333@lid';
+
+  /** A gateway on a manual clock, its scheduled timers kept, and a socket that can read group data. */
+  async function membersSetup() {
+    const clock = manualClock('2026-11-02T06:00:00.000Z');
+    const scheduled: { fn: () => void; ms: number }[] = [];
+    const sockets: FakeSocket[] = [];
+    const auth = await useEncryptedAuthState(openSessionDb(':memory:'), randomBytes(32));
+    const gw = new WhatsAppGateway({
+      allow: new AllowList([SHARMA.groupId]),
+      factory: () => {
+        const s = new FakeSocket();
+        sockets.push(s);
+        return s;
+      },
+      auth: auth.state,
+      saveCreds: auth.saveCreds,
+      clock,
+      scheduler: (fn, ms) => {
+        scheduled.push({ fn, ms });
+        return { cancel: () => {} };
+      },
+    });
+    gw.start();
+    const sock = sockets[0]!;
+    const groupMetadata = vi.fn(async (_jid: string) =>
+      ({ id: SHARMA.groupId, subject: 'Sharma Interiors x Studio', participants: [{ id: PN1, admin: 'admin' }, { id: HIDDEN }] }) as unknown as GroupMetadata);
+    Object.assign(sock, { groupMetadata });
+    return { gw, sock, clock, scheduled, groupMetadata };
+  }
+
+  it('reads the members of an allowed group only while open, never for another chat, and sends nothing', async () => {
+    const { gw, sock, groupMetadata } = await membersSetup();
+    expect(await gw.groupMembers(SHARMA.groupId)).toBeNull(); // not open yet
+    sock.emit('connection.update', { connection: 'open' });
+    expect(await gw.groupMembers(OTHER_GROUP)).toBeNull(); // never an unapproved group
+    expect(await gw.groupMembers(PERSONAL_CHAT)).toBeNull();
+    expect(groupMetadata).not.toHaveBeenCalled();
+    expect(await gw.groupMembers(SHARMA.groupId)).toEqual([
+      { id: PN1, phoneNumber: PN1, lid: null, admin: true },
+      { id: HIDDEN, phoneNumber: null, lid: HIDDEN, admin: false },
+    ]);
+    expect(groupMetadata).toHaveBeenCalledTimes(1);
+    expect(groupMetadata).toHaveBeenCalledWith(SHARMA.groupId);
+    for (const m of SEND_METHODS) expect(sock[m]).not.toHaveBeenCalled();
+    await gw.stop();
+    expect(await gw.groupMembers(SHARMA.groupId)).toBeNull(); // stopped: not even the kept list
+  });
+
+  it("keeps a group's members for 5 minutes, then reads them again", async () => {
+    expect(MEMBERS_CACHE_MS).toBe(5 * 60_000);
+    const { gw, sock, clock, groupMetadata } = await membersSetup();
+    sock.emit('connection.update', { connection: 'open' });
+    await gw.groupMembers(SHARMA.groupId);
+    clock.advance(MEMBERS_CACHE_MS - 1);
+    expect(await gw.groupMembers(SHARMA.groupId)).toHaveLength(2);
+    expect(groupMetadata).toHaveBeenCalledTimes(1);
+    clock.advance(1);
+    expect(await gw.groupMembers(SHARMA.groupId)).toHaveLength(2);
+    expect(groupMetadata).toHaveBeenCalledTimes(2);
+  });
+
+  it('a read that fails, or gives no answer in 5 s, is null; the failure is kept 30 s for every caller, fresh too (final review, S6)', async () => {
+    expect(MEMBERS_READ_MS).toBe(5_000);
+    expect(MEMBERS_FAILED_MS).toBe(30_000);
+    const { gw, sock, clock, scheduled, groupMetadata } = await membersSetup();
+    sock.emit('connection.update', { connection: 'open' });
+    groupMetadata.mockRejectedValueOnce(new Error(`no data for ${SHARMA.groupId}`));
+    expect(await gw.groupMembers(SHARMA.groupId)).toBeNull();
+    clock.advance(MEMBERS_FAILED_MS - 1);
+    expect(await gw.groupMembers(SHARMA.groupId)).toBeNull();
+    expect(await gw.groupMembers(SHARMA.groupId, { fresh: true })).toBeNull();
+    expect(groupMetadata).toHaveBeenCalledTimes(1); // not asked again sooner
+    clock.advance(1);
+    groupMetadata.mockImplementationOnce(() => new Promise<GroupMetadata>(() => {}));
+    const before = scheduled.length; // the failed read's timer is there too: this test's scheduler keeps every timer
+    const pending = gw.groupMembers(SHARMA.groupId);
+    const timer = scheduled.slice(before).filter((s) => s.ms === MEMBERS_READ_MS);
+    expect(timer).toHaveLength(1);
+    timer[0]!.fn();
+    expect(await pending).toBeNull();
+    expect(await gw.groupMembers(SHARMA.groupId)).toBeNull(); // no answer in time is a failure too: kept
+    expect(groupMetadata).toHaveBeenCalledTimes(2);
+    clock.advance(MEMBERS_FAILED_MS);
+    expect(await gw.groupMembers(SHARMA.groupId)).toHaveLength(2);
+    expect(groupMetadata).toHaveBeenCalledTimes(3);
+  });
+
+  it('asks at the same moment share one read, fresh or not; fresh skips the 5-minute keep (final review, S2 and S6)', async () => {
+    const { gw, sock, groupMetadata } = await membersSetup();
+    sock.emit('connection.update', { connection: 'open' });
+    let answer: (m: GroupMetadata) => void = () => {};
+    groupMetadata.mockImplementationOnce(() => new Promise<GroupMetadata>((r) => (answer = r)));
+    const a = gw.groupMembers(SHARMA.groupId);
+    const b = gw.groupMembers(SHARMA.groupId, { fresh: true });
+    expect(groupMetadata).toHaveBeenCalledTimes(1);
+    answer({ id: SHARMA.groupId, subject: 'Sharma Interiors x Studio', participants: [{ id: PN1 }] } as unknown as GroupMetadata);
+    expect(await a).toEqual([{ id: PN1, phoneNumber: PN1, lid: null, admin: false }]);
+    expect(await b).toEqual(await a);
+    expect(await gw.groupMembers(SHARMA.groupId)).toHaveLength(1); // kept
+    expect(groupMetadata).toHaveBeenCalledTimes(1);
+    expect(await gw.groupMembers(SHARMA.groupId, { fresh: true })).toHaveLength(2); // fresh: WhatsApp is asked again
+    expect(groupMetadata).toHaveBeenCalledTimes(2);
+  });
+
+  it('a socket that cannot read group data gives null', async () => {
+    const { gw, sock } = await setup();
+    sock.emit('connection.update', { connection: 'open' });
+    expect(await gw.groupMembers(SHARMA.groupId)).toBeNull();
+  });
+});
+
+describe('WhatsAppGateway: the socket for Delete chat (November release)', () => {
+  it('hands its socket over only for an allowed group while open, and deletes nothing itself', async () => {
+    const { gw, sock } = await setup();
+    expect(gw.chatDeleteSocket(SHARMA.groupId)).toBeNull(); // not open yet
+    sock.emit('connection.update', { connection: 'open' });
+    expect(gw.chatDeleteSocket(OTHER_GROUP)).toBeNull(); // never an unapproved group
+    expect(gw.chatDeleteSocket(PERSONAL_CHAT)).toBeNull();
+    expect(gw.chatDeleteSocket(SHARMA.groupId)).toBe(sock);
+    for (const m of SEND_METHODS) expect(sock[m]).not.toHaveBeenCalled();
+    await gw.stop();
+    expect(gw.chatDeleteSocket(SHARMA.groupId)).toBeNull();
   });
 });
 

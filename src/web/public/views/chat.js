@@ -5,29 +5,46 @@
 // the founder's WhatsApp, once (the uuid made here makes a repeated request find the first one). Every text from the
 // agent is shown through esc(): group messages are untrusted.
 import { ApiError, get, post } from '../api.js';
-import { readChat, readSendResult } from '../contract.js';
+import { readChat, readDeleteResult, readMembers, readSendResult } from '../contract.js';
 import { $, esc, icon, toast } from '../dom.js';
 import { clock } from '../format.js';
 import { closeDrawer, openChatLayer, openDrawerElement } from './drawer.js';
+import { toWhatsApp } from './chatTags.js';
 import { confirmDialog } from './ui.js';
 
 const PAGE = 50;
 const TEXT_MAX = 4096;
 /** Near the end of the list: new messages keep it scrolled to the end. */
 const STICK_PX = 80;
+/** The text box grows to about 5 lines (20px each, and its padding), then scrolls. */
+const BOX_MAX_PX = 124;
+/** The floating day fades this long after the owner stops scrolling. */
+const FLOAT_MS = 1000;
 const IST = 'Asia/Kolkata';
 /** A computer: a mouse or trackpad that can hover. */
 const desk = matchMedia('(hover: hover) and (pointer: fine)');
 
 /** @typedef {ReturnType<typeof readChat>} ChatData */
 /** @typedef {ChatData['messages'][number]} Msg */
-/** @typedef {ChatData['outbox'][number] & { local?: 'inflight' | 'lost', reason?: string }} Out */
+/**
+ * A dashboard message. Sent from here: `shown` is the text as typed ("@Name") and `picks` its tags, to put back in the box
+ * when the agent refuses it.
+ * @typedef {ChatData['outbox'][number] & { local?: 'inflight' | 'lost', reason?: string, shown?: string, picks?: [string, string][] }} Out
+ */
+
+/** @typedef {ReturnType<typeof readMembers>['members'][number]} Member */
 
 /**
- * The open chat, or null.
+ * The open chat, or null. Tagging (November release): `names` are the agent's names for the tags on the pages shown;
+ * `members` the group's members (read when the picker or the group info first needs them) and `labels` the name each
+ * shows as in the composer ("@Label"); `picks` the members tagged in the draft, by label.
  * @type {{ code: string, el: HTMLElement, messages: Map<number, Msg>, outbox: Map<string, Out>, hasOlder: boolean,
- *   loadingOlder: boolean, sendingOn: boolean, connected: boolean, groupName: string, clientName: string, replyTo: Msg | null,
- *   draft: string, armed: boolean, onBack: () => void } | null}
+ *   loadingOlder: boolean, sendingOn: boolean, connected: boolean, phone: string | null, groupName: string, clientName: string, replyTo: Msg | null,
+ *   draft: string, armed: boolean, onBack: () => void, names: Record<string, string>, members: Member[] | null,
+ *   reading: Promise<{ name: string, members: Member[] } | { name: string, note: string }> | null,
+ *   failed: { note: string, at: number } | null, labels: Map<string, string>, picks: Map<string, string>,
+ *   picker: { start: number, query: string, active: number } | null, cleared: boolean, deleting: boolean,
+ *   floatTimer: number, drawnAt: number } | null}
  */
 let chat = null;
 
@@ -74,16 +91,41 @@ function quoteBlock(q) {
   return `<div class="ch-quote"><b class="${tone(q.sender)}">${esc(q.sender)}</b><span>${esc(text)}</span></div>`;
 }
 
-/** A stored message. `showName`: the first of a run by one sender (in a group, names show on others' messages only). @param {Msg} m @param {boolean} showName */
-function bubble(m, showName) {
-  if (m.deleted) {
-    return `<div class="ch-row ${m.mine ? 'out' : 'in'}"><div class="ch-bub ch-gone">${icon('close', 13)}<i>This message was deleted</i><span class="ch-meta">${esc(clock(m.at))}</span></div></div>`;
+/** A tag in a message's text, as the agent finds it (src/wa/groupMembers.ts mentionTags). */
+const TAG = /(?<![\p{L}\p{N}_])@(\d{5,20})(?!\d)/gu;
+
+/**
+ * A message's text, its tags ("@<digits>") highlighted: as "@Name" when the agent knows the member, else as the text has
+ * it (the bubble adds no number). Every piece goes through esc(). @param {string} text
+ */
+function richText(text) {
+  const names = chat?.names ?? {};
+  let out = '';
+  let last = 0;
+  for (const m of text.matchAll(TAG)) {
+    const at = m.index ?? 0;
+    const tag = m[1] ?? '';
+    out += `${esc(text.slice(last, at))}<span class="ch-at">@${esc(Object.hasOwn(names, tag) ? names[tag] : tag)}</span>`;
+    last = at + m[0].length;
   }
-  const name = !m.mine && showName ? `<b class="ch-name ${tone(m.sender)}">${esc(m.sender)}</b>` : '';
+  return out + esc(text.slice(last));
+}
+
+/**
+ * A stored message. `first`: the first of a run by one sender, as in WhatsApp: a little more room above, the bubble's
+ * tail, and (in a group, on others' messages only) the sender's name.
+ * @param {Msg} m @param {boolean} first
+ */
+function bubble(m, first) {
+  const row = `ch-row ${m.mine ? 'out' : 'in'}${first ? ' first' : ''}`;
+  if (m.deleted) {
+    return `<div class="${row}"><div class="ch-bub ch-gone">${icon('close', 13)}<i>This message was deleted</i><span class="ch-meta">${esc(clock(m.at))}</span></div></div>`;
+  }
+  const name = !m.mine && first ? `<b class="ch-name ${tone(m.sender)}">${esc(m.sender)}</b>` : '';
   const transcript = m.transcript ? `<p class="ch-tr">${esc(m.transcript)}</p>` : '';
-  const text = m.text ? `<p>${esc(m.text)}</p>` : '';
+  const text = m.text ? `<p>${richText(m.text)}</p>` : '';
   const replyBtn = chat?.sendingOn ? `<button class="ch-reply" type="button" data-reply="${m.id}" aria-label="Reply to ${esc(m.sender)}">${icon('undo', 14)}</button>` : '';
-  return `<div class="ch-row ${m.mine ? 'out' : 'in'}" data-msg="${m.id}"><div class="ch-bub">${name}${quoteBlock(m.quote)}${kindTag(m.kind, m.seconds)}${transcript}${text}
+  return `<div class="${row}" data-msg="${m.id}"><div class="ch-bub">${name}${quoteBlock(m.quote)}${kindTag(m.kind, m.seconds)}${transcript}${text}
     <span class="ch-meta">${m.edited ? 'edited · ' : ''}${esc(clock(m.at))}</span></div>${replyBtn}</div>`;
 }
 
@@ -95,10 +137,10 @@ function outState(o) {
   return { cls: 'wait', ic: 'clock', words: 'Sending…' };
 }
 
-/** A message sent (or being sent) from here that the chat shows on its own. @param {Out} o */
-function outBubble(o) {
+/** A message sent (or being sent) from here that the chat shows on its own. @param {Out} o @param {boolean} first */
+function outBubble(o, first) {
   const s = outState(o);
-  return `<div class="ch-row out ch-own ${s.cls}" data-out="${esc(o.uuid)}"><div class="ch-bub">${quoteBlock(o.quote)}<p>${esc(o.text)}</p>
+  return `<div class="ch-row out${first ? ' first' : ''} ch-own ${s.cls}" data-out="${esc(o.uuid)}"><div class="ch-bub">${quoteBlock(o.quote)}<p>${richText(o.text)}</p>
     <span class="ch-meta">${esc(clock(o.at))} <span class="ch-state">${icon(s.ic, 13)}${esc(s.words)}</span></span></div></div>`;
 }
 
@@ -107,26 +149,32 @@ function listHtml() {
   if (!chat) return '';
   const msgs = [...chat.messages.values()].sort((a, b) => (a.at ?? '').localeCompare(b.at ?? '') || a.id - b.id);
   let lastDay = '';
-  let lastSender = '';
+  // Who wrote the message before: 'me', or 'in:' and the sender; a new day starts a new run.
+  let lastWho = '';
   const parts = [];
   for (const m of msgs) {
     const d = day(m.at);
     if (d !== lastDay) {
       parts.push(`<div class="ch-day" role="separator"><span>${esc(dayLabel(d))}</span></div>`);
       lastDay = d;
-      lastSender = '';
+      lastWho = '';
     }
-    const who = m.mine ? '' : m.sender;
-    parts.push(bubble(m, who !== lastSender));
-    lastSender = who;
+    const who = m.mine ? 'me' : `in:${m.sender}`;
+    parts.push(bubble(m, who !== lastWho));
+    lastWho = who;
   }
   const own = [...chat.outbox.values()].sort((a, b) => (a.at ?? '').localeCompare(b.at ?? ''));
   if (own.length) {
     const d = day(own[0]?.at ?? null);
-    if (d !== lastDay) parts.push(`<div class="ch-day" role="separator"><span>${esc(dayLabel(d))}</span></div>`);
-    for (const o of own) parts.push(outBubble(o));
+    if (d !== lastDay) {
+      parts.push(`<div class="ch-day" role="separator"><span>${esc(dayLabel(d))}</span></div>`);
+      lastWho = '';
+    }
+    own.forEach((o, i) => parts.push(outBubble(o, i === 0 && lastWho !== 'me')));
   }
-  if (parts.length === 0) parts.push('<p class="ch-empty">No messages stored for this group yet.</p>');
+  if (parts.length === 0) {
+    parts.push(chat.cleared ? '<p class="ch-empty">You deleted this chat. New messages in the group will show here.</p>' : '<p class="ch-empty">No messages stored for this group yet.</p>');
+  }
   return parts.join('');
 }
 
@@ -143,8 +191,9 @@ function footHtml() {
     ? `<div class="ch-replying"><div class="grow-1">${quoteBlock({ sender: r.sender, text: r.text, kind: r.kind })}</div>
         <button class="icon-btn" type="button" data-reply-cancel aria-label="Cancel the reply">${icon('close', 15)}</button></div>`
     : '';
-  return `${reply}<form class="ch-compose" data-compose><label class="sr-only" for="ch-text">Message to ${esc(chat.groupName)}</label>
-    <textarea id="ch-text" rows="1" maxlength="${TEXT_MAX}" placeholder="Message" autocomplete="off">${esc(chat.draft)}</textarea>
+  return `${reply}<div class="ch-pick" id="ch-pick" role="listbox" aria-label="Tag a member" hidden></div>
+    <form class="ch-compose" data-compose><label class="sr-only" for="ch-text">Message to ${esc(chat.groupName)}. Type @ to tag a member.</label>
+    <textarea id="ch-text" rows="1" maxlength="${TEXT_MAX}" placeholder="Message" autocomplete="off" aria-autocomplete="list" aria-controls="ch-pick">${esc(chat.draft)}</textarea>
     <button class="ch-send" type="submit" aria-label="Send">${icon('arrowR', 20)}</button></form>
     <p class="ch-note">Sent from the founder's WhatsApp to everyone in the group, after you confirm.</p>`;
 }
@@ -160,34 +209,70 @@ function draw(o = {}) {
   // The foot first: its height changes the list's, and the list's place is set after.
   if (o.foot) {
     const typing = document.activeElement?.id === 'ch-text';
+    chat.picker = null; // a new box: no picker open in it
     $('.ch-foot', chat.el).innerHTML = footHtml();
     grow();
     if (typing) /** @type {HTMLElement | null} */ (chat.el.querySelector('#ch-text'))?.focus({ preventScroll: true });
   }
+  chat.drawnAt = performance.now(); // this move of the list is not the owner scrolling (floatDay)
   if (o.toEnd || atEnd) body.scrollTop = body.scrollHeight;
   else body.scrollTop = body.scrollHeight - fromEnd;
 }
 
-/** The text box grows with its lines, up to a few. */
+/** The text box grows with its lines, up to about 5, and only then scrolls. */
 function grow() {
   const t = /** @type {HTMLTextAreaElement | null} */ (chat?.el.querySelector('#ch-text') ?? null);
   if (!t) return;
   t.style.height = 'auto';
-  t.style.height = `${Math.min(t.scrollHeight, 140)}px`;
+  // scrollHeight leaves out the border, which the box's height includes: without it, a one-line box scrolls.
+  const full = t.scrollHeight + t.offsetHeight - t.clientHeight;
+  t.style.height = `${Math.min(full, BOX_MAX_PX)}px`;
+  t.style.overflowY = full > BOX_MAX_PX ? 'auto' : 'hidden';
+}
+
+/**
+ * While the owner scrolls, the day of the messages at the top floats there, as in WhatsApp, and fades a second after.
+ * At rest only the days in the list show, so nothing covers a message. Hidden while a day in the list is at the top.
+ */
+function floatDay() {
+  const c = chat;
+  if (!c || performance.now() - c.drawnAt < 150) return;
+  const body = /** @type {HTMLElement} */ ($('.ch-body', c.el));
+  const pill = /** @type {HTMLElement} */ ($('.ch-float', c.el));
+  const top = body.scrollTop;
+  let label = '';
+  let atTop = false;
+  for (const d of /** @type {NodeListOf<HTMLElement>} */ (body.querySelectorAll('.ch-day'))) {
+    if (d.offsetTop <= top + 8) label = d.textContent ?? '';
+    else if (d.offsetTop < top + 48) atTop = true;
+  }
+  clearTimeout(c.floatTimer);
+  /** @type {HTMLElement} */ (pill.firstElementChild).textContent = label;
+  pill.classList.toggle('on', label !== '' && !atTop);
+  c.floatTimer = window.setTimeout(() => pill.classList.remove('on'), FLOAT_MS);
+}
+
+/** The header's line under the group's name: the client's code, and how many members once they are read. @param {NonNullable<typeof chat>} c */
+function showCount(c) {
+  const n = c.members?.length;
+  $('.ch-sub', c.el).textContent = n ? `${c.code} · ${n} ${n === 1 ? 'member' : 'members'}` : c.code;
 }
 
 /** Takes the agent's page into the chat. The dashboard's own messages are the agent's list, plus the ones still in flight here. @param {ChatData} d @param {boolean} newest */
 function take(d, newest) {
   if (!chat) return;
   for (const m of d.messages) chat.messages.set(m.id, m);
+  Object.assign(chat.names, d.names);
   if (!newest) {
     chat.hasOlder = d.hasOlder;
     return;
   }
   if (chat.messages.size <= d.messages.length) chat.hasOlder = d.hasOlder;
+  chat.cleared = d.cleared;
   const footChanged = chat.sendingOn !== d.sendingOn || chat.connected !== d.connected;
   chat.sendingOn = d.sendingOn;
   chat.connected = d.connected;
+  chat.phone = d.phone;
   chat.groupName = d.client.groupName;
   const next = new Map(d.outbox.map((x) => [x.uuid, /** @type {Out} */ (x)]));
   for (const [uuid, o] of chat.outbox) if (o.local && !next.has(uuid)) next.set(uuid, o);
@@ -205,9 +290,11 @@ async function loadNewest(first = false) {
     const footChanged = take(d, true);
     draw({ foot: first || footChanged, toEnd: first });
     if (first) {
-      $('.ch-head h2', c.el).textContent = c.groupName;
+      $('.ch-who', c.el).textContent = c.groupName;
       // Only now, at the end of the list: scrolling up near the top loads the page before.
       c.armed = true;
+      // The members, for the header's count (and kept for tagging and Group info).
+      if (c.connected) void fetchMembers(c);
     }
   } catch (e) {
     if (chat !== c) return;
@@ -241,24 +328,31 @@ async function send() {
   const c = chat;
   if (!c) return;
   const box = /** @type {HTMLTextAreaElement | null} */ (c.el.querySelector('#ch-text'));
-  const text = box?.value ?? '';
-  if (!text.trim()) return;
+  const shown = box?.value ?? '';
+  if (!shown.trim()) return;
+  hidePicker(c);
+  // The confirm shows the message as the members read it ("@Name"); WhatsApp gets its own form ("@<digits>").
+  const { text, tagged } = toWhatsApp(shown, c.picks);
   if (text.length > TEXT_MAX) return toast(`A message can be at most ${TEXT_MAX} characters.`, false);
   const yes = await confirmDialog({
     eyebrow: 'Send from WhatsApp',
     title: `Send this from your WhatsApp to ${c.groupName}?`,
-    text: 'Everyone in the group sees it, from the founder’s number. It cannot be taken back from here.',
-    quote: text,
+    text: `Everyone in the group sees it, from the founder’s number.${tagged.length ? ` It tags ${tagged.join(', ')} on their phones.` : ''} It cannot be taken back from here.`,
+    quote: shown,
     yes: 'Send',
   });
   if (!yes || chat !== c) return;
   const uuid = crypto.randomUUID();
   const r = c.replyTo;
   /** @type {Out} */
-  const out = { uuid, at: new Date().toISOString(), text, state: 'sending', quote: r ? { sender: r.sender, text: r.text, kind: r.kind } : null, local: 'inflight' };
+  const out = {
+    uuid, at: new Date().toISOString(), text, state: 'sending', quote: r ? { sender: r.sender, text: r.text, kind: r.kind } : null, local: 'inflight',
+    shown, picks: [...c.picks],
+  };
   c.outbox.set(uuid, out);
   c.replyTo = null;
   c.draft = '';
+  c.picks = new Map();
   draw({ foot: true, toEnd: true });
   await deliver(c, out, r ? r.id : null, 0);
 }
@@ -279,7 +373,11 @@ async function deliver(c, out, replyTo, tries) {
     if (chat !== c) return;
     if (e instanceof ApiError) {
       c.outbox.delete(out.uuid);
-      if (!c.draft) c.draft = out.text;
+      // Back in the box as it was typed, with its tags.
+      if (!c.draft) {
+        c.draft = out.shown ?? out.text;
+        c.picks = new Map(out.picks ?? []);
+      }
       toast(e.message, false);
       draw({ foot: true });
       return;
@@ -295,7 +393,252 @@ async function deliver(c, out, replyTo, tries) {
 
 /** Closes the chat (the layer's own close). */
 function forget() {
+  if (chat) clearTimeout(chat.floatTimer);
   chat = null;
+}
+
+/** Tagging is possible: sending is on and WhatsApp is connected (the composer is shown). */
+const canTag = () => Boolean(chat?.sendingOn && chat.connected);
+
+/**
+ * The group info panel's body: the group, then a note (loading, or why the members can't be shown) or the members. A
+ * member is its name, else the number WhatsApp shows, else "Number hidden"; names are untrusted (esc). While sending is
+ * possible, tapping a member puts "@Name" in the message.
+ * @param {string} groupName @param {{ note: string } | { members: Member[] }} s
+ */
+function infoBody(groupName, s) {
+  const top = `<div class="ch-info-top"><span class="ch-info-av" aria-hidden="true">${icon('users', 34)}</span><h3>${esc(groupName)}</h3>`;
+  if ('note' in s) return `${top}<p class="ch-info-count">${esc(s.note)}</p></div>`;
+  const n = s.members.length;
+  const tag = canTag();
+  const rows = s.members
+    .map((m) => {
+      // A number only for a member the agent has no name for (final review, item 3): the agent sends no other.
+      const title = m.name ?? m.number ?? 'Number hidden';
+      const sub = m.name || m.number ? '' : 'WhatsApp hides this member’s number';
+      const inner = `<span class="ch-mem-av" aria-hidden="true">${icon('user', 18)}</span><span class="grow-1 ch-mem-text"><b>${esc(title)}</b>${sub ? `<small>${esc(sub)}</small>` : ''}</span>${m.admin ? '<span class="ch-admin">Group admin</span>' : ''}`;
+      return tag
+        ? `<li><button class="ch-mem ch-mem-btn" type="button" data-tag="${esc(m.tag)}" aria-label="Tag ${esc(title)} in your message">${inner}</button></li>`
+        : `<li class="ch-mem">${inner}</li>`;
+    })
+    .join('');
+  const hint = tag && n ? ' · Tap a member to tag them' : '';
+  return `${top}<p class="ch-info-count">Group · ${n} member${n === 1 ? '' : 's'}${hint}</p></div><ul class="ch-mems" aria-label="Members">${rows}</ul>`;
+}
+
+/** How long a failed read of the members is remembered before the picker asks again (the agent asks WhatsApp each time). */
+const RETRY_MS = 30_000;
+
+/**
+ * Reads the group's members (the agent keeps them 5 minutes); read, they are kept for this chat's tagging. One read at a
+ * time: a second ask waits for it.
+ * @param {NonNullable<typeof chat>} c @returns {Promise<{ name: string, members: Member[] } | { name: string, note: string }>}
+ */
+function fetchMembers(c) {
+  c.reading ??= (async () => {
+    /** @type {{ name: string, members: Member[] } | { name: string, note: string }} */
+    let r;
+    try {
+      const d = readMembers(await get(`/clients/${encodeURIComponent(c.code)}/chat/members`));
+      const name = d.groupName || c.groupName;
+      r = d.known
+        ? { name, members: d.members }
+        : { name, note: d.reason === 'whatsapp_not_connected' ? 'WhatsApp is not connected, so the members can’t be shown now.' : 'The members could not be read from WhatsApp just now. Try again in a minute.' };
+    } catch (e) {
+      r = { name: c.groupName, note: e instanceof ApiError ? e.message : 'The members could not be loaded.' };
+    }
+    c.reading = null;
+    if ('members' in r) {
+      setMembers(c, r.members);
+      c.failed = null;
+    } else c.failed = { note: r.note, at: Date.now() };
+    return r;
+  })();
+  return c.reading;
+}
+
+/**
+ * Keeps the members, each with the label it shows as in the composer: its name, else its number, else "Member" and the
+ * last 4 digits of its tag. A label two members share gets those 4 digits too, so a tag is never ambiguous.
+ * @param {NonNullable<typeof chat>} c @param {Member[]} members
+ */
+function setMembers(c, members) {
+  const base = (/** @type {Member} */ m) => m.name ?? m.number ?? `Member ${m.tag.slice(-4)}`;
+  /** @type {Map<string, number>} */
+  const count = new Map();
+  for (const m of members) count.set(base(m), (count.get(base(m)) ?? 0) + 1);
+  c.members = members;
+  c.labels = new Map(members.map((m) => [m.tag, (count.get(base(m)) ?? 0) > 1 ? `${base(m)} ${m.tag.slice(-4)}` : base(m)]));
+  if (chat === c) showCount(c);
+}
+
+/** Opens the group info panel over the chat and reads the members. */
+async function openInfo() {
+  const c = chat;
+  if (!c) return;
+  hidePicker(c);
+  const panel = /** @type {HTMLElement} */ ($('.ch-info', c.el));
+  panel.innerHTML = `<div class="ch-info-head"><button class="icon-btn" type="button" data-info-back aria-label="Back to the chat">${icon('arrowL', 18)}</button><b>Group info</b></div>
+    <div class="ch-info-body">${infoBody(c.groupName, { note: 'Loading the members…' })}</div>`;
+  panel.hidden = false;
+  /** @type {HTMLElement | null} */ (panel.querySelector('[data-info-back]'))?.focus();
+  const r = await fetchMembers(c);
+  if (chat !== c || panel.hidden) return;
+  const body = panel.querySelector('.ch-info-body');
+  if (body) body.innerHTML = infoBody(r.name, 'note' in r ? { note: r.note } : { members: r.members });
+}
+
+/** The "@word" being typed right before the caret, or null. @param {HTMLTextAreaElement} t */
+function typedTag(t) {
+  const caret = t.selectionStart ?? t.value.length;
+  const m = /(?:^|\s)@([^\s@]{0,30})$/u.exec(t.value.slice(0, caret));
+  if (!m) return null;
+  const query = m[1] ?? '';
+  return { start: caret - query.length - 1, query };
+}
+
+/** The members the picker offers for what was typed after "@": by name or number, at most 8. @param {NonNullable<typeof chat>} c @param {string} q */
+function matching(c, q) {
+  const s = q.toLowerCase();
+  const digits = q.replace(/\D/g, '');
+  return (c.members ?? [])
+    .filter((m) => !s || (c.labels.get(m.tag) ?? '').toLowerCase().includes(s) || (digits !== '' && (m.number ?? '').replace(/\D/g, '').includes(digits)))
+    .slice(0, 8);
+}
+
+/** Hides the member picker. @param {NonNullable<typeof chat>} c */
+function hidePicker(c) {
+  c.picker = null;
+  const box = c.el.querySelector('#ch-pick');
+  if (box instanceof HTMLElement) {
+    box.hidden = true;
+    box.innerHTML = '';
+  }
+  c.el.querySelector('#ch-text')?.removeAttribute('aria-activedescendant');
+}
+
+/** Shows the member picker for the "@word" being typed, as in WhatsApp; hides it otherwise. */
+async function updatePicker() {
+  const c = chat;
+  if (!c) return;
+  const t = c.el.querySelector('#ch-text');
+  const box = c.el.querySelector('#ch-pick');
+  if (!(t instanceof HTMLTextAreaElement) || !(box instanceof HTMLElement)) return;
+  const typed = typedTag(t);
+  if (!typed) return hidePicker(c);
+  c.picker = { start: typed.start, query: typed.query, active: c.picker && c.picker.query === typed.query ? c.picker.active : 0 };
+  if (!c.members) {
+    box.hidden = false;
+    // A read that failed a moment ago is not asked again yet.
+    if (c.failed && Date.now() - c.failed.at < RETRY_MS) {
+      box.innerHTML = `<p class="ch-pick-note">${esc(c.failed.note)}</p>`;
+      return;
+    }
+    box.innerHTML = '<p class="ch-pick-note">Loading the members…</p>';
+    const r = await fetchMembers(c);
+    if (chat !== c || !c.picker) return;
+    if (!c.members) {
+      box.innerHTML = `<p class="ch-pick-note">${esc('note' in r ? r.note : '')}</p>`;
+      return;
+    }
+    return updatePicker();
+  }
+  const list = matching(c, typed.query);
+  if (list.length === 0) return hidePicker(c);
+  const p = c.picker;
+  p.active = Math.min(p.active, list.length - 1);
+  box.hidden = false;
+  box.innerHTML = list
+    .map((m, i) =>
+      // The label alone: a name, else the number, else "Member" and 4 digits (final review, item 3).
+      `<button type="button" class="ch-pick-item${i === p.active ? ' on' : ''}" role="option" id="ch-pick-${i}" aria-selected="${i === p.active}" data-pick="${esc(m.tag)}" tabindex="-1"><span class="ch-mem-av" aria-hidden="true">${icon('user', 16)}</span><span class="ch-mem-text"><b>${esc(c.labels.get(m.tag) ?? '')}</b></span></button>`)
+    .join('');
+  t.setAttribute('aria-activedescendant', `ch-pick-${p.active}`);
+}
+
+/**
+ * Puts "@Label " in the message: in place of the "@word" being typed, or at the end (from the group info panel). The tag
+ * is kept by its label until the message is sent.
+ * @param {NonNullable<typeof chat>} c @param {string} tag
+ */
+function insertTag(c, tag) {
+  const t = c.el.querySelector('#ch-text');
+  const label = c.labels.get(tag);
+  const m = c.members?.find((x) => x.tag === tag);
+  if (!(t instanceof HTMLTextAreaElement) || !label || !m) return;
+  const caret = c.picker ? t.selectionStart ?? t.value.length : t.value.length;
+  const start = c.picker ? c.picker.start : caret;
+  const before = t.value.slice(0, start);
+  const lead = before === '' || /\s$/.test(before) ? '' : ' ';
+  const token = `${lead}@${label} `;
+  t.value = before + token + t.value.slice(caret);
+  const at = (before + token).length;
+  t.setSelectionRange(at, at);
+  c.draft = t.value;
+  c.picks.set(label, tag);
+  // The bubble shows "@Name" for a named member only: never a number (the text keeps its own digits).
+  if (m.name) c.names[tag] = m.name;
+  hidePicker(c);
+  grow();
+  t.focus();
+}
+
+/** Opens or closes the chat's menu (the header's dots). @param {NonNullable<typeof chat>} c @param {boolean} show */
+function toggleMenu(c, show) {
+  const menu = /** @type {HTMLElement} */ ($('.ch-menu', c.el));
+  menu.hidden = !show;
+  c.el.querySelector('[data-chat-menu]')?.setAttribute('aria-expanded', String(show));
+  if (show) /** @type {HTMLElement | null} */ (menu.querySelector('[data-chat-delete]'))?.focus();
+}
+
+/**
+ * Delete chat (November release, owner decision 2 Nov 2026): after a confirm that names the group and says what happens,
+ * the agent deletes the chat on the founder's phone's WhatsApp and hides it here. Deleted, or not surely: the chat is
+ * emptied here (a new message brings it back). Not deleted: nothing changes.
+ */
+async function deleteChat() {
+  const c = chat;
+  if (!c || c.deleting) return;
+  // With more than one phone, the group's own phone by name: the delete happens there (final review, item 4).
+  const where = c.phone ? `${c.phone}’s WhatsApp` : 'your phone’s WhatsApp';
+  const yes = await confirmDialog({
+    eyebrow: 'Delete chat',
+    title: `Delete the chat with ${c.groupName}?`,
+    text: `This deletes the chat on ${where} and hides it here. It can’t be undone. The agent’s saved messages and tasks stay, and the group stays approved: the agent keeps reading it, and a new message brings the chat back.`,
+    yes: 'Delete chat',
+  });
+  if (!yes || chat !== c) return;
+  c.deleting = true;
+  try {
+    const r = readDeleteResult(await post(`/clients/${encodeURIComponent(c.code)}/chat/delete`, { confirm: true }));
+    if (chat !== c) return;
+    if (r.state === 'failed') {
+      toast(r.code === 'whatsapp_not_connected' ? 'WhatsApp isn’t connected, so the chat was not deleted.' : 'The chat was not deleted.', false);
+      return;
+    }
+    toast(r.state === 'deleted' ? 'Chat deleted.' : `Hidden here. It may not have been deleted on ${c.phone ?? 'your phone'}: check WhatsApp.`, r.state === 'deleted');
+    // Emptied here at once; the dashboard's own messages still on their way stay.
+    c.messages.clear();
+    c.outbox = new Map([...c.outbox].filter(([, o]) => o.local === 'inflight'));
+    c.hasOlder = false;
+    c.cleared = true;
+    draw({ toEnd: true });
+    void loadNewest();
+  } catch (e) {
+    if (chat === c) toast(e instanceof ApiError ? e.message : 'The chat could not be deleted. Try again.', false);
+  } finally {
+    c.deleting = false;
+  }
+}
+
+/** Back to the chat from the group info panel. */
+function closeInfo() {
+  const c = chat;
+  if (!c) return;
+  const panel = /** @type {HTMLElement} */ ($('.ch-info', c.el));
+  panel.hidden = true;
+  panel.innerHTML = '';
+  /** @type {HTMLElement | null} */ (c.el.querySelector('.ch-who'))?.focus();
 }
 
 /**
@@ -303,15 +646,21 @@ function forget() {
  * @param {string} code @param {() => void} onBack
  */
 export function openChat(code, onBack) {
+  // The group's picture and name open its info, as in WhatsApp. The name is the sheet's title (the h2), as a button.
   const el = openChatLayer(`<div class="ch-head"><button class="icon-btn" type="button" data-chat-back aria-label="Back to the client">${icon('arrowL', 18)}</button>
-      <div class="ch-av" aria-hidden="true">${icon('users', 18)}</div><div class="grow-1 ch-title"><h2>Loading…</h2><small>${esc(code)} · stored messages</small></div>
-      <button class="icon-btn" type="button" data-close aria-label="Close the chat">${icon('close', 18)}</button></div>
-    <div class="ch-body" tabindex="0" aria-label="Messages"><button class="ch-older link" type="button" hidden>Load older messages</button>
+      <span class="ch-av" data-chat-info aria-hidden="true">${icon('users', 18)}</span><div class="grow-1 ch-title"><h2><button class="ch-who" type="button" data-chat-info aria-haspopup="dialog">Loading…</button></h2><small class="ch-sub">${esc(code)}</small></div>
+      <button class="icon-btn" type="button" data-chat-menu aria-haspopup="menu" aria-expanded="false" aria-controls="ch-menu" aria-label="Chat menu">${icon('dots', 18)}</button>
+      <button class="icon-btn" type="button" data-close aria-label="Close the chat">${icon('close', 18)}</button>
+      <div class="ch-menu" id="ch-menu" role="menu" aria-label="Chat menu" hidden><button type="button" role="menuitem" data-chat-delete>${icon('trash', 16)}Delete chat</button></div></div>
+    <div class="ch-body" tabindex="0" aria-label="Messages"><div class="ch-float" aria-hidden="true"><span></span></div><button class="ch-older link" type="button" hidden>Load older messages</button>
       <div class="ch-list" aria-live="polite"><p class="ch-empty">Loading the messages…</p></div></div>
-    <div class="ch-foot"></div>`, { onClose: forget });
+    <div class="ch-foot"></div>
+    <section class="ch-info" aria-label="Group info" hidden></section>`, { onClose: forget });
   chat = {
-    code, el, messages: new Map(), outbox: new Map(), hasOlder: false, loadingOlder: false, sendingOn: false, connected: false,
+    code, el, messages: new Map(), outbox: new Map(), hasOlder: false, loadingOlder: false, sendingOn: false, connected: false, phone: null,
     groupName: code, clientName: '', replyTo: null, draft: '', armed: false, onBack,
+    names: {}, members: null, reading: null, failed: null, labels: new Map(), picks: new Map(), picker: null, cleared: false, deleting: false,
+    floatTimer: 0, drawnAt: 0,
   };
   const body = /** @type {HTMLElement} */ ($('.ch-body', el));
   // Scrolling up near the top loads the page before; the button does the same for keyboards. Checked on scroll, and
@@ -320,16 +669,37 @@ export function openChat(code, onBack) {
     if (chat?.el === el && chat.armed && body.scrollTop < 300) void loadOlder();
   };
   body.addEventListener('scroll', nearTop, { passive: true });
+  body.addEventListener('scroll', floatDay, { passive: true });
   for (const type of ['wheel', 'touchmove', 'keydown']) body.addEventListener(type, () => requestAnimationFrame(nearTop), { passive: true });
   el.addEventListener('click', (e) => {
     const t = /** @type {Element} */ (e.target);
     if (!chat) return;
+    // The chat's menu: the dots open it; Delete chat asks first; a click anywhere else closes it.
+    const menuOpen = !(/** @type {HTMLElement} */ ($('.ch-menu', el))).hidden;
+    if (t.closest('[data-chat-menu]')) return toggleMenu(chat, !menuOpen);
+    if (t.closest('[data-chat-delete]')) {
+      toggleMenu(chat, false);
+      return void deleteChat();
+    }
+    if (menuOpen && !t.closest('.ch-menu')) toggleMenu(chat, false);
     if (t.closest('[data-chat-back]')) {
       const back = chat.onBack;
       closeDrawer(true);
       back();
       return;
     }
+    // Tagging: a member picked under the box, or tapped in the group info (the panel closes and the tag goes in).
+    const pick = /** @type {HTMLElement | null} */ (t.closest('[data-pick]'));
+    if (pick) return insertTag(chat, pick.dataset.pick ?? '');
+    const member = /** @type {HTMLElement | null} */ (t.closest('[data-tag]'));
+    if (member) {
+      const tag = member.dataset.tag ?? '';
+      closeInfo();
+      return insertTag(chat, tag);
+    }
+    if (t.id === 'ch-text') return void updatePicker(); // the caret moved
+    if (t.closest('[data-chat-info]')) return void openInfo();
+    if (t.closest('[data-info-back]')) return closeInfo();
     if (t.closest('.ch-older')) return void loadOlder();
     if (t.closest('[data-reply-cancel]')) {
       chat.replyTo = null;
@@ -359,14 +729,48 @@ export function openChat(code, onBack) {
     if (t.id !== 'ch-text' || !chat) return;
     chat.draft = t.value;
     grow();
+    void updatePicker();
+  });
+  // A member picked with the mouse keeps the box's focus and caret.
+  el.addEventListener('mousedown', (e) => {
+    if (/** @type {Element} */ (e.target).closest('[data-pick]')) e.preventDefault();
+  });
+  el.addEventListener('keyup', (e) => {
+    const t = /** @type {HTMLElement} */ (e.target);
+    if (t.id === 'ch-text' && ['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) void updatePicker();
   });
   el.addEventListener('keydown', (e) => {
+    const t = /** @type {HTMLElement} */ (e.target);
+    // The member picker, while it lists members: arrows move, Enter or Tab picks, Escape closes it (not the chat).
+    const p = chat?.picker;
+    const items = el.querySelectorAll('#ch-pick [data-pick]');
+    if (chat && p && t.id === 'ch-text' && items.length > 0 && ['ArrowDown', 'ArrowUp', 'Enter', 'Tab', 'Escape'].includes(e.key) && !e.isComposing) {
+      e.preventDefault();
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        return hidePicker(chat);
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') return insertTag(chat, /** @type {HTMLElement} */ (items[p.active] ?? items[0]).dataset.pick ?? '');
+      p.active = (p.active + (e.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length;
+      return void updatePicker();
+    }
     // With a keyboard and mouse, Enter sends (after the confirm) and Shift+Enter is a new line; on a phone, Enter is a
     // new line and the Send button sends, as in WhatsApp.
-    const t = /** @type {HTMLElement} */ (e.target);
     if (t.id === 'ch-text' && e.key === 'Enter' && !e.shiftKey && !e.isComposing && desk.matches) {
       e.preventDefault();
       void send();
+    }
+    // Escape closes the chat's menu, or leaves the group info for the chat; the layer's own Escape (closing the chat) is
+    // not reached then.
+    if (e.key === 'Escape' && chat && !(/** @type {HTMLElement} */ ($('.ch-menu', el))).hidden) {
+      e.stopPropagation();
+      toggleMenu(chat, false);
+      /** @type {HTMLElement | null} */ (el.querySelector('[data-chat-menu]'))?.focus();
+      return;
+    }
+    if (e.key === 'Escape' && !(/** @type {HTMLElement} */ ($('.ch-info', el))).hidden) {
+      e.stopPropagation();
+      closeInfo();
     }
   });
   void loadNewest(true);

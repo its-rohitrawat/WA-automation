@@ -14,6 +14,8 @@ export interface ApproveChange {
   code: string;
   emailDomains?: string[];
   meetingKeywords?: string[];
+  /** The reading phone it is read through (lane C): 1 to 5, phone 1 when left out. */
+  phone?: number;
 }
 
 export interface EditChange {
@@ -21,6 +23,8 @@ export interface EditChange {
   name?: string;
   emailDomains?: string[];
   meetingKeywords?: string[];
+  /** Moves the group to another reading phone ("Read through Phone N"). */
+  phone?: number;
 }
 
 export interface GroupChanges {
@@ -49,7 +53,7 @@ export interface GroupChangeResult {
   warning?: 'reload_failed';
 }
 
-export type GroupChangeField = 'code' | 'name' | 'groupId' | 'emailDomains' | 'meetingKeywords' | 'file';
+export type GroupChangeField = 'code' | 'name' | 'groupId' | 'emailDomains' | 'meetingKeywords' | 'phone' | 'file';
 
 /** A change the owner can fix: the message is safe to show, and names the group and field when known. */
 export class GroupChangeError extends Error {
@@ -136,6 +140,7 @@ export async function applyToDocument(
     if (e.name !== undefined) entry.name = checkName(e.name, e.groupId);
     if (e.emailDomains !== undefined) setList(entry, 'emailDomains', e.emailDomains, e.groupId);
     if (e.meetingKeywords !== undefined) setList(entry, 'meetingKeywords', e.meetingKeywords, e.groupId);
+    if (e.phone !== undefined) setPhone(entry, e.phone, e.groupId);
     if (!editedIds.includes(entry.groupId)) editedIds.push(entry.groupId);
   }
   for (const id of editedIds) {
@@ -160,6 +165,7 @@ export async function applyToDocument(
     const entry: RawEntry = { groupId: a.groupId, name: checkName(a.name, a.groupId), code };
     if (a.emailDomains !== undefined) setList(entry, 'emailDomains', a.emailDomains, a.groupId);
     if (a.meetingKeywords !== undefined) setList(entry, 'meetingKeywords', a.meetingKeywords, a.groupId);
+    if (a.phone !== undefined) setPhone(entry, a.phone, a.groupId);
     entries.push(entry);
     result.approved.push(changed(entry));
   }
@@ -177,6 +183,15 @@ export async function applyToDocument(
   // Nothing to change (for example an edit back to the same name): the file and its .bak stay as they are.
   const differs = text.replace(/\r\n/g, '\n') !== original.replace(/^﻿/, '').replace(/\r\n/g, '\n');
   return { text, result, differs };
+}
+
+/** A group's reading phone: 2 to 5 written as given; phone 1 (the default) leaves no field, so the file reads as before. */
+function setPhone(entry: RawEntry, phone: unknown, groupId: string): void {
+  if (typeof phone !== 'number' || !Number.isInteger(phone) || phone < 1 || phone > 5) {
+    throw new GroupChangeError("A group's phone is a number from 1 to 5.", 'phone', groupId);
+  }
+  if (phone === 1) delete (entry as Record<string, unknown>).phone;
+  else (entry as Record<string, unknown>).phone = phone;
 }
 
 function parseRaw(text: string): { clients: RawEntry[] } & Record<string, unknown> {

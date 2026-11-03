@@ -61,8 +61,19 @@ describe('customerProfile (Phase B)', () => {
     expect(existsSync(env.DATA_DIR)).toBe(true);
     expect(env.TENANT_ID).toBe(CUSTOMER);
     expect([env.STT_PROVIDER, env.VOICE_STT_PROVIDER]).toEqual(['none', 'none']); // the founder's paid speech is the founder's
-    expect([env.REPORT_ENABLED, env.MEETINGS_ENABLED, env.INVITES_GMAIL, env.PLATFORM_ENABLED, env.DASHBOARD_ASSISTANT]).toEqual([false, false, false, false, false]);
+    expect([env.REPORT_ENABLED, env.MEETINGS_ENABLED, env.INVITES_GMAIL, env.PLATFORM_ENABLED]).toEqual([false, false, false, false]);
     expect([env.AI_MODEL, env.DASHBOARD_PUBLIC_URL]).toEqual([founder.AI_MODEL, founder.DASHBOARD_PUBLIC_URL]);
+  });
+
+  it('the assistant follows the founder switch (November release piece 3), on the customer key only', () => {
+    for (const on of [true, false]) {
+      const founder = { ...founderEnv(), DASHBOARD_ASSISTANT: on };
+      expect(customerProfile(founder, { tenantId: CUSTOMER, aiKey: 'sk-ant-customer-placeholder' }).DASHBOARD_ASSISTANT, String(on)).toBe(on);
+      // Without a key of its own there is none at all: never the founder's, whatever the switch.
+      expect('ANTHROPIC_API_KEY' in customerProfile(founder, { tenantId: CUSTOMER, aiKey: null }), String(on)).toBe(false);
+    }
+    expect(founderEnv().DASHBOARD_ASSISTANT).toBe(true); // on by default
+    expect(customerProfile(founderEnv(), { tenantId: CUSTOMER, aiKey: 'sk-ant-customer-placeholder' }).ANTHROPIC_API_KEY).not.toBe(founderEnv().ANTHROPIC_API_KEY);
   });
 
   it('the data folder: a customer id only, directly inside DATA_DIR/tenants; no traversal, never the founder', () => {

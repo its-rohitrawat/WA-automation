@@ -376,3 +376,59 @@ describe('SwitchableGateway: earlier messages (history backfill)', () => {
     expect(got).toEqual([{ groups: [] }, { groups: [{ groupId: 'new@g.us', events: [] }] }]);
   });
 });
+
+describe('SwitchableGateway: group members and the Delete chat socket (November release)', () => {
+  const G = '120363777000000001@g.us';
+  /** An inner gateway that can read members and give a delete socket, and records each group it was asked for. */
+  class MembersGateway extends FakeGateway {
+    readonly members = [{ id: '919800000001@s.whatsapp.net', phoneNumber: '919800000001@s.whatsapp.net', lid: null, admin: false }];
+    readonly sock = { chatModify: async () => {} };
+    readonly asked: string[] = [];
+    readonly fresh: (boolean | undefined)[] = [];
+    async groupMembers(groupId: string, o?: { fresh?: boolean }) {
+      this.asked.push(groupId);
+      this.fresh.push(o?.fresh);
+      return this.members;
+    }
+    chatDeleteSocket(groupId: string) {
+      this.asked.push(groupId);
+      return this.sock;
+    }
+  }
+
+  it('asks the current gateway while it is open; null with none, or while it is not open', async () => {
+    const empty = new SwitchableGateway({ clock: manualClock(T0) });
+    expect(await empty.groupMembers(G)).toBeNull();
+    expect(empty.chatDeleteSocket(G)).toBeNull();
+    const inner = new MembersGateway('a');
+    const g = new SwitchableGateway({ inner, clock: manualClock(T0) });
+    g.start();
+    expect(await g.groupMembers(G)).toBeNull(); // not open yet
+    expect(g.chatDeleteSocket(G)).toBeNull();
+    expect(inner.asked).toEqual([]);
+    inner.setState('open');
+    expect(await g.groupMembers(G)).toBe(inner.members);
+    expect(g.chatDeleteSocket(G)).toBe(inner.sock);
+    expect(inner.asked).toEqual([G, G]);
+    await g.groupMembers(G, { fresh: true }); // a send with tags: fresh is passed on (final review, S2)
+    expect(inner.fresh).toEqual([undefined, true]);
+  });
+
+  it('after a swap the new gateway is asked; a gateway without these methods gives null', async () => {
+    const first = new MembersGateway('first');
+    first.state = 'open';
+    const g = new SwitchableGateway({ inner: first, clock: manualClock(T0) });
+    g.start();
+    const second = new MembersGateway('second');
+    second.state = 'open';
+    await g.swap(second);
+    expect(await g.groupMembers(G)).toBe(second.members);
+    expect(g.chatDeleteSocket(G)).toBe(second.sock);
+    expect(first.asked).toEqual([]);
+    const plain = new FakeGateway('plain');
+    plain.state = 'open';
+    await g.swap(plain);
+    expect(await g.groupMembers(G)).toBeNull();
+    expect(g.chatDeleteSocket(G)).toBeNull();
+  });
+});

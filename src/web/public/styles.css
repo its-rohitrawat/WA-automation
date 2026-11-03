@@ -41,7 +41,6 @@
 :root[data-theme="light"] .phone .chat { background: #EFEAE2 radial-gradient(rgba(11,20,26,.05) 1px, transparent 1px) 0 0/14px 14px; }
 :root[data-theme="light"] .phone .msg { background: #D9FDD3; color: #111B21; } :root[data-theme="light"] .phone .msg u { color: #027EB5; }
 :root[data-theme="light"] .phone .bar { background: #F0F2F5; color: #111B21; } :root[data-theme="light"] .phone { background: #FFFFFF; border-color: #E9EDEF; }
-:root[data-theme="light"] .ubars .b.today { background: var(--wa-fill); }
 :root[data-theme="light"] .qr { box-shadow: 0 0 0 6px rgba(0,168,132,.12), 0 10px 30px -10px rgba(11,20,26,.25); }
 * { box-sizing: border-box; }
 ::-webkit-scrollbar { width: 9px; height: 9px; } ::-webkit-scrollbar-track { background: transparent; }
@@ -141,14 +140,46 @@ a { color: inherit; text-decoration: none; }
 .nav a.locked { opacity: .55; }
 .nav a.locked > svg:last-child { margin-left: auto; width: 14px; height: 14px; }
 .nav a .count { margin-left: auto; font: 600 11px var(--mono); padding: 2px 7px; border-radius: 999px; background: rgba(217,79,99,.16); color: #f07585; }
-.app.collapsed .nav a span, .app.collapsed .nav a .count, .app.collapsed .nav-label, .app.collapsed .side-top span, .app.collapsed .side-health div { display: none; }
-.app.collapsed .nav a { justify-content: center; padding: 10px; }
-.side-health { margin-top: auto; display: flex; gap: 10px; align-items: center; padding: 12px; border-radius: 14px; background: var(--panel-2); border: 1px solid var(--line); font-size: 12.5px; }
+/* The menu's links scroll on a short screen, so the status monitor, Ask the assistant and Collapse at its foot always
+   show at full size (November release, change 10). The negative margin keeps the selected link's bar inside the box. */
+.nav { flex: 1 1 auto; min-height: 0; overflow-x: hidden; overflow-y: auto; margin: 0 -12px; padding: 0 12px 6px; }
+.nav::-webkit-scrollbar { width: 4px; } .nav::-webkit-scrollbar-thumb { background: var(--line-2); border: 0; border-radius: 4px; }
+@supports not selector(::-webkit-scrollbar) { .nav { scrollbar-width: thin; scrollbar-color: var(--line-2) transparent; } }
+.side-health, .collapse { flex: none; }
+.side-health { margin-top: 12px; display: flex; gap: 10px; align-items: center; padding: 12px; border-radius: 14px; background: var(--panel-2); border: 1px solid var(--line); font-size: 12.5px; }
 .side-health svg.ecg { flex: none; }
 .side-health b { display: block; font-size: 13px; }
 .side-health small { color: var(--muted); }
-.collapse { margin-top: 10px; display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 12px; border: 0; background: none; color: var(--faint); cursor: pointer; white-space: nowrap; }
-.app.collapsed .collapse span { display: none; } .app.collapsed .collapse { justify-content: center; } .app.collapsed .collapse svg { transform: scaleX(-1); }
+.collapse { margin-top: 10px; display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 12px; border: 1px solid transparent; background: none; color: var(--faint); cursor: pointer; white-space: nowrap;
+  transition: color 160ms ease, border-color 160ms ease, background-color 160ms ease; }
+.collapse > span:first-child { display: grid; }
+.collapse:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+@media (hover: hover) and (pointer: fine) { .collapse:hover { color: var(--text); } }
+/* Collapsed (a laptop only: on a phone the menu is a drawer with its words): icons with their tooltips, the logo, the
+   status monitor as a small dark screen whose line and lamp show the state (its words in a tooltip, and still read by
+   screen readers), and a clear button to open the menu again. */
+@media (min-width: 961px) {
+  .app.collapsed .nav a span, .app.collapsed .nav-label, .app.collapsed .side-top span:not(.logo-mark), .app.collapsed .collapse > span:last-child { display: none; }
+  .app.collapsed .side-top { justify-content: center; padding: 2px 0 18px; }
+  .app.collapsed .nav a { justify-content: center; padding: 10px; }
+  .app.collapsed .nav a.locked > svg:last-child { display: none; }
+  .app.collapsed .nav a .count { position: absolute; top: 6px; right: 8px; width: 9px; height: 9px; padding: 0; overflow: hidden; color: transparent; background: var(--s-overdue); border: 2px solid var(--bg-2); }
+  .app.collapsed .side-health { flex-direction: column; justify-content: center; gap: 6px; min-height: 52px; padding: 8px 0; background: #071014; border-color: #12302a; cursor: default; }
+  .app.collapsed .side-health > div { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .app.collapsed .side-health svg.ecg { width: 32px; height: 18px; stroke: #25D366; }
+  .app.collapsed .side-health::after { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #25D366; box-shadow: 0 0 0 3px rgba(37,211,102,.18); }
+  .app.collapsed .side-health.warn { border-color: rgba(226,169,59,.45); }
+  .app.collapsed .side-health.warn svg.ecg { stroke: #E2A93B; }
+  .app.collapsed .side-health.warn::after { background: #E2A93B; box-shadow: 0 0 0 3px rgba(226,169,59,.2); }
+  .app.collapsed .collapse { justify-content: center; width: 44px; height: 40px; margin: 10px auto 0; padding: 0; border-color: var(--line-2); background: var(--panel-2); color: var(--text); }
+  .app.collapsed .collapse svg { transform: scaleX(-1); }
+}
+@media (min-width: 961px) and (hover: hover) and (pointer: fine) { .app.collapsed .collapse:hover { border-color: var(--accent); color: var(--accent); } }
+/* On a phone the menu is a drawer: nothing to collapse, and a menu collapsed on a laptop still shows its words there
+   (assistant.css hides Ask the assistant's words only when collapsed on a laptop). */
+@media (max-width: 960px) {
+  .collapse { display: none; }
+}
 
 .top { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 14px; padding: 14px 28px; border-bottom: 1px solid var(--line);
   background: color-mix(in srgb, var(--bg) 82%, transparent); -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px); }
@@ -311,13 +342,38 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .note { margin-top: 14px; padding: 10px 12px; border-radius: 12px; background: var(--panel-2); color: var(--muted); font-size: 12.5px; display: flex; gap: 8px; }
 .note code { font: 500 12px var(--mono); color: var(--text); }
 
-/* usage bars */
-.ubars { position: relative; height: 200px; display: flex; align-items: flex-end; gap: 8px; padding-top: 10px; border-bottom: 1px solid var(--line); }
-.ubars .b { flex: 1; border-radius: 4px 4px 0 0; background: var(--s-open); position: relative; transform-origin: bottom; cursor: default; }
-.ubars .b.today { background: var(--green); }
-.capline { position: absolute; left: 0; right: 0; border-top: 1.5px dashed rgba(217,79,99,.6); }
-.capline span { position: absolute; right: 0; top: -20px; font: 500 11px var(--mono); color: #f07585; }
-.uaxis { display: flex; gap: 8px; margin-top: 6px; } .uaxis span { flex: 1; text-align: center; font: 400 10.5px var(--mono); color: var(--faint); }
+/* AI usage chart (November release, change 4): one US$ axis, a recessive grid, the cap as a dashed line with its label,
+   today in the accent colour, a column per day that shows its tip on hover (also a day at $0). */
+.u-card { display: flex; flex-direction: column; }
+.u-card .card-head { flex-wrap: wrap; }
+.u-keys { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--muted); }
+.u-keys span { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.u-key { width: 10px; height: 10px; border-radius: 3px; background: var(--u-bar); }
+.u-key.is-today { background: var(--u-today); }
+.u-key.is-cap { width: 16px; height: 0; border-radius: 0; background: none; border-top: 2px dashed var(--s-overdue); }
+.uchart { flex: 1; display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-rows: minmax(190px, 1fr) auto; column-gap: 10px; min-height: 230px; padding-top: 8px; }
+.u-card { --u-bar: color-mix(in srgb, var(--s-open) 62%, var(--panel)); --u-today: var(--green); }
+:root[data-theme="light"] .u-card { --u-bar: color-mix(in srgb, var(--s-open) 45%, var(--panel)); --u-today: var(--wa-fill); }
+.uyaxis { position: relative; min-width: 30px; }
+.uyaxis span { position: absolute; right: 0; transform: translateY(50%); font: 400 10.5px/1 var(--mono); color: var(--faint); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.uplot { position: relative; }
+.ugrid { position: absolute; left: 0; right: 0; height: 0; border-top: 1px solid var(--line); }
+.ugrid.is-base { border-top-color: var(--line-2); }
+.ubars { position: absolute; inset: 0; display: flex; align-items: stretch; gap: 8px; }
+.ucol { flex: 1; min-width: 0; display: flex; align-items: flex-end; border-radius: 6px 6px 0 0; cursor: default; transition: background-color 120ms ease; }
+.ucol .b { width: 100%; border-radius: 4px 4px 0 0; background: var(--u-bar); transform-origin: bottom; }
+.ucol.today .b { background: var(--u-today); }
+.ucol.over .b { background: var(--s-warn); }
+.ucol:hover { background: color-mix(in srgb, var(--text) 6%, transparent); }
+.capline { position: absolute; left: 0; right: 0; height: 0; border-top: 1.5px dashed var(--s-overdue); pointer-events: none; z-index: 1; }
+.capline span { position: absolute; left: 4px; bottom: 4px; padding: 1px 6px; border-radius: 6px; font: 500 11px/1.4 var(--mono); color: #f07585; background: color-mix(in srgb, var(--panel) 85%, transparent); white-space: nowrap; }
+.capline.is-top span { bottom: auto; top: 4px; }
+:root[data-theme="light"] .capline span { color: #b23247; }
+.uaxis { grid-column: 2; display: flex; gap: 8px; margin-top: 8px; }
+.uaxis span { flex: 1; min-width: 0; text-align: center; font: 400 10.5px var(--mono); color: var(--faint); }
+.uaxis span.today { color: var(--text); font-weight: 600; }
+.u-none { position: absolute; left: 50%; top: 45%; transform: translate(-50%, -50%); margin: 0; padding: 0 12px; font-size: 13px; color: var(--muted); text-align: center; }
+@media (max-width: 640px) { .ubars, .uaxis { gap: 3px; } .uaxis span { font-size: 9.5px; letter-spacing: -0.02em; } .uchart { min-height: 210px; column-gap: 6px; } }
 
 /* automations */
 .phone { width: 280px; border-radius: 34px; padding: 12px; background: #0b141a; border: 1px solid rgba(233,237,239,.12); box-shadow: var(--shadow); margin: 0 auto; }
@@ -326,6 +382,30 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .phone .chat { min-height: 220px; padding: 14px 10px; background: #0b141a radial-gradient(rgba(233,237,239,.04) 1px, transparent 1px) 0 0/14px 14px; border-radius: 0 0 22px 22px; }
 .phone .msg { background: #005C4B; color: #E9EDEF; padding: 9px 11px 6px; border-radius: 12px 12px 12px 4px; font-size: 13.5px; max-width: 92%; line-height: 1.45; }
 .phone .msg u { color: var(--sky); text-decoration: none; } .phone .msg small { display: block; text-align: right; font: 400 10.5px var(--mono); opacity: .6; margin-top: 4px; }
+/* Automations: the morning message editor (November release, change 5). On a laptop the preview stays beside the
+   settings and the editor (sticky); on a phone it comes after the editor. Placeholders sit beside the text on a wide
+   card, below it on a narrow one. */
+@media (min-width: 961px) {
+  .auto-grid .auto-preview { grid-column: 8 / span 5; grid-row: 1 / span 2; align-self: start; position: sticky; top: 92px; }
+}
+.mm-card .mm-intro { margin: 0 0 12px; font-size: 13px; }
+.mm-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(230px, 0.85fr); gap: 18px; align-items: start; }
+.mm-text { display: block; width: 100%; min-height: 156px; resize: vertical; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line-2); background: var(--panel-2); color: var(--text); font: 14px/1.5 var(--font); }
+.mm-text:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-color: transparent; }
+.mm-meta { display: flex; justify-content: flex-end; margin-top: 6px; }
+.mm-count { font: 500 11.5px var(--mono); color: var(--faint); font-variant-numeric: tabular-nums; } .mm-count.is-over { color: var(--s-overdue); }
+.mm-unknown { margin: 6px 0 0; padding: 8px 10px; border-radius: 10px; font-size: 12.5px; color: var(--text); background: color-mix(in srgb, var(--s-warn) 13%, var(--panel)); overflow-wrap: anywhere; }
+.mm-places .h4 { margin: 0 0 8px; }
+.mm-places ul { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 7px 10px; align-items: center; }
+.mm-places li { display: contents; }
+.mm-ph { justify-self: start; }
+.mm-ph { padding: 4px 8px; border-radius: 8px; border: 1px solid var(--line-2); background: var(--panel-2); color: var(--accent); font: 500 12px/1.3 var(--mono); cursor: pointer; white-space: nowrap; transition: border-color 140ms ease; }
+.mm-ph:hover { border-color: var(--accent); } .mm-ph:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
+.mm-ph-text { min-width: 0; display: flex; flex-direction: column; font-size: 12px; line-height: 1.3; color: var(--muted); }
+.mm-ph-text b { font: 500 12px/1.4 var(--mono); color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mm-card .mm-err { margin-top: 10px; }
+.mm-preview { white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 1200px) { .mm-body { grid-template-columns: minmax(0, 1fr); } }
 .steps { list-style: none; counter-reset: s; margin: 10px 0 0; padding: 0; display: grid; gap: 10px; }
 .steps li { counter-increment: s; display: flex; gap: 12px; align-items: flex-start; font-size: 13.5px; }
 .steps li::before { content: counter(s); flex: none; width: 24px; height: 24px; border-radius: 8px; display: grid; place-items: center; font: 600 12px var(--mono); background: var(--panel-2); color: var(--accent); }
@@ -465,8 +545,15 @@ button[disabled] { cursor: not-allowed; opacity: .55; }
 .drawer .syncline small { color: var(--muted); font-size: 12.5px; }
 @media (max-width: 520px) { .drawer .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (prefers-reduced-motion: reduce) { .ccard.busy::before, .cstat .dot, .drawer .status::before, .drawer .status .dot { animation: none; } }
-/* A Google card's title is its email: it wraps instead of running under the state pill. */
+/* A card's title wraps instead of running under the state pill. */
 .conn .top-row .grow-1 { min-width: 0; } .conn h3 { overflow-wrap: anywhere; }
+/* Cards with long text in their title (owner follow-up, 2 Nov): a Google card's whole email, a phone's name and
+   WhatsApp's name for it. The title takes its own line the card's full width, under the icon and the state. An email is
+   never cut: it wraps between its pieces, after the @ and before a dot (never at a hyphen, which would read as part of
+   it), and inside a piece only when that piece alone is wider than the card; the email is its tooltip too. */
+.conn-stack .top-row { flex-wrap: wrap; } .conn-stack .top-row .grow-1 { order: 1; flex: 1 0 100%; } .conn-stack .top-row .pill { margin-left: auto; }
+.conn .em-part { display: inline-block; max-width: 100%; }
+.conn .wa-name { overflow-wrap: anywhere; }
 
 /* Connections dialogs and setup mode (D3) */
 /* Centred without a transform, so the open animation's scale never fights the centring. */
@@ -511,9 +598,19 @@ button[disabled] { cursor: not-allowed; opacity: .55; }
 .g-row.selected { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); background: color-mix(in srgb, var(--accent) 8%, var(--panel-2)); }
 .li.g-row.selected { background: color-mix(in srgb, var(--accent) 7%, transparent); }
 .li .g-ic { background: transparent; }
-.g-all { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); cursor: pointer; user-select: none; }
-.g-all input { width: 15px; height: 15px; margin: 0; accent-color: var(--accent); }
-.g-phone-head { display: flex; justify-content: flex-end; margin: 0 4px 8px; }
+/* Groups: Select all (November release, change 9). Its box sits in the rows' tick-box column (a board row's padding plus
+   its border on a laptop, the 34px icon column on a phone); its count says none, some or all. */
+.g-allbar { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; min-height: 34px; padding: 0 13px; margin-top: -6px; }
+.g-all { display: inline-flex; align-items: center; gap: 10px; min-width: 0; font-size: 13px; font-weight: 500; color: var(--muted); cursor: pointer; user-select: none; }
+.g-all-box { width: 18px; display: grid; justify-items: start; flex: none; }
+.g-all:hover, .g-allbar.on .g-all { color: var(--text); }
+.g-all-count { font: 500 12px/1.2 var(--mono); color: var(--faint); white-space: nowrap; text-align: right; }
+.g-allbar.on .g-all-count { color: var(--accent); }
+.phone-list .g-allbar { padding: 0; margin: -6px 0 0; min-height: 44px; }
+.phone-list .g-all { gap: 12px; }
+.phone-list .g-all-box { width: 34px; justify-items: center; }
+.phone-list > .li:first-child { border-top: 0; }
+.g-head-count { font: 500 12px/1 var(--mono); color: var(--faint); padding: 4px 8px; border-radius: 999px; background: var(--panel-2); }
 .g-ignored-list .li:first-child { border-top: 0; }
 .selbar { flex-wrap: wrap; justify-content: center; transition: bottom 220ms var(--ease-out); }
 .selbar.lift { bottom: calc(max(18px, env(safe-area-inset-bottom)) + 60px); }
@@ -538,25 +635,41 @@ button[disabled] { cursor: not-allowed; opacity: .55; }
 
 /* Open chat: a phone-sized sheet in WhatsApp's own colours (the whole screen on a phone) */
 .chat-sheet { --ch-wall: #0B141A; --ch-in: #202C33; --ch-out: #005C4B; --ch-ink: #E9EDEF; --ch-meta: rgba(233,237,239,.6); --ch-bar: #202C33; --ch-quote: rgba(0,0,0,.22);
+  --ch-pill: #182229; --ch-field: #2A3942; --ch-dots: rgba(233,237,239,.035); --ch-thumb: rgba(233,237,239,.18); --ch-focus: rgba(37,211,102,.55);
   position: fixed; inset: 16px; margin: auto; z-index: 61; width: min(440px, calc(100vw - 32px)); height: min(900px, calc(100dvh - 32px)); display: flex; flex-direction: column;
   border-radius: 22px; overflow: hidden; background: var(--ch-wall); color: var(--ch-ink); border: 1px solid var(--line-2); box-shadow: 0 30px 80px -30px rgba(0,0,0,.8); }
-:root[data-theme="light"] .chat-sheet { --ch-wall: #EFEAE2; --ch-in: #FFFFFF; --ch-out: #D9FDD3; --ch-ink: #111B21; --ch-meta: #667781; --ch-bar: #F0F2F5; --ch-quote: rgba(11,20,26,.06); }
+:root[data-theme="light"] .chat-sheet { --ch-wall: #EFEAE2; --ch-in: #FFFFFF; --ch-out: #D9FDD3; --ch-ink: #111B21; --ch-meta: #667781; --ch-bar: #F0F2F5; --ch-quote: rgba(11,20,26,.06);
+  --ch-pill: #FFFFFF; --ch-field: #FFFFFF; --ch-dots: rgba(11,20,26,.05); --ch-thumb: rgba(11,20,26,.2); --ch-focus: rgba(0,128,105,.5); }
+/* Thin, see-through scrollbars inside the chat, not the dashboard's green ones */
+.chat-sheet * { scrollbar-width: thin; scrollbar-color: var(--ch-thumb) transparent; }
+.chat-sheet ::-webkit-scrollbar { width: 6px; height: 6px; }
+.chat-sheet ::-webkit-scrollbar-thumb { background: var(--ch-thumb); border: 0; border-radius: 6px; }
 .ch-head { display: flex; align-items: center; gap: 10px; padding: 10px 12px; background: var(--ch-bar); border-bottom: 1px solid var(--line); }
 .ch-head .icon-btn { color: var(--ch-meta); }
 .ch-av { width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center; flex: none; background: color-mix(in srgb, var(--green) 22%, var(--ch-in)); color: var(--green); }
 .ch-title { min-width: 0; } .ch-title h2 { margin: 0; font-size: 15.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ch-title small { color: var(--ch-meta); font-size: 12px; }
-.ch-body { flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 10px 12px 14px; }
+.ch-body { position: relative; flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 10px 14px 14px;
+  background: var(--ch-wall) radial-gradient(var(--ch-dots) 1px, transparent 1px) 0 0/14px 14px; }
 .ch-body:focus-visible { outline: 2px solid var(--link); outline-offset: -2px; }
 .ch-older { display: block; margin: 4px auto 10px; font-size: 12.5px; }
 .ch-empty { text-align: center; color: var(--ch-meta); font-size: 13px; margin: 40px 0; }
-.ch-day { display: flex; justify-content: center; margin: 12px 0 8px; position: sticky; top: 0; z-index: 1; }
-.ch-day span { padding: 5px 12px; border-radius: 8px; background: var(--ch-bar); color: var(--ch-meta); font-size: 12px; box-shadow: 0 1px 1px rgba(0,0,0,.12); }
+/* The days: in the list at rest; while scrolling, the top one also floats (chat.js floatDay), then fades */
+.ch-day { display: flex; justify-content: center; margin: 12px 0 8px; }
+.ch-day span, .ch-float span { padding: 5px 12px; border-radius: 8px; background: var(--ch-pill); color: var(--ch-meta); font-size: 12.5px; box-shadow: 0 1px 1px rgba(0,0,0,.12); }
+.ch-float { position: sticky; top: 0; z-index: 2; height: 0; display: flex; justify-content: center; pointer-events: none; }
+.ch-float span { margin-top: 8px; box-shadow: 0 2px 10px -2px rgba(0,0,0,.4); opacity: 0; transform: translateY(-4px); transition: opacity 220ms ease, transform 220ms var(--ease-out); }
+.ch-float span:empty { display: none; }
+.ch-float.on span { opacity: 1; transform: none; transition-duration: 120ms; }
+/* A run of messages by one sender sits close; its first has more room above and the bubble's tail */
 .ch-row { display: flex; align-items: center; gap: 4px; margin: 2px 0; }
+.ch-row.first { margin-top: 10px; } .ch-day + .ch-row { margin-top: 0; }
 .ch-row.out { flex-direction: row-reverse; }
 .ch-bub { position: relative; max-width: min(82%, 520px); padding: 6px 9px 6px; border-radius: 10px; background: var(--ch-in); box-shadow: 0 1px 1px rgba(0,0,0,.13); font-size: 14px; line-height: 1.4; }
 .ch-row.out .ch-bub { background: var(--ch-out); }
-.ch-row.in + .ch-row.out, .ch-row.out + .ch-row.in, .ch-day + .ch-row { margin-top: 8px; }
+.ch-row.first .ch-bub::before { content: ""; position: absolute; top: 0; width: 8px; height: 13px; background: inherit; }
+.ch-row.in.first .ch-bub { border-top-left-radius: 0; } .ch-row.in.first .ch-bub::before { left: -8px; clip-path: polygon(0 0, 100% 0, 100% 100%); }
+.ch-row.out.first .ch-bub { border-top-right-radius: 0; } .ch-row.out.first .ch-bub::before { right: -8px; clip-path: polygon(0 0, 100% 0, 0 100%); }
 .ch-bub p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .ch-bub .ch-tr { margin: 4px 0 2px; font-style: italic; opacity: .9; }
 .ch-name { display: block; font-size: 12.5px; font-weight: 600; margin-bottom: 2px; overflow-wrap: anywhere; }
@@ -576,8 +689,10 @@ button[disabled] { cursor: not-allowed; opacity: .55; }
 @media (hover: none) { .ch-reply { opacity: .85; } }
 .ch-foot { padding: 8px 10px calc(8px + env(safe-area-inset-bottom)); background: var(--ch-bar); border-top: 1px solid var(--line); }
 .ch-compose { display: flex; align-items: flex-end; gap: 8px; }
-.ch-compose textarea { flex: 1; min-width: 0; resize: none; max-height: 140px; padding: 10px 14px; border-radius: 20px; border: 1px solid var(--line); background: var(--ch-in); color: var(--ch-ink); font: 14.5px/1.4 var(--font); }
-.ch-compose textarea:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
+/* The box: a rounded field like WhatsApp's that grows to about 5 lines (chat.js grow), with a soft green ring on focus */
+.ch-compose textarea { flex: 1; min-width: 0; height: 42px; resize: none; max-height: 124px; overflow-y: hidden; padding: 11px 16px; border-radius: 21px; border: 0; background: var(--ch-field); color: var(--ch-ink); font: 15px/20px var(--font); }
+.ch-compose textarea::placeholder { color: var(--ch-meta); }
+.ch-compose textarea:focus-visible { outline: none; box-shadow: 0 0 0 1.5px var(--ch-focus); }
 .ch-send { flex: none; width: 42px; height: 42px; border-radius: 50%; border: 0; display: grid; place-items: center; background: var(--green); color: #06251a; cursor: pointer; }
 :root[data-theme="light"] .ch-send { background: #008069; color: #fff; }
 .ch-send:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
@@ -591,11 +706,51 @@ button[disabled] { cursor: not-allowed; opacity: .55; }
 :root[data-theme="light"] .chat-sheet .n0 { color: #027EB5; } :root[data-theme="light"] .chat-sheet .n1 { color: #B5502A; } :root[data-theme="light"] .chat-sheet .n2 { color: #5E6B12; }
 :root[data-theme="light"] .chat-sheet .n3 { color: #AD2F83; } :root[data-theme="light"] .chat-sheet .n4 { color: #00796B; } :root[data-theme="light"] .chat-sheet .n5 { color: #8C5A00; }
 :root[data-theme="light"] .chat-sheet .n6 { color: #5050C8; } :root[data-theme="light"] .chat-sheet .n7 { color: #B8303F; }
-@media (max-width: 600px) { .chat-sheet { inset: 0; width: 100vw; height: 100dvh; border-radius: 0; border: 0; } }
-@media (prefers-reduced-motion: reduce) { .ch-reply { transition: none; } }
+/* Open chat's group info (November release): the group's picture and name open it, over the chat, as in WhatsApp */
+.ch-av[data-chat-info] { cursor: pointer; }
+.ch-who { all: unset; display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; border-radius: 6px; }
+.ch-who:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+.ch-info { position: absolute; inset: 0; z-index: 2; display: flex; flex-direction: column; background: var(--ch-wall); color: var(--ch-ink); }
+.ch-info[hidden] { display: none; }
+.ch-info-head { display: flex; align-items: center; gap: 10px; padding: 10px 12px; background: var(--ch-bar); border-bottom: 1px solid var(--line); font-size: 15.5px; }
+.ch-info-head .icon-btn { color: var(--ch-meta); }
+.ch-info-body { flex: 1; overflow-y: auto; overscroll-behavior: contain; }
+.ch-info-top { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 22px 16px 16px; background: var(--ch-bar); text-align: center; }
+.ch-info-top h3 { margin: 6px 0 0; font-size: 19px; font-weight: 600; overflow-wrap: anywhere; }
+.ch-info-av { width: 88px; height: 88px; border-radius: 50%; display: grid; place-items: center; background: color-mix(in srgb, var(--green) 22%, var(--ch-in)); color: var(--green); }
+.ch-info-count { margin: 0; font-size: 13px; color: var(--ch-meta); }
+.ch-mems { list-style: none; margin: 8px 0 0; padding: 0; background: var(--ch-bar); }
+.ch-mem { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--line); min-height: 56px; }
+.ch-mem-av { width: 40px; height: 40px; border-radius: 50%; flex: none; display: grid; place-items: center; background: var(--ch-in); color: var(--ch-meta); }
+.ch-mem-text { min-width: 0; display: flex; flex-direction: column; }
+.ch-mem-text b { font-weight: 500; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ch-mem-text small { font-size: 12.5px; color: var(--ch-meta); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ch-admin { flex: none; font-size: 11.5px; padding: 2px 8px; border-radius: 6px; color: var(--green); background: color-mix(in srgb, var(--green) 14%, transparent); }
+:root[data-theme="light"] .ch-admin { color: #008069; }
+/* Tagging (November release): "@Name" in a message, the member picker above the box, members tappable in Group info */
+.ch-at { color: #53BDEB; font-weight: 500; }
+:root[data-theme="light"] .ch-at { color: #027EB5; }
+.ch-mem-btn { box-sizing: border-box; width: 100%; margin: 0; border: 0; border-bottom: 1px solid var(--line); background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.ch-mem-btn:hover { background: color-mix(in srgb, var(--ch-ink) 6%, transparent); }
+.ch-mem-btn:focus-visible { outline: 2px solid var(--link); outline-offset: -2px; }
+.ch-pick { max-height: 232px; overflow-y: auto; margin: 0 0 6px; border-radius: 10px; background: var(--ch-in); border: 1px solid var(--line); box-shadow: 0 8px 24px -12px rgba(0,0,0,.5); }
+.ch-pick[hidden] { display: none; }
+.ch-pick-item { all: unset; box-sizing: border-box; display: flex; align-items: center; gap: 10px; width: 100%; padding: 7px 10px; cursor: pointer; }
+.ch-pick-item .ch-mem-av { width: 32px; height: 32px; }
+.ch-pick-item.on, .ch-pick-item:hover { background: color-mix(in srgb, var(--ch-ink) 8%, transparent); }
+.ch-pick-note { margin: 0; padding: 10px 12px; font-size: 13px; color: var(--ch-meta); }
+/* Delete chat (November release): the chat's menu, under the header's dots */
+.ch-head { position: relative; }
+.ch-menu { position: absolute; top: calc(100% - 4px); right: 10px; z-index: 3; min-width: 190px; padding: 6px 0; border-radius: 10px; background: var(--ch-in); border: 1px solid var(--line); box-shadow: 0 10px 30px -12px rgba(0,0,0,.6); }
+.ch-menu[hidden] { display: none; }
+.ch-menu button { all: unset; box-sizing: border-box; display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 16px; font-size: 14.5px; color: var(--ch-ink); cursor: pointer; }
+.ch-menu button:hover, .ch-menu button:focus-visible { background: color-mix(in srgb, var(--ch-ink) 8%, transparent); }
+@media (max-width: 600px) {
+  .chat-sheet { inset: 0; width: 100vw; height: 100dvh; border-radius: 0; border: 0; }
+  html:has(> body .chat-sheet) { overflow: hidden; } /* the screen behind shows no scrollbar beside the full-screen chat */
+}
+@media (prefers-reduced-motion: reduce) { .ch-reply, .ch-float span { transition: none; } }
 
 /* The confirm dialog's exact text (the message about to be sent) */
 .m-quote { margin: 12px 0 0; padding: 10px 12px; max-height: 40vh; overflow-y: auto; border-radius: 10px; border-left: 4px solid var(--green); background: var(--panel-2);
   white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.45; }
-/* A warning note (Settings: the ban risk) */
-.note.warn-note { background: color-mix(in srgb, var(--s-warn) 12%, var(--panel)); color: var(--text); } .note.warn-note svg { color: var(--s-warn); flex: none; }

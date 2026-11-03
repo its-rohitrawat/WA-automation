@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  Assistant, MAX_CALLS, SYSTEM_PROMPT, type AssistantAi, type AssistantBlock, type AssistantEvent, type AssistantMessage, type AssistantTurn,
+  Assistant, history, MAX_CALLS, RUNS_MAX, SYSTEM_PROMPT, type AssistantAi, type AssistantBlock, type AssistantEvent, type AssistantMessage, type AssistantTurn,
 } from '../../src/assistant/assistant.ts';
 import { ASSISTANT_SETTINGS, PENDING_TTL_MS, PendingActions, runProposal, type ProposalCard } from '../../src/assistant/proposals.ts';
 import { asData, scrub } from '../../src/assistant/tools.ts';
@@ -9,6 +9,7 @@ import { SettingsStore } from '../../src/config/settingsStore.ts';
 import type { AgentStatus } from '../../src/control/agentControl.ts';
 import { ControlError, type AuditEntry } from '../../src/control/errors.ts';
 import { taskDetail } from '../../src/control/taskQueries.ts';
+import { chatMessages, getChat, listChats, type ChatSummary } from '../../src/store/assistantChats.ts';
 import type { Db } from '../../src/store/db.ts';
 import { insertMessage } from '../../src/store/messages.ts';
 import { upsertPerson } from '../../src/store/people.ts';
@@ -57,7 +58,7 @@ function results(messages: AssistantMessage[]): { content: string; is_error?: bo
   return (last.content as { type: string; content: string; is_error?: boolean }[]).filter((b) => b.type === 'tool_result');
 }
 
-async function setup(o: { ai: FakeAi; cap?: number; clock?: ManualClock }) {
+async function setup(o: { ai: AssistantAi; cap?: number; clock?: ManualClock; customer?: boolean }) {
   const { db, ids } = await seeded();
   const clock = o.clock ?? manualClock(NOW);
   const spend = new SpendGuard({ db, clock, capUsd: o.cap ?? 10 });
@@ -66,17 +67,23 @@ async function setup(o: { ai: FakeAi; cap?: number; clock?: ManualClock }) {
   const status: AgentStatus = { at: NOW, up: true, line: { ok: true, text: 'All good' }, parts: [], lastMessageAt: null, spentToday: 0, capUsd: o.cap ?? 10 };
   const assistant = new Assistant({
     ai: o.ai, paid: spend, prices: PRICES, pending, settings, log: silentLogger(), clock, db, control: { status: async () => status }, spend, voiceLocal: false,
+    ...(o.customer ? { customer: true } : {}),
   });
   const task = await createTask(db, {
     clientId: ids.sharma, side: 'us', title: 'Send the revised quote', category: 'design', priority: 'medium', assignedTo: 'Rohit', askedBy: null,
     raisedOn: '2026-10-18', deadline: '2026-10-25', latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'whatsapp',
   }, NOW);
-  const run = async (q: string, who = OWNER) => {
+  /** The chat the latest question went to. */
+  let chat: ChatSummary | undefined;
+  /** A question: in a new chat, or in `chatId`'s. The events the browser would get after the chat line. */
+  const run = async (q: string, who = OWNER, chatId?: number) => {
     const events: AssistantEvent[] = [];
-    await assistant.ask(who, q, (e) => events.push(e));
+    await assistant.ask(who, { question: q, ...(chatId === undefined ? {} : { chatId }) }, (c) => {
+      chat = c;
+    }, (e) => events.push(e));
     return events;
   };
-  return { db, ids, clock, spend, pending, settings, assistant, task, run };
+  return { db, ids, clock, spend, pending, settings, assistant, task, run, chat: () => chat! };
 }
 
 /** The spend rows, once every booking written behind a call is in (spend.flushed()). */
@@ -100,7 +107,7 @@ describe('Assistant: answers with read tools', () => {
     const events = await run('What is open for Sharma?');
     expect(events.filter((e) => e.type === 'tool')).toEqual([{ type: 'tool', label: 'Looking at tasks' }]);
     expect(events.filter((e) => e.type === 'text').map((e) => (e as { text: string }).text).join('')).toBe('Let me look.\n\nSharma has 1 open task: SHA-001.');
-    expect(events.at(-1)).toEqual({ type: 'done', costUsd: 0.02, calls: 2 });
+    expect(events.at(-1)).toEqual({ type: 'done', costUsd: 0.02, calls: 2, status: 'done' });
     expect(await spendRows(db, spend)).toEqual([{ kind: 'ai', usd: 0.01, detail: 'assistant call' }, { kind: 'ai', usd: 0.01, detail: 'assistant call' }]);
     // The system prompt says tool data is untrusted and that changes need the owner's Confirm.
     expect(ai.systems[0]).toBe(SYSTEM_PROMPT);
@@ -140,7 +147,7 @@ describe('Assistant: answers with read tools', () => {
     spend.record('ai', 0.05, 'batch 1');
     const events = await run('hello');
     expect(ai.sent).toHaveLength(0);
-    expect(events).toEqual([{ type: 'done', costUsd: 0, calls: 1, note: "Today's AI spend cap is reached, so the assistant is paused until tomorrow." }]);
+    expect(events).toEqual([{ type: 'done', costUsd: 0, calls: 1, status: 'failed', note: "Today's AI spend cap is reached, so the assistant is paused until tomorrow." }]);
   });
 
   it('a refusal ends the answer with a plain note', async () => {
@@ -322,30 +329,194 @@ describe('Assistant: changes wait for the owner\'s Confirm', () => {
   });
 });
 
-describe('Assistant: the chat, per session', () => {
-  it('keeps earlier questions and answers as text, and forgets them on New chat and when the session ends', async () => {
+/** FakeAi that also records the screens open_screen was offered on each call. */
+class ToolsAi extends FakeAi {
+  readonly screens: string[][] = [];
+  override async turn(req: { system: string; messages: AssistantMessage[]; tools?: { name: string; input_schema: unknown }[] }, onText: (d: string) => void): Promise<AssistantTurn> {
+    const open = req.tools?.find((t) => t.name === 'open_screen');
+    this.screens.push((open?.input_schema as { properties: { screen: { enum: string[] } } } | undefined)?.properties.screen.enum ?? []);
+    return super.turn(req, onText);
+  }
+}
+
+/** A Claude that streams its text in two parts with a gate between them (an answer still running). */
+class GatedAi implements AssistantAi {
+  readonly attempts = 1;
+  calls = 0;
+  #open!: () => void;
+  readonly gate = new Promise<void>((r) => {
+    this.#open = r;
+  });
+  /** Resolves once the first call has streamed its first part. */
+  readonly started: Promise<void>;
+  #started!: () => void;
+  readonly turns: number;
+  constructor(turns = 1) {
+    this.turns = turns;
+    this.started = new Promise<void>((r) => {
+      this.#started = r;
+    });
+  }
+  open(): void {
+    this.#open();
+  }
+  async turn(_req: unknown, onText: (d: string) => void): Promise<AssistantTurn> {
+    this.calls++;
+    onText('Part one. ');
+    this.#started();
+    await this.gate;
+    onText('Part two.');
+    const more = this.calls < this.turns;
+    return { content: more ? [use('get_overview', {})] : [text('Part one. Part two.')], stopReason: more ? 'tool_use' : 'end_turn', costUsd: 0.01, fallbackUsed: false };
+  }
+}
+
+describe('Assistant: a customer’s workspace (November release, piece 3)', () => {
+  it('is never offered, told of or linked to Connections or AI usage; the founder’s has every screen', async () => {
+    const steps = () => [
+      () => ({ content: [use('open_screen', { screen: 'usage' }), use('open_screen', { screen: 'connections' }), use('open_screen', { screen: 'audit' })] }),
+      () => ({ content: [text('ok')] }),
+    ];
+    const customerAi = new ToolsAi(steps());
+    const { run } = await setup({ ai: customerAi, customer: true });
+    const events = await run('show me my usage');
+    expect(customerAi.screens[0]).not.toContain('usage');
+    expect(customerAi.screens[0]).not.toContain('connections');
+    expect(customerAi.screens[0]).toEqual(['overview', 'clients', 'tasks', 'meetings', 'activity', 'tracker', 'automations', 'audit', 'settings']);
+    expect(customerAi.systems[0]).toContain('It has no Connections or AI usage screen: never mention, offer or point to them.');
+    expect(events.filter((e) => e.type === 'navigate').map((e) => (e as { screen: string }).screen)).toEqual(['audit']);
+    expect(results(customerAi.sent[1]!).map((r) => r.content).slice(0, 2)).toEqual(['That screen is not in this workspace.', 'That screen is not in this workspace.']);
+
+    const founderAi = new ToolsAi(steps());
+    const founder = await setup({ ai: founderAi });
+    const founderEvents = await founder.run('show me my usage');
+    expect(founderAi.screens[0]).toContain('usage');
+    expect(founderAi.systems[0]).toBe(SYSTEM_PROMPT);
+    expect(founderEvents.filter((e) => e.type === 'navigate').map((e) => (e as { screen: string }).screen)).toEqual(['usage', 'connections', 'audit']);
+  });
+});
+
+describe('Assistant: chats stored per workspace (November release, changes 1 and 8)', () => {
+  it('a new chat is titled by its question; a question in a chat gets its earlier turns; another chat starts fresh', async () => {
     const ai = new FakeAi(() => ({ content: [text('An answer.')] }));
-    const { assistant, run } = await setup({ ai });
-    await run('first');
-    await run('second');
-    expect(ai.sent[1]!.slice(0, 2)).toEqual([{ role: 'user', content: 'first' }, { role: 'assistant', content: 'An answer.' }]);
-    assistant.reset(OWNER);
+    const { db, run, chat } = await setup({ ai });
+    await run('first\n  question');
+    const first = chat();
+    expect(first.title).toBe('first question');
+    await run('second', OWNER, first.id);
+    expect(ai.sent[1]!.slice(0, 2)).toEqual([{ role: 'user', content: 'first\n  question' }, { role: 'assistant', content: 'An answer.' }]);
     await run('third');
     expect(ai.sent[2]).toHaveLength(1);
-    await run('fourth', OTHER);
-    expect(ai.sent[3]).toHaveLength(1); // another session's chat is its own
-    assistant.forget({ email: OWNER.email });
-    await run('fifth', OTHER);
-    expect(ai.sent[4]).toHaveLength(1);
+    // Another owner of the same workspace sees the chat, and its question goes on in it.
+    await run('fourth', OTHER, first.id);
+    expect(ai.sent[3]).toHaveLength(5);
+    expect((await chatMessages(db, first.id)).map((m) => [m.role, m.body, m.status])).toEqual([
+      ['user', 'first\n  question', 'done'], ['assistant', 'An answer.', 'done'], ['user', 'second', 'done'], ['assistant', 'An answer.', 'done'],
+      ['user', 'fourth', 'done'], ['assistant', 'An answer.', 'done'],
+    ]);
+    // The test clock stands still, so the list's order is not checked here (the store's test does).
+    expect((await listChats(db)).map((c) => c.title).sort()).toEqual(['first question', 'third']);
   });
 
-  it('a session that ends takes its waiting cards with it', async () => {
+  it('keeps the answer, its cost, its card (waiting) and its screen link with the chat', async () => {
+    const ai = new FakeAi([
+      () => ({ content: [use('open_screen', { screen: 'tasks', status: 'overdue' }), use('propose_task_change', { code: 'SHA-1', status: 'done' })] }),
+      () => ({ content: [text('Here you go.')] }),
+    ]);
+    const { db, run, chat } = await setup({ ai });
+    const events = await run('overdue, and mark SHA-1 done');
+    expect(events.at(-1)).toMatchObject({ type: 'done', status: 'done', calls: 2 });
+    const answer = (await chatMessages(db, chat().id))[1]!;
+    expect(answer).toMatchObject({ role: 'assistant', status: 'done', body: 'Here you go.', costUsd: 0.02 });
+    expect(answer.links).toEqual([{ screen: 'tasks', search: '?status=overdue', label: expect.any(String) }]);
+    expect(answer.cards).toEqual([expect.objectContaining({ state: 'waiting', title: expect.any(String) })]);
+    const card = events.find((e) => e.type === 'proposal') as { card: ProposalCard };
+    expect(answer.cards[0]!.id).toBe(card.card.id);
+  });
+
+  it('runs to its end and is saved even when nobody reads it any more (the owner left the page)', async () => {
+    const ai = new GatedAi();
+    const { db, assistant } = await setup({ ai });
+    let id = 0;
+    const done = assistant.ask(OWNER, { question: 'long one' }, (c) => {
+      id = c.id;
+    }, () => {}); // the browser stopped reading: emit goes nowhere
+    await ai.started;
+    expect(assistant.running(id)).toBe(true);
+    ai.open();
+    await done;
+    expect(assistant.running(id)).toBe(false);
+    expect((await chatMessages(db, id))[1]).toMatchObject({ status: 'done', body: 'Part one. Part two.' });
+  });
+
+  it('Stop: the text so far is kept, nothing more is added, no further step starts, and the call in progress is booked', async () => {
+    const ai = new GatedAi(3);
+    const { db, assistant, spend } = await setup({ ai });
+    let id = 0;
+    const events: AssistantEvent[] = [];
+    const done = assistant.ask(OWNER, { question: 'stop me' }, (c) => {
+      id = c.id;
+    }, (e) => events.push(e));
+    await ai.started;
+    expect(assistant.stop(id)).toBe(true);
+    ai.open();
+    await done;
+    expect(ai.calls).toBe(1);
+    expect(events.at(-1)).toMatchObject({ type: 'done', status: 'stopped', note: 'Stopped.' });
+    expect((await chatMessages(db, id))[1]).toMatchObject({ status: 'stopped', body: 'Part one.', note: 'Stopped.', costUsd: 0.01 });
+    await spend.flushed();
+    expect(spend.spentToday()).toBeCloseTo(0.01, 9);
+    expect(assistant.stop(id)).toBe(false); // nothing running there now
+  });
+
+  it('one question at a time per chat, and at most three at once in the workspace', async () => {
+    const ai = new GatedAi();
+    const { assistant } = await setup({ ai });
+    const chats: number[] = [];
+    const runs = Array.from({ length: RUNS_MAX }, (_, i) => assistant.ask(OWNER, { question: `q${i}` }, (c) => {
+      chats.push(c.id);
+    }, () => {}));
+    await ai.started;
+    while (chats.length < RUNS_MAX) await new Promise((r) => setTimeout(r, 5));
+    await expect(assistant.ask(OWNER, { question: 'again', chatId: chats[0]! }, () => {}, () => {})).rejects.toMatchObject({ status: 409 });
+    await expect(assistant.ask(OWNER, { question: 'a fourth' }, () => {}, () => {})).rejects.toMatchObject({ status: 409 });
+    ai.open();
+    await Promise.all(runs);
+    expect(chats.every((id) => !assistant.running(id))).toBe(true);
+  });
+
+  it('a chat that is not here is a 404 before anything starts or is stored', async () => {
+    const ai = new FakeAi(() => ({ content: [text('x')] }));
+    const { db, assistant } = await setup({ ai });
+    let started = false;
+    await expect(assistant.ask(OWNER, { question: 'hello', chatId: 987_654 }, () => {
+      started = true;
+    }, () => {})).rejects.toMatchObject({ status: 404 });
+    expect(started).toBe(false);
+    expect(ai.sent).toHaveLength(0);
+    expect(await getChat(db, 987_654)).toBeUndefined();
+    expect(await listChats(db)).toEqual([]);
+  });
+
+  it('history: question and answer pairs as text, answers cut, the last ten, an empty answer as "(no answer)"', () => {
+    const turns = Array.from({ length: 12 }, (_, i) => [
+      { role: 'user' as const, body: `q${i}` }, { role: 'assistant' as const, body: i === 11 ? '' : `a${i}` },
+    ]).flat();
+    const h = history([...turns, { role: 'user', body: 'pending question' }]);
+    expect(h).toHaveLength(20);
+    expect(h[0]).toEqual({ role: 'user', content: 'q2' });
+    expect(h.at(-1)).toEqual({ role: 'assistant', content: '(no answer)' });
+    expect(history([{ role: 'user', body: 'q' }, { role: 'assistant', body: 'x'.repeat(5_000) }])[1]!.content).toHaveLength(4_000);
+  });
+
+  it('a session that ends takes its waiting cards with it, and its chats stay', async () => {
     const ai = new FakeAi([() => ({ content: [use('propose_task_change', { code: 'SHA-1', status: 'done' })] }), () => ({ content: [text('ok')] })]);
-    const { assistant, pending, run } = await setup({ ai });
+    const { db, assistant, pending, run } = await setup({ ai });
     await run('done?');
     expect(pending.size()).toBe(1);
     assistant.forget({ idHash: OWNER.key });
     expect(pending.size()).toBe(0);
+    expect(await listChats(db)).toHaveLength(1);
   });
 
   it('the question says the time in IST, and the data element escapes "<"', async () => {

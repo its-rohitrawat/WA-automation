@@ -4,7 +4,7 @@ import { problems, readOverview, readStatus } from './contract.js';
 import { $, $$, esc, gsap, icon, installTooltip, paint, reduceMotion, toast } from './dom.js';
 import { initials } from './format.js';
 import { LOCKED_UNTIL_ACTIVE, navFor, navigate, onPopState, parsePath, pathFor, SCREENS, showScreens } from './router.js';
-import { ASSISTANT_CHANGED, ASSISTANT_GO, mountAssistant, unmountAssistant } from './views/assistant.js';
+import { ASSISTANT_GO, forgetAssistant, mountAssistant } from './views/assistant.js';
 import { mountClients } from './views/clients.js';
 import { CONNECTIONS_CHANGED, openFix, runAction } from './views/connect.js';
 import { mountConnections } from './views/connections.js';
@@ -19,11 +19,12 @@ import './views/workspaces.js';
 
 SCREEN_MOUNTS.set('clients', mountClients);
 SCREEN_MOUNTS.set('connections', mountConnections);
+SCREEN_MOUNTS.set('assistant', mountAssistant);
 // After a link, a reconnect or a quick action: the health pill now (an open dialog stays; Connections reloads itself).
 addEventListener(CONNECTIONS_CHANGED, () => {
   if (owner) void refreshStatus();
 });
-// The assistant opens a screen with its filters in the address; the screen reads them as from a link.
+// An answer's "Open …" link: the screen with its filters in the address, which the screen reads as from a link.
 addEventListener(ASSISTANT_GO, (e) => {
   const d = /** @type {CustomEvent<{ screen?: unknown, search?: unknown }>} */ (e).detail;
   if (!owner || typeof d?.screen !== 'string' || !SCREENS.has(d.screen)) return;
@@ -31,20 +32,13 @@ addEventListener(ASSISTANT_GO, (e) => {
   current = { screen: '', sub: null }; // drawn again even when it is the screen already showing
   show(d.screen, null, { fromHistory: true });
 });
-// A change confirmed in the assistant: the screen showing is drawn again with it.
-addEventListener(ASSISTANT_CHANGED, () => {
-  if (!owner || !current.screen) return;
-  const { screen, sub } = current;
-  current = { screen: '', sub: null };
-  show(screen, sub, { fromHistory: true });
-});
 import { hideSignin, showSignin } from './views/signin.js';
 
 const STATUS_MS = 10_000;
 const OVERVIEW_MS = 30_000;
 const THEME_KEY = 'wa-agent-theme';
 
-/** @type {{ email: string, name: string, platform?: boolean, role?: string, workspaces?: number } | null} */
+/** @type {{ email: string, name: string, platform?: boolean, role?: string, workspaces?: number, assistant?: boolean } | null} */
 let owner = null;
 /** A customer's workspace is active (GET /platform/onboarding): until then their Clients, Tasks, Meetings and Tracker are locked. */
 let active = false;
@@ -85,7 +79,34 @@ applyTheme(savedTheme());
 
 // ---------- the shell ----------
 /** This session, as the nav reads it. */
-const session = () => ({ role: owner?.role, platform: owner?.platform === true, workspaces: owner?.workspaces ?? 1 });
+const session = () => ({ role: owner?.role, platform: owner?.platform === true, workspaces: owner?.workspaces ?? 1, assistant: owner?.assistant === true });
+
+/**
+ * The assistant's button, bottom right: shown where the workspace has the assistant, on every screen but the assistant's
+ * own page (it would sit on the composer). An open drawer, chat sheet or dialog hides it too (assistant.css). Toasts
+ * move up above it while it shows.
+ */
+function syncAskButton() {
+  const fab = $('#asst-fab');
+  fab.hidden = !owner || !session().assistant || current.screen === 'assistant' || locked('assistant');
+  document.body.classList.toggle('has-asst', !fab.hidden);
+}
+
+/**
+ * Whether this workspace has the assistant. The founder's: its API answers. A customer's: yes, locked until its workspace
+ * is active (its runtime, on its own key, starts only then); it is not asked, since its runtime may still be starting. A
+ * platform with the assistant switched off says so on the page.
+ */
+async function hasAssistant() {
+  if (!owner) return false;
+  if (owner.role === 'owner') return true;
+  try {
+    await get('/assistant');
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /** A customer's screen that waits for their workspace to be active. */
 const locked = (/** @type {string} */ screen) => owner?.role === 'owner' && !active && LOCKED_UNTIL_ACTIVE.has(screen);
@@ -127,6 +148,7 @@ async function refreshActive() {
   active = next;
   buildNav();
   markNav(current.screen);
+  syncAskButton();
 }
 
 /**
@@ -179,7 +201,11 @@ function wireShell() {
     }
     if (!target.closest('.me')) closeMenu(false);
   });
-  $('#collapse').addEventListener('click', () => $('#app').classList.toggle('collapsed'));
+  $('#collapse').addEventListener('click', () => {
+    $('#app').classList.toggle('collapsed');
+    $('#tip').hidden = true; // the tooltip of the button just pressed would stay up after its words show
+    sideTips();
+  });
   $('#mnav').addEventListener('click', () => setDrawer(!$('#app').classList.contains('nav-open')));
   $('#theme').addEventListener('click', () => {
     const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
@@ -242,6 +268,26 @@ function setDrawer(open) {
   $('#mnav').setAttribute('aria-expanded', String(open));
 }
 
+/**
+ * The collapsed side menu shows icons only (November release, change 10): the button that opens it again and the
+ * status monitor say what they are in a tooltip, and the button says whether the menu is open. Expanded, their words
+ * show, so there is no tooltip.
+ */
+function sideTips() {
+  const collapsed = $('#app').classList.contains('collapsed');
+  const btn = $('#collapse');
+  const health = $('#side-health');
+  btn.setAttribute('aria-expanded', String(!collapsed));
+  btn.setAttribute('aria-label', collapsed ? 'Open the menu' : 'Collapse the menu');
+  if (collapsed) {
+    btn.dataset.tip = 'Open the menu';
+    health.dataset.tip = `${$('#sh-t').textContent ?? ''} · ${$('#sh-s').textContent ?? ''}`;
+  } else {
+    delete btn.dataset.tip;
+    delete health.dataset.tip;
+  }
+}
+
 // ---------- status: health pill, sidebar box, Connections badge, offline bar ----------
 async function refreshStatus() {
   try {
@@ -261,6 +307,7 @@ async function refreshStatus() {
   $('#sh-t').textContent = p.length ? `${p.length} part${p.length === 1 ? '' : 's'} need${p.length === 1 ? 's' : ''} you` : 'Agent is healthy';
   $('#sh-s').textContent = p.length ? (p[0].detail ? `${p[0].label}: ${p[0].detail}` : p[0].label) : 'All parts answering';
   $('#side-health').classList.toggle('warn', p.length > 0);
+  sideTips();
   const nav = $('#nav [data-go="connections"]');
   nav?.querySelector('.count')?.remove();
   if (p.length && nav) {
@@ -322,6 +369,8 @@ function show(screen, sub, opts = {}) {
   setDrawer(false);
   scrollTo({ top: 0 });
   const view = $('#view');
+  view.dataset.screen = screen;
+  syncAskButton();
 
   if (screen === 'overview') {
     /** @type {ReturnType<typeof readOverview> | null} */
@@ -392,7 +441,7 @@ function enterApp() {
   $('#me-name').textContent = owner?.name || 'Owner';
   $('#me-email').textContent = owner?.email ?? '';
   statusPoll = poll(refreshStatus, STATUS_MS);
-  mountAssistant();
+  syncAskButton();
   const { screen, sub } = parsePath(location.pathname);
   show(screen, sub, { replace: true });
   if (!reduceMotion && gsap) {
@@ -413,10 +462,11 @@ function leaveApp(signedOut) {
   onStatus = () => {};
   closeDrawer(true);
   resetGroups();
-  unmountAssistant();
+  forgetAssistant();
   owner = null;
   status = null;
   current = { screen: '', sub: null };
+  syncAskButton(); // signed out: no button
   // Nothing of the owner's stays in the page; emptying the view also ends the heartbeat animation.
   $('#view').replaceChildren();
   $('#me-name').textContent = '';
@@ -441,6 +491,7 @@ async function boot() {
   } catch {
     owner = null;
   }
+  if (owner) owner.assistant = await hasAssistant();
   // This session's screens (SaaS S5): the founder's, with the platform ones when the server has them, or a customer's.
   showScreens(session());
   await refreshActive();

@@ -13,6 +13,8 @@ import { setKv } from '../../src/store/kv.ts';
 import { insertMedia, messageRowId } from '../../src/store/media.ts';
 import { insertMessage } from '../../src/store/messages.ts';
 import { manualClock } from '../../src/util/clock.ts';
+import { openPhoneSession, phoneName, phoneSessionKey, sessionFileOf, useEncryptedAuthState } from '../../src/wa/authState.ts';
+import { PHONES_KV_KEY } from '../../src/wa/phoneList.ts';
 import { MEHTA, SHARMA } from '../helpers/db.ts';
 
 // SQLite by design: the founder's SQLite data folder the copy reads from (on both runs).
@@ -29,11 +31,16 @@ export interface Fixture {
 
 const sha = (file: string) => createHash('sha256').update(readFileSync(file)).digest('hex');
 
+/** A reading phone's number in the fixture (phones 2 to 5): made up. */
+export const phoneNumberOf = (id: number) => `91980000000${id}`;
+
 /**
  * sender: also a sender-session.db. platform false: the platform tables stay empty (no founder row, customers or
- * invites), for a test server whose platform tables every test shares.
+ * invites), for a test server whose platform tables every test shares. phones (lane C, change 7): those reading phones
+ * too, each linked in its own session-<n>.db sealed with its subkey of `key` (as the agent seals it), with a backup row,
+ * and the phone list in kv.
  */
-export async function fixture(o: { sender?: boolean; platform?: boolean } = {}): Promise<Fixture> {
+export async function fixture(o: { sender?: boolean; platform?: boolean; phones?: { key: Buffer; ids: (2 | 3 | 4 | 5)[] } } = {}): Promise<Fixture> {
   const dir = mkdtempSync(join(tmpdir(), 'wa-copy-'));
   const data = join(dir, 'data');
   const clock = manualClock('2026-10-30T06:00:00.000Z');
@@ -54,6 +61,12 @@ export async function fixture(o: { sender?: boolean; platform?: boolean } = {}):
     });
     await setKv(db, 'rebuild_requested', '');
     await setKv(db, 'health', '{"up":true}');
+    if (o.phones) {
+      await setKv(db, PHONES_KV_KEY, JSON.stringify({ phones: [
+        { id: 1, label: 'Phone 1', state: 'active', addedAt: null },
+        ...o.phones.ids.map((id) => ({ id, label: `Phone ${id}`, state: 'active', addedAt: clock.now().toISOString() })),
+      ] }));
+    }
     if (o.platform !== false) {
       await ensureFounderTenant(db, { name: 'Your studio', at: clock.now().toISOString() });
       const made = await createInvite({ db, clock }, 'founder@example.com', { business: 'Kapoor Design Studio', email: 'kapoor@example.com' });
@@ -73,12 +86,22 @@ export async function fixture(o: { sender?: boolean; platform?: boolean } = {}):
     await sender.run('INSERT INTO auth (k, v) VALUES (?, ?)', ['creds', Buffer.from('made-up spare creds')]);
     await sender.close();
   }
+  for (const id of o.phones?.ids ?? []) {
+    const phone = phoneName(id);
+    const session = await openPhoneSession({ engine: 'sqlite', dataDir: data }, phone);
+    const auth = await useEncryptedAuthState(session, phoneSessionKey(o.phones!.key, phone));
+    auth.state.creds.me = { id: `${phoneNumberOf(id)}:2@s.whatsapp.net`, name: `Phone ${id}` };
+    await auth.saveCreds();
+    await session.run('INSERT INTO auth_backup (k, v) VALUES (?, ?)', ['creds', Buffer.from(`older made-up phone ${id} creds`)]);
+    await session.close();
+  }
   return {
     dir,
     data,
     hashes: () => {
       const out: Record<string, string> = {};
-      for (const f of [trackerDbPath(data), sessionDbPath(data), senderSessionDbPath(data)]) if (existsSync(f)) out[f] = sha(f);
+      const phones = [2, 3, 4, 5].map((id) => sessionFileOf(data, phoneName(id)));
+      for (const f of [trackerDbPath(data), sessionDbPath(data), senderSessionDbPath(data), ...phones]) if (existsSync(f)) out[f] = sha(f);
       return out;
     },
   };

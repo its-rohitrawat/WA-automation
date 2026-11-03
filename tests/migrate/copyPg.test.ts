@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto';
+import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { FOUNDER_TENANT_ID } from '../../src/config/env.ts';
@@ -13,8 +14,10 @@ import { openDb } from '../../src/store/db.ts';
 import { openAdminConnection, openPgPool, PgTenantDb } from '../../src/store/engine/pg.ts';
 import { SqliteDb } from '../../src/store/engine/sqlite.ts';
 import { manualClock } from '../../src/util/clock.ts';
+import { phoneNumberIn, sessionFileOf } from '../../src/wa/authState.ts';
+import { PHONES_KV_KEY } from '../../src/wa/phoneList.ts';
 import { onPg } from '../helpers/pg.ts';
-import { fixture } from './fixture.ts';
+import { fixture, phoneNumberOf } from './fixture.ts';
 import { freshPg, type FreshPg } from '../helpers/freshPg.ts';
 
 // The copy and the export back on a real Postgres 17 (npm run test:pg; skipped otherwise). The copy keeps every id, so
@@ -89,6 +92,59 @@ describe.runIf(onPg)('migrate-to-postgres and export-to-sqlite on a real Postgre
       } finally {
         await src.close();
       }
+    } finally {
+      await app.close();
+      await target.close();
+    }
+  });
+
+  it('phones 2 and 3 (lane C, change 7): SQLite to Postgres and back (rollback B), every session row byte for byte, still linked on both sides', async () => {
+    const t = pg.urls;
+    const tenantId = await newTenant(t.ownerUrl);
+    const key = randomBytes(32);
+    const f = await fixture({ platform: false, phones: { key, ids: [2, 3] } });
+    const target = postgresTarget(t.ownerUrl);
+    const app = new PgTenantDb(openPgPool(t.appUrl, { max: 2 }), tenantId);
+    const byKey = (rows: { k: string; v: Buffer }[]) => [...rows].sort((a, b) => (a.k < b.k ? -1 : a.k > b.k ? 1 : 0));
+    try {
+      const r = await copyToPostgres({ dataDir: f.data, tenantId, apply: true, backupDir: join(f.dir, 'backup') }, target);
+      expect(r).toMatchObject({ ok: true, applied: true });
+      expect(r.tables.filter((x) => x.table.startsWith('phone')).map((x) => [x.table, x.match])).toEqual([
+        ['phone2:auth', true], ['phone2:auth_backup', true], ['phone3:auth', true], ['phone3:auth_backup', true],
+      ]);
+      const out = join(f.dir, 'from-postgres');
+      for (const phone of ['phone2', 'phone3'] as const) {
+        const number = phoneNumberOf(Number(phone.slice(5)));
+        // On Postgres, read as the agent reads it (wa_app, this customer only): the same rows, the same number.
+        const src = SqliteDb.open(sessionFileOf(f.data, phone), { readonly: true });
+        try {
+          for (const [table, slot] of [['auth', 'live'], ['auth_backup', 'backup']] as const) {
+            const rows = byKey(await src.all<{ k: string; v: Buffer }>(`SELECT k, v FROM ${table}`));
+            expect(rows.length, `${phone} ${table}`).toBeGreaterThan(0);
+            expect(byKey(await app.all<{ k: string; v: Buffer }>('SELECT k, v FROM wa_auth WHERE phone = ? AND slot = ?', [phone, slot])), `${phone} ${table}`).toEqual(rows);
+          }
+        } finally {
+          await src.close();
+        }
+        expect(await phoneNumberIn({ engine: 'postgres', db: app }, key, phone)).toBe(number);
+      }
+      expect(await app.get('SELECT v FROM kv WHERE k = ?', [PHONES_KV_KEY])).toEqual({ v: expect.stringContaining('"id":3') });
+
+      // And back to new SQLite files: each phone in its own file, byte for byte, opening on the same number.
+      expect((await exportToSqlite({ dataDir: f.data, tenantId, out, platform: false }, target)).ok).toBe(true);
+      expect(readdirSync(out).filter((n) => n.endsWith('.db')).sort()).toEqual(['session-2.db', 'session-3.db', 'session.db', 'tracker.db']);
+      for (const phone of ['phone2', 'phone3'] as const) {
+        const a = SqliteDb.open(sessionFileOf(out, phone), { readonly: true });
+        const b = SqliteDb.open(sessionFileOf(f.data, phone), { readonly: true });
+        try {
+          for (const table of ['auth', 'auth_backup']) expect(await a.all(`SELECT k, v FROM ${table} ORDER BY k`), `${phone} ${table}`).toEqual(await b.all(`SELECT k, v FROM ${table} ORDER BY k`));
+        } finally {
+          await a.close();
+          await b.close();
+        }
+        expect(await phoneNumberIn({ engine: 'sqlite', dataDir: out }, key, phone)).toBe(phoneNumberOf(Number(phone.slice(5))));
+      }
+      expect(await customerSums(join(out, 'tracker.db'))).toEqual(await customerSums(trackerDbPath(f.data))); // the phone list too
     } finally {
       await app.close();
       await target.close();

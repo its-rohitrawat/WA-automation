@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -10,9 +11,16 @@ import { ensureFounderTenant } from '../../src/platform/store.ts';
 import { GlobalSpend } from '../../src/spend/globalSpend.ts';
 import { startDashboard } from '../../src/web/start.ts';
 import type { Db } from '../../src/store/db.ts';
+import { systemClock } from '../../src/util/clock.ts';
 import { silentLogger } from '../../src/util/logger.ts';
 import { istDate } from '../../src/util/time.ts';
+import { SessionStore } from '../../src/web/sessions.ts';
+import { OWNER } from '../helpers/web.ts';
 import { onSqlite, seededDb, SHARMA } from '../helpers/db.ts';
+import { getKv, setKv } from '../../src/store/kv.ts';
+import { openPhoneSession, phoneNumberIn, phoneSessionKey, sessionHomeOf, useEncryptedAuthState, useSenderAuthState } from '../../src/wa/authState.ts';
+import { PHONES_KV_KEY } from '../../src/wa/phoneList.ts';
+import { FakeSocket } from '../helpers/fakeSocket.ts';
 import { openTestPlatformDb } from '../helpers/pg.ts';
 
 // One customer's runtime (S4.4), with no network: the dashboard is on and nothing is linked (setup mode), so no
@@ -73,6 +81,132 @@ describe('startFounderRuntime', () => {
     await expect(buildCustomerRuntime({ id: FOUNDER, founder: true }, { ...shared, db, configs: [{ ...SHARMA, code: 'NEW' }] }))
       .rejects.toThrow(/Client codes are permanent/);
     expect(await db.all('SELECT code FROM clients ORDER BY id')).toEqual([{ code: 'SHA' }, { code: 'MEH' }]);
+  });
+});
+
+describe('several phones (lane C, change 7): with one phone the founder starts exactly as today', () => {
+  it('phone 1 alone, on its saved session: one socket, linked, no relink, nothing written for phones (this engine)', async () => {
+    const db = await seededDb();
+    opened.push(db);
+    // The engine under test: on SQLite data/session.db; under test:pg the founder's wa_auth rows.
+    const shared = fakeShared(onSqlite ? {} : {
+      DB_ENGINE: 'postgres', DATABASE_URL: 'postgres://wa_app:placeholder@127.0.0.1:5432/wa_agent',
+      DATABASE_PLATFORM_URL: 'postgres://wa_platform:placeholder@127.0.0.1:5432/wa_agent',
+    });
+    const home = sessionHomeOf(shared.env, db);
+    const saved = await openPhoneSession(home, 'founder');
+    const first = await useEncryptedAuthState(saved, shared.key);
+    first.state.creds.me = { id: '919800000001:3@s.whatsapp.net', name: 'Founder' };
+    await first.saveCreds();
+    await saved.close();
+    const sockets: FakeSocket[] = [];
+    const rt = await buildCustomerRuntime({ id: FOUNDER, founder: true }, {
+      ...shared, db, configs: [SHARMA],
+      waSockets: { gateway: () => (sockets.push(new FakeSocket()), sockets.at(-1)!) },
+    });
+    rt.start();
+    expect(sockets).toHaveLength(1); // phone 1's gateway, and nothing else
+    sockets[0]!.emit('connection.update', { connection: 'open' });
+    expect(rt.facts().whatsappLinked).toBe(true);
+    await rt.stop();
+    expect(await phoneNumberIn(home, shared.key, 'founder')).toBe('919800000001'); // the same link
+    expect(await getKv(db, 'session_reset_at')).toBeUndefined(); // no relink happened
+    expect(await getKv(db, PHONES_KV_KEY)).toBeUndefined(); // no phone list written
+  });
+
+  it('the spare’s card shows WhatsApp’s own name for it, read from its saved link (the runtime hands the reader over)', async () => {
+    const db = await seededDb();
+    opened.push(db);
+    const shared = fakeShared(onSqlite ? {} : {
+      DB_ENGINE: 'postgres', DATABASE_URL: 'postgres://wa_app:placeholder@127.0.0.1:5432/wa_agent',
+      DATABASE_PLATFORM_URL: 'postgres://wa_platform:placeholder@127.0.0.1:5432/wa_agent',
+    });
+    const saved = await openPhoneSession(sessionHomeOf(shared.env, db), 'spare');
+    const auth = await useSenderAuthState(saved, shared.key);
+    auth.state.creds.me = { id: '919800000009:4@s.whatsapp.net', name: 'Morning desk' };
+    await auth.saveCreds();
+    await saved.close();
+    const rt = await buildCustomerRuntime({ id: FOUNDER, founder: true }, { ...shared, db, configs: [SHARMA] });
+    try {
+      expect((await rt.control.connections()).spare).toMatchObject({ state: 'ok', label: 'Linked', accountName: 'Morning desk' });
+    } finally {
+      await rt.stop();
+    }
+  });
+
+  it('with a stored phone 2 the monitor’s one WhatsApp part counts both phones (the runtime hands them over)', async () => {
+    const db = await seededDb();
+    opened.push(db);
+    const shared = fakeShared(onSqlite ? {} : {
+      DB_ENGINE: 'postgres', DATABASE_URL: 'postgres://wa_app:placeholder@127.0.0.1:5432/wa_agent',
+      DATABASE_PLATFORM_URL: 'postgres://wa_platform:placeholder@127.0.0.1:5432/wa_agent',
+    });
+    const home = sessionHomeOf(shared.env, db);
+    for (const [phone, number] of [['founder', '919800000001'], ['phone2', '919800000002']] as const) {
+      const saved = await openPhoneSession(home, phone);
+      const auth = await useEncryptedAuthState(saved, phoneSessionKey(shared.key, phone));
+      auth.state.creds.me = { id: `${number}:3@s.whatsapp.net`, name: 'x' };
+      await auth.saveCreds();
+      await saved.close();
+    }
+    await setKv(db, PHONES_KV_KEY, JSON.stringify({ phones: [
+      { id: 1, label: 'Phone 1', state: 'active', addedAt: null }, { id: 2, label: 'Front desk', state: 'active', addedAt: '2026-11-02T10:00:00.000Z' },
+    ] }));
+    const sockets: FakeSocket[] = [];
+    const rt = await buildCustomerRuntime({ id: FOUNDER, founder: true }, {
+      ...shared, db, configs: [SHARMA],
+      waSockets: { gateway: () => (sockets.push(new FakeSocket()), sockets.at(-1)!) },
+    });
+    const whatsapp = async () => (await rt.control.status()).parts.find((p) => p.key === 'whatsapp');
+    rt.start();
+    expect(sockets).toHaveLength(2);
+    sockets[0]!.emit('connection.update', { connection: 'open' });
+    expect(await whatsapp()).toMatchObject({ label: '1 of 2 phones connected' });
+    // The status command's per-phone line reads these from the health snapshot: names and states, no number.
+    const listed = () => rt.app.health.snapshot().phones?.map((p) => [p.id, p.label, p.state === 'open']);
+    expect(listed()).toEqual([[1, 'Phone 1', true], [2, 'Front desk', false]]);
+    sockets[1]!.emit('connection.update', { connection: 'open' });
+    expect(await whatsapp()).toMatchObject({ state: 'ok', label: '2 of 2 phones connected' });
+    expect(listed()).toEqual([[1, 'Phone 1', true], [2, 'Front desk', true]]);
+    expect(JSON.stringify(rt.app.health.snapshot())).not.toContain('919800000002');
+    await rt.stop();
+  });
+
+  it('with a stored phone 2 the Groups view lists both phones (the runtime hands its phone list to Groups)', async () => {
+    const db = await seededDb();
+    opened.push(db);
+    // The dashboard as main.ts starts it, as in the platform tests below: the sessions in the platform tables.
+    const platformDb = onSqlite ? db : openTestPlatformDb();
+    if (onSqlite) await ensurePlatformSchema(db);
+    await ensureFounderTenant(platformDb, { name: 'Your business', at: new Date().toISOString() });
+    await setKv(db, PHONES_KV_KEY, JSON.stringify({ phones: [
+      { id: 1, label: 'Phone 1', state: 'active', addedAt: null }, { id: 2, label: 'Front desk', state: 'active', addedAt: '2026-11-02T10:00:00.000Z' },
+    ] }));
+    const shared = fakeShared({ DASHBOARD_OWNER_EMAILS: OWNER });
+    const rt = await buildCustomerRuntime({ id: FOUNDER, founder: true }, { ...shared, db, configs: [SHARMA] });
+    const noGoogle = () => Promise.reject(new Error('no Google in tests'));
+    const web = await startDashboard({
+      env: { ...shared.env, DASHBOARD_PORT: 0 }, db, platformDb, log: silentLogger(), control: rt.control, platform: rt.platform, ...rt.agentRoutes,
+      google: { exchange: noGoogle, verifier: noGoogle },
+    });
+    try {
+      const session = await new SessionStore(platformDb, systemClock).create(OWNER);
+      const answer = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+        const r = request({ host: '127.0.0.1', port: web!.address()!.port, path: '/dashboard/api/groups', headers: { cookie: `wa_session=${session.id}` } }, (res) => {
+          let body = '';
+          res.setEncoding('utf8');
+          res.on('data', (c: string) => (body += c));
+          res.on('end', () => resolve({ status: res.statusCode ?? 0, body }));
+        });
+        r.on('error', reject);
+        r.end();
+      });
+      expect(answer.status).toBe(200);
+      expect((JSON.parse(answer.body) as { phones: { id: number; label: string }[] }).phones.map((p) => [p.id, p.label])).toEqual([[1, 'Phone 1'], [2, 'Front desk']]);
+    } finally {
+      await web?.stop();
+      await rt.stop();
+    }
   });
 });
 

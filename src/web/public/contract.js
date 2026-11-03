@@ -79,7 +79,7 @@ export function readOverview(raw) {
 /**
  * One card on the Connections screen.
  * @typedef {{ id: string, kind: string, title: string, subtitle: string, state: PartState, stateLabel: string, rows: [string, string][], note: string,
- *   email?: string, meetings?: boolean, link?: string }} Card
+ *   email?: string, meetings?: boolean, link?: string, accountName?: string | null }} Card
  */
 
 /**
@@ -104,6 +104,8 @@ export function readConnections(raw) {
     state: spareState, stateLabel: str(s.label),
     rows: [['Sends', 'Morning briefing only'], ['Sends to', str(s.recipientMasked) || '—']],
     note: spareState === 'ok' ? '' : "Link it with the spare phone, not the founder's. The agent refuses a link from the founder's own number.",
+    // WhatsApp's own name for its account, read as a reading phone's is (the account holder's text: esc() it).
+    accountName: accountName(s.accountName),
   });
   for (const g of arr(r.google)) {
     const o = obj(g);
@@ -255,10 +257,43 @@ function activity(v) {
 const strings = (v) => arr(v).map(str).filter(Boolean);
 
 /**
- * One row of Manage groups. `key` is the agent's opaque key for the group (never its WhatsApp id).
+ * One row of Manage groups. `key` is the agent's opaque key for the group (never its WhatsApp id). `where` (more phones,
+ * November release): its phone, the phones that see it, and whether its phone is unlinked; absent from an older agent.
  * @typedef {{ key: string, name: string, approved: boolean, inWhatsApp: boolean, ignored: boolean,
- *   client: { name: string, code: string, active: boolean, hasTasks: boolean, codeLocked: boolean, emailDomains: string[], meetingKeywords: string[] } | null }} GroupRow
+ *   client: { name: string, code: string, active: boolean, hasTasks: boolean, codeLocked: boolean, emailDomains: string[], meetingKeywords: string[] } | null,
+ *   where?: { phone: number | null, seenBy: number[], unlinked: boolean, readThrough: number | null } }} GroupRow
  */
+
+/** A reading phone's number, 1 to 5, or null. @param {unknown} v */
+const phoneId = (v) => (typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= 5 ? v : null);
+
+/**
+ * A group's phone, the phones that see it, and, on an unlinked phone, the phone to read it through instead.
+ * @param {Record<string, unknown>} o
+ * @returns {{ phone: number | null, seenBy: number[], unlinked: boolean, readThrough: number | null }}
+ */
+function phoneWhere(o) {
+  const seenBy = /** @type {number[]} */ ([...new Set(arr(o.seenBy).map(phoneId).filter((p) => p !== null))].sort((a, b) => /** @type {number} */ (a) - /** @type {number} */ (b)));
+  const unlinked = o.phoneState === 'unlinked';
+  return { phone: phoneId(o.phone), seenBy, unlinked, readThrough: unlinked ? phoneId(o.readThrough) : null };
+}
+
+/**
+ * The workspace's reading phones on the Groups screen: id, label (owner text, shown with esc()), linked or not. (Not
+ * readPhones below, which reads Connections' own answer.)
+ * @param {unknown} v @returns {{ id: number, label: string, unlinked: boolean }[]}
+ */
+function readGroupPhones(v) {
+  /** @type {{ id: number, label: string, unlinked: boolean }[]} */
+  const out = [];
+  for (const p of arr(v)) {
+    const o = obj(p);
+    const id = phoneId(o.id);
+    if (id === null || out.some((x) => x.id === id)) continue;
+    out.push({ id, label: cut(str(o.label), 40) || `Phone ${id}`, unlinked: o.state === 'unlinked' });
+  }
+  return out.sort((a, b) => a.id - b.id);
+}
 
 /** GET /dashboard/api/groups (and the answer to /groups/apply). @param {unknown} raw */
 export function readGroups(raw) {
@@ -280,9 +315,12 @@ export function readGroups(raw) {
           client: cl
             ? { name: str(cl.name), code: str(cl.code), active: cl.active === true, hasTasks: cl.hasTasks === true, codeLocked: cl.codeLocked === true, emailDomains: strings(cl.emailDomains), meetingKeywords: strings(cl.meetingKeywords) }
             : null,
+          // More phones (November release): only when the agent says (an older one does not).
+          ...(Array.isArray(o.seenBy) ? { where: phoneWhere(o) } : {}),
         };
       })
       .filter((row) => row.key),
+    phones: readGroupPhones(r.phones),
     total: num(r.total),
     counts: { all: num(c.all), approved: num(c.approved), notApproved: num(c.notApproved), ignored: num(c.ignored) },
     stale: r.stale === true,
@@ -335,6 +373,8 @@ export function readChat(raw) {
     client: { code: str(c.code), name: str(c.name), groupName: cut(str(c.groupName), 120) || str(c.name) },
     sendingOn: r.sendingOn === true,
     connected: r.connected === true,
+    // The group's phone by its label, only when the workspace has more than one (owner text: esc() it).
+    phone: typeof r.phone === 'string' && r.phone.trim() ? cut(r.phone, 60) : null,
     hasOlder: r.hasOlder === true,
     messages: arr(r.messages)
       .map((m) => {
@@ -349,11 +389,95 @@ export function readChat(raw) {
       })
       .filter((m) => m.id > 0 && m.at !== null),
     outbox: arr(r.outbox).map(outboxOf).filter((o) => o.uuid && o.at !== null),
+    names: tagNames(r.names),
+    cleared: r.cleared === true,
   };
+}
+
+const DELETE_STATES = ['deleted', 'failed', 'unknown'];
+
+/** The answer to POST /clients/:code/chat/delete (Delete chat): how it went, and why when it did not. @param {unknown} raw */
+export function readDeleteResult(raw) {
+  const r = obj(raw);
+  const state = DELETE_STATES.includes(str(r.state)) ? str(r.state) : 'unknown';
+  return { state, code: /^[a-z_]{1,40}$/.test(str(r.code)) ? str(r.code) : null };
+}
+
+/**
+ * The names of the tags on a chat page: digits (a tag) to the agent's name for that member. Anything else is dropped.
+ * @param {unknown} v @returns {Record<string, string>}
+ */
+function tagNames(v) {
+  /** @type {Record<string, string>} */
+  const out = {};
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return out;
+  for (const [k, n] of Object.entries(v)) {
+    const name = typeof n === 'string' ? cut(n, 80) : '';
+    if (/^\d{5,20}$/.test(k) && name) out[k] = name;
+  }
+  return out;
 }
 
 /** The answer to POST /clients/:code/chat/send. @param {unknown} raw */
 export function readSendResult(raw) {
   const r = obj(raw);
   return { message: outboxOf(r.message), replayed: r.replayed === true };
+}
+
+/**
+ * GET /clients/:code/chat/members (November release, change 2): the group info panel. A member is a name (or null), the
+ * number WhatsApp shows (or null: hidden), the digits a mention uses, and whether it is an admin. Names are untrusted.
+ * @param {unknown} raw
+ */
+export function readMembers(raw) {
+  const r = obj(raw);
+  const reason = str(r.reason);
+  return {
+    known: r.known === true,
+    groupName: cut(str(r.groupName), 120),
+    reason: reason === 'whatsapp_not_connected' ? 'whatsapp_not_connected' : 'members_unavailable',
+    members: arr(r.members)
+      .map((m) => {
+        const x = obj(m);
+        const name = cut(str(x.name), 80);
+        const number = /^\+[\d ]{6,24}$/.test(str(x.number)) ? str(x.number) : null;
+        return { name: name || null, number, tag: /^\d{5,20}$/.test(str(x.tag)) ? str(x.tag) : '', admin: x.admin === true };
+      })
+      .filter((m) => m.tag !== ''),
+  };
+}
+
+// ---------- Reading phones (lane C, change 7) ----------
+
+/** @typedef {{ id: number, label: string, state: 'active' | 'unlinked', number: string | null, status: string | null, groups: number, accountName: string | null }} PhoneRow */
+
+/**
+ * WhatsApp's own name for a phone's account: the account holder's text, so one line of at most 60 characters with no
+ * control or invisible characters (the agent sends it so; read so again here). Null when there is none. Shown with esc().
+ * @param {unknown} v
+ */
+const accountName = (v) => {
+  if (typeof v !== 'string') return null;
+  const one = v.replace(/[\p{Cc}\p{Zl}\p{Zp}]+/gu, ' ').replace(/\p{Cf}+/gu, '').replace(/\s+/g, ' ').trim();
+  return cut(one, 60).trim() || null;
+};
+
+/**
+ * GET /dashboard/api/whatsapp/phones ({ phones, max }, src/web/routes/whatsapp.ts): each reading phone with its label (owner
+ * text), its state, its number already masked by the agent, its gateway's state, its approved groups and WhatsApp's own
+ * name for its account.
+ * @param {unknown} raw @returns {{ phones: PhoneRow[], max: number }}
+ */
+export function readPhones(raw) {
+  const x = obj(raw);
+  const phones = arr(x.phones)
+    .map((p) => {
+      const r = obj(p);
+      return {
+        id: num(r.id), label: str(r.label), state: /** @type {'active' | 'unlinked'} */ (r.state === 'unlinked' ? 'unlinked' : 'active'),
+        number: str(r.number) || null, status: str(r.status) || null, groups: num(r.groups), accountName: accountName(r.accountName),
+      };
+    })
+    .filter((p) => Number.isInteger(p.id) && p.id >= 1 && p.id <= 5 && p.label !== '');
+  return { phones, max: num(x.max) || 5 };
 }

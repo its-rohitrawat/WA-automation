@@ -110,7 +110,9 @@ describe('groupsListHandler', () => {
     expect(r.status).toBe(200);
     expect(body(r)).toMatchObject({ total: 4, counts: { all: 4, approved: 2, notApproved: 2 }, stale: false, reason: null, fetchedAt: T0 });
     expect(rows(r).map((x) => x.key).sort()).toEqual([SHARMA.groupId, MEHTA.groupId, DESAI, PATEL].map(k).sort());
-    expect(rows(r).find((x) => x.key === k(PATEL))).toEqual({ key: k(PATEL), name: 'Patel Builders', approved: false, inWhatsApp: true, ignored: false, client: null });
+    expect(rows(r).find((x) => x.key === k(PATEL))).toEqual({
+      key: k(PATEL), name: 'Patel Builders', approved: false, inWhatsApp: true, ignored: false, client: null, phone: null, seenBy: [1], phoneState: 'ok', readThrough: null,
+    });
     noRawIds(r);
   });
 

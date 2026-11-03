@@ -63,7 +63,7 @@ export const fixtures = (st: FakeState) => {
       },
   connections: {
     founder: st.setup ? { state: 'down', label: 'Not linked', groups: 0, lastActivityAt: null } : { state: 'ok', label: 'Connected', groups: 3, lastActivityAt: at(3) },
-    spare: st.spareLinked ? { state: 'ok', label: 'Connected', recipientMasked: '•••• 0000' } : { state: 'warn', label: 'Not linked', recipientMasked: '•••• 0000' },
+    spare: st.spareLinked ? { state: 'ok', label: 'Connected', recipientMasked: '•••• 0000', accountName: 'Sharma Traders (briefing)' } : { state: 'warn', label: 'Not linked', recipientMasked: '•••• 0000', accountName: null },
     google: [
       { label: 'main', email: 'owner@example.com', state: 'ok', stateLabel: 'Connected', usedFor: ['Mail', 'Drive', 'Meetings'] },
       st.org2Ok
@@ -94,11 +94,13 @@ export interface FakeState {
   org2Ok?: boolean;
   /** Quick actions answer 429, as the agent does past 5 tries a minute. */
   rateLimited?: boolean;
+  /** Reading phones for Connections and Manage groups (set before the fake starts): 3 with one unlinked (the default), or 1, as before. */
+  phones?: 1 | 3;
 }
 
 /** A fake phone link: two codes, a scan, then linked (and the fake flags updated). */
 function fakeLinks(state: FakeState) {
-  const links = new Map<string, { target: 'founder' | 'spare'; cancelled: boolean }>();
+  const links = new Map<string, { target: string; cancelled: boolean }>();
   const stream = (id: string, res: ServerResponse) => {
     const link = links.get(id);
     if (!link) return sendError(res, 404, 'not_found', 'Unknown link.');
@@ -138,6 +140,35 @@ interface FakeGroup {
   approved: boolean;
   ignored?: boolean;
   client: FakeClient | null;
+  /** More phones: the phone a tracked group is read through (1 when left out), and the open phones in the group. */
+  phone?: number;
+  seenBy?: number[];
+}
+
+/** A reading phone in the fake: what Connections lists (lane C) and what Manage groups reads (lane B). */
+interface FakePhone {
+  id: number;
+  label: string;
+  state: 'active' | 'unlinked';
+  number: string | null;
+  status: string | null;
+  groups: number;
+  /** WhatsApp's own name for the account: none while not linked, as the agent says. */
+  accountName: string | null;
+}
+
+/**
+ * The fake's ONE list of reading phones, made fresh for each fake (Connections changes it in memory, and Manage groups
+ * reads the same list, so the screens agree): three, the third unlinked; or phone 1 alone, as before more phones. Phone
+ * 2's WhatsApp name has markup in it (the page must show it as text) and is long enough to wrap on a phone.
+ */
+function fakePhones(n: 1 | 3): FakePhone[] {
+  if (n === 1) return [{ id: 1, label: 'Phone 1', state: 'active', number: '…4321', status: 'open', groups: 3, accountName: 'Sharma Traders' }];
+  return [
+    { id: 1, label: 'Office', state: 'active', number: '…4321', status: 'open', groups: 5, accountName: 'Sharma Traders' },
+    { id: 2, label: 'Rahul <b>phone', state: 'active', number: '…7788', status: 'open', groups: 2, accountName: 'Rahul <b>Kapoor</b> (Front desk, Andheri West)' },
+    { id: 3, label: 'Old phone', state: 'unlinked', number: null, status: null, groups: 1, accountName: null },
+  ];
 }
 
 const WORDS = ['Desai', 'Iyer', 'Kapoor', 'Mehta', 'Rao', 'Shah', 'Verma', 'Nair', 'Joshi', 'Patel', 'Gupta', 'Reddy', 'Bose', 'Malhotra', 'Sethi'];
@@ -168,9 +199,9 @@ function makeGroups(): FakeGroup[] {
 const fold = (s: string) => s.toLowerCase();
 
 type ApplyBody = {
-  approve?: { key: string; name: string; code: string; emailDomains?: string[]; meetingKeywords?: string[] }[];
+  approve?: { key: string; name: string; code: string; emailDomains?: string[]; meetingKeywords?: string[]; phone?: number }[];
   unapprove?: string[];
-  edit?: { key: string; name?: string; emailDomains?: string[]; meetingKeywords?: string[] }[];
+  edit?: { key: string; name?: string; emailDomains?: string[]; meetingKeywords?: string[]; phone?: number }[];
 };
 
 /** The client drawer's "what the agent has seen" block (the agent's ClientActivity shape), made up per client. */
@@ -195,9 +226,38 @@ function activityFor(c: { code: string; lastActivity: string | null; history: { 
 }
 
 /** The fake directory and clients: what Manage groups and Clients read and change. */
-function fakeGroupsApi(state: FakeState) {
+function fakeGroupsApi(state: FakeState, phones: FakePhone[]) {
   const groups = makeGroups();
   let fetchedAt = at(2);
+  // More phones: Acme on Office (also in Rahul's phone); Blue Harbour on the unlinked phone, which Rahul's phone can read;
+  // Cedar on the unlinked phone with no linked phone in it; the untracked ones spread over the two linked phones.
+  if (phones.length > 1) {
+    groups.forEach((g, i) => {
+      g.seenBy = i === 0 ? [1, 2] : i === 1 ? [2] : i === 2 ? [] : [[1], [2], [1, 2]][i % 3]!;
+      if (i === 1 || i === 2) g.phone = 3;
+    });
+  }
+  // Read on each answer: an unlink on Connections shows on Manage groups at once, as on the agent.
+  const linkedNow = () => new Set(phones.filter((p) => p.state === 'active').map((p) => p.id));
+  const seenByOf = (g: FakeGroup) => (g.seenBy ?? [1]).filter((p) => phones.some((x) => x.id === p));
+  /** As the agent's rows: a tracked group's phone, the phones in it, and on an unlinked phone the one to read it through. */
+  const phoneFields = (g: FakeGroup) => {
+    const linked = linkedNow();
+    const seenBy = seenByOf(g);
+    if (!g.approved) return { phone: null, seenBy, phoneState: 'ok', readThrough: null };
+    const phone = g.phone ?? 1;
+    const off = !linked.has(phone);
+    return { phone, seenBy, phoneState: off ? 'unlinked' : 'ok', readThrough: off ? seenBy.find((p) => p !== phone && linked.has(p)) ?? null : null };
+  };
+  /** The agent's check of a phone asked for a group: linked, and in the group. */
+  const phoneProblem = (g: FakeGroup, phone: number) => {
+    const label = phones.find((p) => p.id === phone)?.label ?? `Phone ${phone}`;
+    if (!linkedNow().has(phone)) return `${label} is not linked, so it can't read this group. Choose a linked phone.`;
+    if (!seenByOf(g).includes(phone)) return `${label} is not in this group, so it can't read it. Choose a phone that is.`;
+    return null;
+  };
+  /** The agent's default: the lowest linked phone in the group, else phone 1. */
+  const defaultPhone = (g: FakeGroup) => seenByOf(g).find((p) => linkedNow().has(p)) ?? 1;
   const used = () => new Set(groups.flatMap((g) => (g.client ? [g.client.code] : [])));
   const overview = (q: string) => {
     const rows = groups
@@ -206,10 +266,13 @@ function fakeGroupsApi(state: FakeState) {
       .map((g) => ({
         key: g.key, name: g.name, approved: g.approved, inWhatsApp: true, ignored: !g.approved && Boolean(g.ignored),
         client: g.client && { ...g.client, codeLocked: true, ...(g.approved ? {} : { emailDomains: [], meetingKeywords: [] }) },
+        ...phoneFields(g),
       }));
     const approved = groups.filter((g) => g.approved).length;
     const ignored = groups.filter((g) => !g.approved && g.ignored).length;
     return {
+      // As the agent's Groups answer: each phone's id, label and state only.
+      phones: phones.map(({ id, label, state }) => ({ id, label, state })),
       rows, total: rows.length, counts: { all: groups.length, approved, notApproved: groups.length - approved - ignored, ignored },
       stale: Boolean(state.whatsappDown), reason: state.whatsappDown ? 'whatsapp_not_connected' : null, fetchedAt,
     };
@@ -228,10 +291,18 @@ function fakeGroupsApi(state: FakeState) {
       if (g && !g.client && taken.has(a.code)) return { message: `The code ${a.code} is already used by another client. Choose another.`, key: a.key, field: 'code' };
       // The browser cannot know every code (a client whose group left WhatsApp is not listed): ZZZ stands for one.
       if (a.code === 'ZZZ') return { message: 'The code ZZZ is already used by a client whose group is no longer in WhatsApp. Choose another.', key: a.key, field: 'code' };
+      const problem = g && a.phone !== undefined ? phoneProblem(g, a.phone) : null;
+      if (problem) return { message: problem, key: a.key, field: 'phone' };
+    }
+    for (const e of b.edit ?? []) {
+      const g = groups.find((x) => x.key === e.key);
+      const problem = g && e.phone !== undefined ? phoneProblem(g, e.phone) : null;
+      if (problem) return { message: problem, key: e.key, field: 'phone' };
     }
     for (const a of b.approve ?? []) {
       const g = groups.find((x) => x.key === a.key);
       if (!g) continue;
+      g.phone = a.phone ?? defaultPhone(g);
       g.approved = true;
       g.client = g.client
         ? { ...g.client, name: a.name, active: true }
@@ -245,7 +316,10 @@ function fakeGroupsApi(state: FakeState) {
       }
     }
     for (const e of b.edit ?? []) {
-      const c = groups.find((x) => x.key === e.key)?.client;
+      const g = groups.find((x) => x.key === e.key);
+      // Read through another phone: the group moves to it (the agent audits it).
+      if (g && e.phone !== undefined) g.phone = e.phone;
+      const c = g?.client;
       if (c) Object.assign(c, { name: e.name ?? c.name, emailDomains: e.emailDomains ?? c.emailDomains, meetingKeywords: e.meetingKeywords ?? c.meetingKeywords });
     }
     return null;
@@ -264,6 +338,7 @@ function fakeGroupsApi(state: FakeState) {
       const name = g.client?.name ?? (g.name.split(/\s+[x×–-]\s+/i)[0]?.trim() || g.name.trim()).slice(0, 80);
       const code = g.client?.code ?? suggest(name);
       if (!code) return { key, ok: false, reason: 'No code could be made from its name. Approve it on its own to choose one.' };
+      g.phone = defaultPhone(g);
       g.approved = true;
       g.ignored = false;
       g.client = g.client ? { ...g.client, active: true } : { name, code, active: false, hasTasks: false, emailDomains: [], meetingKeywords: [] };
@@ -314,7 +389,8 @@ export async function fakeDashboard(o: { port: number; state: FakeState; log?: L
   const { state } = o;
   const web = createWebServer({ control: {}, env: { DASHBOARD_PORT: o.port }, log: o.log ?? silentLogger(), clock: systemClock });
   // Tasks, Meetings, Activity, Tracker, AI usage, Automations, Audit logs and Settings: the real routes on an in-memory db.
-  await mountFakeScreens(web, { signedIn: () => state.signedIn, csrf: FAKE_CSRF });
+  // Open chat reads the same phone list as Groups and Connections (made below; read only when a chat is asked for).
+  await mountFakeScreens(web, { signedIn: () => state.signedIn, csrf: FAKE_CSRF, phones: () => phones.map(({ id, label, state: s }) => ({ id, label, state: s })) });
   const guarded = (body: () => unknown) => (ctx: { res: ServerResponse }) => {
     if (!state.signedIn) return sendError(ctx.res, 401, 'unauthenticated', 'Sign in first.');
     sendJson(ctx.res, 200, body());
@@ -332,9 +408,9 @@ export async function fakeDashboard(o: { port: number; state: FakeState; log?: L
   web.router.post('/dashboard/api/whatsapp/link/start', async ({ req, res }) => {
     if (!owner(req, res)) return;
     const b = (await readJson(req)) as { target?: unknown; confirm?: unknown };
-    if ((b.target !== 'founder' && b.target !== 'spare') || b.confirm !== true) return sendError(res, 400, 'invalid', 'Choose the founder or the spare phone, and confirm.');
+    if (!['founder', 'phone2', 'phone3', 'phone4', 'phone5', 'spare'].includes(String(b.target)) || b.confirm !== true) return sendError(res, 400, 'invalid', 'Choose the phone to link, and confirm.');
     const linkId = randomBytes(16).toString('hex');
-    wa.links.set(linkId, { target: b.target, cancelled: false });
+    wa.links.set(linkId, { target: String(b.target), cancelled: false });
     sendJson(res, 200, { linkId });
   });
   web.router.get('/dashboard/api/whatsapp/link/stream', ({ req, res, url }) => {
@@ -346,6 +422,34 @@ export async function fakeDashboard(o: { port: number; state: FakeState; log?: L
     if (link) link.cancelled = true;
     sendJson(res, 200, { cancelled: Boolean(link) });
   });
+  // Reading phones (lane C, change 7): the fake's one list (fakePhones), which Manage groups reads too; the changes act
+  // on it in memory. Three phones, the third unlinked, unless the fake was started with one.
+  const phones = fakePhones(state.phones ?? 3);
+  const phoneOf = (id: string | undefined) => phones.find((p) => p.id === Number(id));
+  web.router.get('/dashboard/api/whatsapp/phones', guarded(() => ({ phones, max: 5 })));
+  web.router.post('/dashboard/api/whatsapp/phones', async ({ req, res }) => {
+    if (!owner(req, res)) return;
+    const label = String(((await readJson(req)) as { label?: unknown }).label ?? '').trim();
+    if (!label || label.length > 40) return sendError(res, 422, 'invalid', "A phone's name is one line of 1 to 40 characters.");
+    const id = [2, 3, 4, 5].find((n) => !phones.some((p) => p.id === n));
+    if (id === undefined) return sendError(res, 409, 'conflict', 'A workspace can have at most 5 phones. Remove one first.');
+    const phone = { id, label, state: 'active' as const, number: null, status: 'not_linked', groups: 0, accountName: null };
+    phones.push(phone);
+    sendJson(res, 200, { phone });
+  });
+  for (const action of ['rename', 'unlink', 'remove'] as const) {
+    web.router.post(`/dashboard/api/whatsapp/phones/:id/${action}`, async ({ req, res, params }) => {
+      if (!owner(req, res)) return;
+      const p = phoneOf(params.id);
+      if (!p) return sendError(res, 404, 'not_found', 'There is no such phone.');
+      const body = (await readJson(req)) as { label?: unknown; confirm?: unknown };
+      if (action === 'rename') p.label = String(body.label ?? '').trim() || p.label;
+      else if (body.confirm !== true) return sendError(res, 400, 'invalid', 'Choose a phone, and confirm.');
+      else if (action === 'unlink') Object.assign(p, { state: 'unlinked', number: null, status: null, accountName: null });
+      else phones.splice(phones.indexOf(p), 1);
+      sendJson(res, 200, { phone: p, loggedOut: true });
+    });
+  }
   web.router.post('/dashboard/api/google/connect', async ({ req, res }) => {
     if (!owner(req, res)) return;
     const b = (await readJson(req)) as { account?: unknown };
@@ -367,7 +471,7 @@ export async function fakeDashboard(o: { port: number; state: FakeState; log?: L
     if (state.rateLimited) return sendJson(res, 429, { error: { code: 'rate_limited', message: 'Too many tries. Wait a minute and try again.', retryAfterSec: 60 } });
     setTimeout(() => sendJson(res, 200, r), 600);
   });
-  const g = fakeGroupsApi(state);
+  const g = fakeGroupsApi(state, phones);
   web.router.get('/dashboard/api/clients', guarded(() => ({ clients: g.clientCards() })));
   web.router.get('/dashboard/api/clients/:code', ({ res, params }) => {
     if (!state.signedIn) return sendError(res, 401, 'unauthenticated', 'Sign in first.');

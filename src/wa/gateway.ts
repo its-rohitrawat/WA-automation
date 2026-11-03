@@ -5,17 +5,23 @@ import { guarded, type CrashReport } from '../runtime/context.ts';
 import { systemClock, type Clock } from '../util/clock.ts';
 import type { AllowList } from './allowlist.ts';
 import { backoffMs } from './backoff.ts';
+import { asChatDeleteSocket, type ChatDeleteSocket } from './chatDelete.ts';
+import { asDeviceUnlinkSocket, unlinkDevice } from './deviceUnlink.ts';
+import { MEMBERS_CACHE_MS, MEMBERS_FAILED_MS, MEMBERS_READ_MS, membersOf, type GroupMember, type MembersRead } from './groupMembers.ts';
 import { asGroupSendSocket, type GroupSendSocket } from './groupSend.ts';
 import { normalizeMessage, normalizeReaction, normalizeUpdate, type NormalizedEvent } from './normalize.ts';
 
 /**
  * The subset of a Baileys socket the gateway uses. Deliberately has no send-type methods. fetchMessageHistory is the
  * one request it makes: it asks the founder's own phone (Baileys addresses it to the account's own number, as a peer
- * request) for earlier messages of one chat. Nothing reaches any chat or any other person.
+ * request) for earlier messages of one chat. Nothing reaches any chat or any other person. groupMetadata, like
+ * groupFetchAllParticipating, only reads group data (one group's members, for Open chat).
  */
 export interface SocketLike {
   ev: { on<T extends keyof BaileysEventMap>(event: T, listener: (arg: BaileysEventMap[T]) => void): void };
   groupFetchAllParticipating(): Promise<{ [jid: string]: GroupMetadata }>;
+  /** Optional: a socket without it reads no members. */
+  groupMetadata?(jid: string): Promise<GroupMetadata>;
   fetchMessageHistory(count: number, oldestMsgKey: { remoteJid: string; fromMe: boolean; id: string }, oldestMsgTimestamp: number): Promise<string>;
   end(error: Error | undefined): Promise<void> | void;
 }
@@ -124,6 +130,26 @@ export interface GatewayLike {
    * Open chat, after the owner confirmed the message.
    */
   groupSocket?(groupId: string): GroupSendSocket | null;
+  /**
+   * The members of an allowed group while open, from WhatsApp's group data (src/wa/groupMembers.ts); null when it cannot
+   * ask. A read: Open chat's group info and tagging. fresh: not from the 5-minute keep (a send with tags).
+   */
+  groupMembers?(groupId: string, o?: MembersRead): Promise<GroupMember[] | null>;
+  /**
+   * The socket for src/wa/chatDelete.ts, for an allowed group while open; null otherwise. Used only by the dashboard's
+   * Delete chat, after the owner confirmed it.
+   */
+  chatDeleteSocket?(groupId: string): ChatDeleteSocket | null;
+  /**
+   * Whether this group's own phone is open: several reading phones (src/wa/phoneSet.ts, lane C). Without it, one
+   * gateway: its status says.
+   */
+  isOpenFor?(groupId: string): boolean;
+  /**
+   * An unlink (lane C): asks WhatsApp to unlink this device (src/wa/deviceUnlink.ts). True when WhatsApp took it, false
+   * when it could not be asked (not open, or no answer in time). The caller stops the gateway and clears the session.
+   */
+  endLink?(): Promise<boolean>;
 }
 
 export type Scheduler = (fn: () => void, ms: number) => { cancel(): void };
@@ -151,6 +177,8 @@ export interface GatewayOptions {
    */
   tenantId?: string;
   report?: CrashReport;
+  /** Tests: how long endLink() waits for WhatsApp. Default UNLINK_TIMEOUT_MS (src/wa/deviceUnlink.ts). */
+  unlinkTimeoutMs?: number;
 }
 
 type Guard = <A extends unknown[], R>(fn: (...a: A) => R) => (...a: A) => R | undefined;
@@ -159,6 +187,11 @@ const unguarded: Guard = (fn) => fn;
 export class WhatsAppGateway implements GatewayLike {
   readonly #opts: GatewayOptions;
   readonly #emitter = new EventEmitter();
+  /** Each approved group's members as last read, and when (groupMembers). */
+  readonly #members = new Map<string, { at: number; members: GroupMember[] }>();
+  /** Each group's read in flight, shared by every ask meanwhile, and when a group's last read failed (final review, S6). */
+  readonly #membersReading = new Map<string, Promise<GroupMember[] | null>>();
+  readonly #membersFailedAt = new Map<string, number>();
   /** Baileys only reads cachedGroupMetadata on the send path, which this passive client never uses. Kept for completeness. */
   readonly #groupCache = new Map<string, GroupMetadata>();
   readonly #clock: Clock;
@@ -224,6 +257,60 @@ export class WhatsAppGateway implements GatewayLike {
     return asGroupSendSocket(sock);
   }
 
+  /**
+   * An approved group's members, read from WhatsApp's group data at most every 5 minutes (fresh: now, for a send with
+   * tags); null when it cannot ask. One read per group at a time, shared by every ask meanwhile; a failed read is kept
+   * 30 seconds, so nothing asks that group again sooner (final review, S6).
+   */
+  async groupMembers(groupId: string, o: MembersRead = {}): Promise<GroupMember[] | null> {
+    const sock = this.#sock;
+    // The same guard as the sockets: a group that is not approved is never asked about, and nothing kept is given.
+    if (this.#stopped || !sock || this.#status.state !== 'open' || !this.#opts.allow.has(groupId)) return null;
+    const now = this.#clock.now().getTime();
+    const kept = this.#members.get(groupId);
+    if (!o.fresh && kept && now - kept.at < MEMBERS_CACHE_MS) return kept.members;
+    const failedAt = this.#membersFailedAt.get(groupId);
+    if (failedAt !== undefined && now - failedAt < MEMBERS_FAILED_MS) return null;
+    if (typeof sock.groupMetadata !== 'function') return null;
+    const inFlight = this.#membersReading.get(groupId);
+    if (inFlight) return inFlight;
+    const read = this.#readMembers(sock, groupId, now).finally(() => {
+      if (this.#membersReading.get(groupId) === read) this.#membersReading.delete(groupId);
+    });
+    this.#membersReading.set(groupId, read);
+    return read;
+  }
+
+  async #readMembers(sock: SocketLike, groupId: string, now: number): Promise<GroupMember[] | null> {
+    let timer: { cancel(): void } | undefined;
+    const timeout = new Promise<null>((resolve) => {
+      timer = this.#schedule(() => resolve(null), MEMBERS_READ_MS);
+    });
+    try {
+      const meta = await Promise.race([sock.groupMetadata!(groupId), timeout]);
+      if (!meta) {
+        this.#membersFailedAt.set(groupId, this.#clock.now().getTime());
+        return null;
+      }
+      const members = membersOf(meta);
+      this.#members.set(groupId, { at: now, members });
+      this.#membersFailedAt.delete(groupId);
+      return members;
+    } catch {
+      this.#membersFailedAt.set(groupId, this.#clock.now().getTime());
+      return null; // never the error: it can carry the group's id
+    } finally {
+      timer?.cancel();
+    }
+  }
+
+  chatDeleteSocket(groupId: string): ChatDeleteSocket | null {
+    const sock = this.#sock;
+    // The allow-list again here: a group that is not approved never gets a socket.
+    if (this.#stopped || !sock || this.#status.state !== 'open' || !this.#opts.allow.has(groupId)) return null;
+    return asChatDeleteSocket(sock);
+  }
+
   status(): GatewayStatus {
     return { ...this.#status, credsSaveFailures: this.#credsSaveFailures };
   }
@@ -243,6 +330,18 @@ export class WhatsAppGateway implements GatewayLike {
     this.#attempt = 0;
     this.#restarts = 0;
     this.#connect();
+  }
+
+  /**
+   * An unlink (lane C): asks WhatsApp to unlink this device (src/wa/deviceUnlink.ts), only while open. True when WhatsApp
+   * took it; false when it was not open, the socket cannot, the request failed or no answer came in time. Never throws.
+   */
+  async endLink(): Promise<boolean> {
+    const sock = this.#sock;
+    if (this.#stopped || !sock || this.#status.state !== 'open') return false;
+    const unlinkable = asDeviceUnlinkSocket(sock);
+    if (!unlinkable) return false;
+    return unlinkDevice(unlinkable, this.#opts.unlinkTimeoutMs);
   }
 
   async stop(): Promise<void> {

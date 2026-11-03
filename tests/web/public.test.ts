@@ -16,7 +16,7 @@ import { ago, date, greeting, initials, usd, when } from '../../src/web/public/f
 // @ts-expect-error -- browser module (see above)
 import { HI } from '../../src/web/public/icons.js';
 // @ts-expect-error -- browser module (see above)
-import { LOCKED_UNTIL_ACTIVE, NAV, ONBOARDING_NAV, PLATFORM_NAV, SCREENS, navFor, parsePath, pathFor, showScreens } from '../../src/web/public/router.js';
+import { ASSISTANT_NAV, LOCKED_UNTIL_ACTIVE, NAV, ONBOARDING_NAV, PLATFORM_NAV, SCREENS, navFor, parsePath, pathFor, showScreens } from '../../src/web/public/router.js';
 
 const PUBLIC = fileURLToPath(new URL('../../src/web/public/', import.meta.url));
 const publicFiles = (ext: string) =>
@@ -151,13 +151,35 @@ describe('router', () => {
       expect(group(s, 'System')).toEqual(['automations', 'audit', 'settings']);
       for (const id of FOUNDER_ONLY) expect(ids(s)).not.toContain(id);
     }
-    expect([...LOCKED_UNTIL_ACTIVE]).toEqual(['clients', 'tasks', 'meetings', 'tracker']);
+    expect([...LOCKED_UNTIL_ACTIVE]).toEqual(['clients', 'tasks', 'meetings', 'tracker', 'assistant']); // the Assistant too (Nov release piece 3)
   });
 
   it('Switch workspace: first in System for a member of 2 or more workspaces only, never the founder’s', () => {
     expect(group({ role: 'owner', workspaces: 2 }, 'System')).toEqual(['workspaces', 'automations', 'audit', 'settings']);
     for (const s of [{ role: 'owner', workspaces: 1 }, { role: 'owner' }, { role: 'founder', platform: true, workspaces: 3 }]) expect(ids(s)).not.toContain('workspaces');
     expect(LOCKED_UNTIL_ACTIVE.has('workspaces')).toBe(false); // a member can switch before its workspace is active
+  });
+
+  it('the Assistant (November release, change 1): right after Overview where the workspace has it, and nowhere else', () => {
+    expect(ASSISTANT_NAV).toEqual(['assistant', 'Assistant', 'spark']);
+    expect(group({ role: 'founder', assistant: true }, 'Workspace').slice(0, 3)).toEqual(['overview', 'assistant', 'clients']);
+    expect(group({ role: 'founder', platform: true, assistant: true }, 'Workspace').slice(0, 2)).toEqual(['overview', 'assistant']);
+    expect(group({ role: 'owner', assistant: true }, 'Workspace').slice(0, 3)).toEqual(['onboarding', 'overview', 'assistant']);
+    // Without it (the assistant off, or a server that does not say): today's nav exactly.
+    for (const s of [{ role: 'founder' }, { role: 'founder', assistant: false }, { role: 'owner' }, {}]) expect(ids(s)).not.toContain('assistant');
+    try {
+      showScreens({ role: 'founder', assistant: true });
+      expect(parsePath('/dashboard/assistant')).toEqual({ screen: 'assistant', sub: null });
+      expect(pathFor('assistant')).toBe('/dashboard/assistant');
+      // A stored chat's address (piece 2): its id only, nothing else.
+      expect(parsePath('/dashboard/assistant/42')).toEqual({ screen: 'assistant', sub: '42' });
+      expect(parsePath(pathFor('assistant', '42'))).toEqual({ screen: 'assistant', sub: '42' });
+      for (const bad of ['0', '-1', 'x', '4e2', '1234567890123456', '__proto__']) expect(parsePath(`/dashboard/assistant/${bad}`), bad).toEqual({ screen: 'assistant', sub: null });
+      showScreens({ role: 'founder' });
+      expect(parsePath('/dashboard/assistant')).toEqual({ screen: 'overview', sub: null });
+    } finally {
+      showScreens({ role: 'founder', platform: false });
+    }
   });
 
   it('only the session’s own screens have an address: anything else opens the overview', () => {

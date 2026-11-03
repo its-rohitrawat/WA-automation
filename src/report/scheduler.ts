@@ -8,7 +8,7 @@ import {
 import type { Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
 import { istDate, istDayLabel, istTime } from '../util/time.ts';
-import { buildShortMorningText, trackerLink } from './morningReport.ts';
+import { buildShortMorningText, messageProblem, trackerLink } from './morningReport.ts';
 import type { ReportDays, ReportHealth, ReportSender, ReportSettings, SenderState, SendResult } from './types.ts';
 
 /** Waits after a definite failure: 2 minutes, then 5, then 10 for every later try, until the deadline. */
@@ -181,6 +181,11 @@ export interface ReportSchedulerOptions {
   settings: ReportSettings | (() => ReportSettings);
   /** The health line the tracker view is loaded with (Health.workbookLine). The short text does not show it. */
   healthLine: () => HealthLine;
+  /**
+   * The owner's own message text (SettingsStore.reportMessage), read when each report is built; undefined: the default.
+   * Not given: always the default.
+   */
+  message?: () => string | undefined;
   /** Test seam: replaces building the text from the tracker. */
   build?: (now: Date) => Promise<ReportPayload>;
 }
@@ -431,6 +436,24 @@ export class ReportScheduler {
     const link = await trackerLink(this.#o.db);
     if (!link) throw new ReportBuildError('no_tracker_link');
     const view = await loadTrackerView(this.#o.db, now, this.#o.healthLine());
-    return { text: buildShortMorningText(view, view.today, link) };
+    return { text: this.#text(view, link) };
+  }
+
+  /**
+   * The owner's text filled in, or the default text when there is none, or when reading it, checking it or filling it
+   * fails (an unknown placeholder is not a failure: it is sent as written). The morning send never fails on the text.
+   */
+  #text(view: Awaited<ReturnType<typeof loadTrackerView>>, link: string): string {
+    try {
+      const template = this.#o.message?.();
+      if (template !== undefined && messageProblem(template) === null) {
+        const text = buildShortMorningText(view, view.today, link, template);
+        if (text.trim() !== '') return text;
+      }
+      if (template !== undefined) this.#o.log.warn({}, 'the saved morning message could not be used; the default text is sent');
+    } catch (err) {
+      this.#o.log.error({ err }, 'the saved morning message could not be read; the default text is sent');
+    }
+    return buildShortMorningText(view, view.today, link);
   }
 }

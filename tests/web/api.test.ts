@@ -126,7 +126,7 @@ describe('read API', () => {
       founder: { device: 'string', groups: 'number', label: 'string', lastActivityAt: 'null', state: 'string' },
       google: [{ email: 'null', label: 'string', state: 'string', stateLabel: 'string', usedFor: ['string'] }],
       monitoring: { lastBeatAt: 'null', on: 'boolean' },
-      spare: { device: 'string', label: 'string', recipientMasked: 'null', state: 'string' },
+      spare: { accountName: 'null', device: 'string', label: 'string', recipientMasked: 'null', state: 'string' },
     });
   });
 

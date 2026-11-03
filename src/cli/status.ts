@@ -14,6 +14,23 @@ function ageText(ms: number): string {
 
 const stamp = (iso: string) => `${istShortDate(new Date(iso))} ${istTime(new Date(iso))}`;
 
+/** A phone's state in words, as Connections says it. */
+const PHONE_STATE: Readonly<Record<string, string>> = {
+  open: 'connected', connecting: 'connecting', closed: 'reconnecting', stopped: 'starting', linking: 'linking',
+  not_linked: 'not linked', logged_out: 'logged out on the phone', replaced: 'replaced by another session', forbidden: 'refused by WhatsApp',
+};
+
+/**
+ * The WhatsApp line. Several reading phones (lane C): how many are connected, and each one that is not, by its name
+ * (never a number). One phone: as before.
+ */
+function whatsappText(s: HealthSnapshot): string {
+  const phones = s.phones ?? [];
+  if (phones.length <= 1) return `${s.whatsapp.state} since ${stamp(s.whatsapp.since)}`;
+  const down = phones.filter((p) => p.state !== 'open').map((p) => `${p.label}: ${PHONE_STATE[p.state] ?? p.state}`);
+  return `${phones.length - down.length} of ${phones.length} phones connected${down.length > 0 ? ` (${down.join(', ')})` : ''}`;
+}
+
 export function formatStatus(i: {
   snapshot: HealthSnapshot | undefined;
   clients: ClientRow[];
@@ -39,7 +56,7 @@ export function formatStatus(i: {
     lines.push('Health:      no report yet (is the service running?)');
   } else {
     lines.push(`Health:      ${s.line.text} (reported ${ageText(ageMs)})`);
-    lines.push(`WhatsApp:    ${lk}${s.whatsapp.state} since ${stamp(s.whatsapp.since)}`);
+    lines.push(`WhatsApp:    ${lk}${whatsappText(s)}`);
     if (s.publishFailingSince) lines.push(`Drive:       failing since ${stamp(s.publishFailingSince)}`);
     if (s.ingestFailures > 0) lines.push(`Messages not saved: ${s.ingestFailures} (see wa-agent.out.log)`);
     if (s.media) {

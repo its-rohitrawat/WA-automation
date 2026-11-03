@@ -188,11 +188,15 @@ describe('groupsOverview', () => {
     expect(o.total).toBe(250);
     expect(o.counts).toEqual({ all: 250, approved: 2, notApproved: 248, ignored: 0 });
     expect(o.rows.slice(0, 2).map((r) => r.groupId)).toEqual([MEHTA.groupId, SHARMA.groupId]);
+    // One phone (no phone list): every group is phone 1's, and nothing is unlinked (more phones, November release).
+    const onePhone = { seenBy: [1], phoneState: 'ok', readThrough: null };
     expect(o.rows[0]).toEqual({
       groupId: MEHTA.groupId, name: 'Mehta – Studio', approved: true, inWhatsApp: true, ignored: false,
       client: { name: 'Mehta Foods', code: 'MEH', active: true, hasTasks: false, codeLocked: true, emailDomains: [], meetingKeywords: [] },
+      phone: 1, ...onePhone,
     });
-    expect(o.rows[2]).toEqual({ groupId: gid(10), name: 'Group 000', approved: false, inWhatsApp: true, ignored: false, client: null });
+    expect(o.rows[2]).toEqual({ groupId: gid(10), name: 'Group 000', approved: false, inWhatsApp: true, ignored: false, client: null, phone: null, ...onePhone });
+    expect(o.phones).toEqual([{ id: 1, label: 'Phone 1', state: 'active' }]);
     expect(o.rows.at(-1)!.name).toBe('Group 247');
   });
 

@@ -11,7 +11,7 @@ import type { WebServer } from '../../src/web/server.ts';
 import { SessionStore } from '../../src/web/sessions.ts';
 import { startDashboard } from '../../src/web/start.ts';
 import type { Db } from '../../src/store/db.ts';
-import { NOW, onSqlite, seededDb } from '../helpers/db.ts';
+import { NOW, onSqlite, seededDb, SHARMA } from '../helpers/db.ts';
 import { openTestPlatformDb } from '../helpers/pg.ts';
 import { OWNER } from '../helpers/web.ts';
 
@@ -35,8 +35,8 @@ function deps(db: Awaited<ReturnType<typeof seededDb>>, clock: ReturnType<typeof
   };
 }
 
-/** `extra` gets the platform Db: the platform and sign-up routes' own. */
-async function boot(extra: (platformDb: Db, clock: ReturnType<typeof manualClock>) => Partial<AgentRoutesDeps> = () => ({})) {
+/** `extra` gets the platform Db: the platform and sign-up routes' own; and the agent's own (tracker) Db. */
+async function boot(extra: (platformDb: Db, clock: ReturnType<typeof manualClock>, db: Db) => Partial<AgentRoutesDeps> = () => ({})) {
   const db = await seededDb();
   // The platform tables and the sessions: in tracker.db on SQLite (what main.ts does before the platform routes are
   // mounted, S5H.1); on Postgres their own, which P3 made (OWNER is this file's own there).
@@ -51,7 +51,7 @@ async function boot(extra: (platformDb: Db, clock: ReturnType<typeof manualClock
     },
     db, platformDb, log: silentLogger(), control: {}, clock,
     google: { exchange: () => Promise.reject(new Error('no Google')), verifier: () => Promise.reject(new Error('no Google')) },
-    mount: (m) => mountAgentRoutes(m, { ...deps(db, clock, started), ...extra(platformDb, clock) }),
+    mount: (m) => mountAgentRoutes(m, { ...deps(db, clock, started), ...extra(platformDb, clock, db) }),
   });
   servers.push(web!);
   const port = web!.address()!.port;
@@ -102,6 +102,52 @@ describe('the combined dashboard routes', () => {
     const local = await post2(path, { origin: PUBLIC, 'x-csrf-token': s2.csrf });
     expect(local.status).toBe(200);
     expect(local.cookie).not.toContain('Secure');
+  });
+});
+
+describe('the reading phones’ routes (lane C, change 7): mounted with their deps, behind the owner and change guards', () => {
+  const PHONES = '/dashboard/api/whatsapp/phones';
+  const phoneDeps = (calls: string[]): Partial<AgentRoutesDeps> => ({
+    phones: {
+      list: () => [{ id: 1, label: 'Phone 1', state: 'active', number: '…0001', status: 'open', groups: 2, accountName: null }],
+      add: async (label) => (calls.push(`add ${String(label)}`), { id: 2, label: String(label), state: 'active', addedAt: NOW }),
+      rename: async (id, label) => (calls.push(`rename ${id}`), { id, label: String(label), state: 'active', addedAt: NOW }),
+      unlink: async (id) => (calls.push(`unlink ${id}`), { phone: { id, label: 'x', state: 'unlinked', addedAt: NOW }, loggedOut: true }),
+      remove: async (id) => (calls.push(`remove ${id}`), { id, label: 'x', state: 'active', addedAt: NOW }),
+    },
+  });
+
+  it('without them there are no phone routes; with them each route answers, and a change needs the CSRF token and confirm', async () => {
+    expect((await (await boot()).get(PHONES)).status).toBe(404);
+    const calls: string[] = [];
+    const { get, post, session } = await boot(() => phoneDeps(calls));
+    expect((await get(PHONES)).status).toBe(200);
+    expect((await get(PHONES, false)).status).toBe(401);
+    const h = { origin: PUBLIC, 'x-csrf-token': session.csrf };
+    expect((await post(`${PHONES}/2/unlink`, { origin: PUBLIC }, JSON.stringify({ confirm: true }))).status).toBe(403); // no token
+    expect((await post(`${PHONES}/2/unlink`, h, '{}')).status).toBe(400); // no confirm
+    expect(calls).toEqual([]);
+    expect((await post(PHONES, h, JSON.stringify({ label: 'Sales' }))).status).toBe(200);
+    expect((await post(`${PHONES}/2/rename`, h, JSON.stringify({ label: 'Desk' }))).status).toBe(200);
+    expect((await post(`${PHONES}/2/unlink`, h, JSON.stringify({ confirm: true }))).status).toBe(200);
+    expect((await post(`${PHONES}/2/remove`, h, JSON.stringify({ confirm: true }))).status).toBe(200);
+    expect(calls).toEqual(['add Sales', 'rename 2', 'unlink 2', 'remove 2']);
+  });
+});
+
+describe('Open chat’s members (final review, S6)', () => {
+  it('each read of the members counts against the action limit, as a change does: the 31st in a minute is refused, unasked', async () => {
+    let asked = 0;
+    const { get } = await boot((_p, clock, db) => ({
+      chat: {
+        db, configs: () => [SHARMA], sendingOn: () => false, connected: () => true, groupSocket: () => null,
+        groupMembers: async () => (asked++, []), directory: { cachedGroups: () => [] }, log: silentLogger(), clock,
+      },
+    }));
+    const path = '/dashboard/api/clients/SHA/chat/members';
+    for (let i = 0; i < 30; i++) expect((await get(path)).status).toBe(200);
+    expect((await get(path)).status).toBe(429);
+    expect(asked).toBe(30);
   });
 });
 

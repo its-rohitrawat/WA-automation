@@ -4,7 +4,7 @@ import { openAdminConnection, openPgPool, PgTenantDb, type AdminConnection } fro
 import { openStore } from '../../../src/store/open.ts';
 import { migrate } from '../../../src/store/pg/admin.ts';
 import { ACCESS_SQL, accessProblems, accessRefused, accessRefusedAfterMigrate, type CatalogRow } from '../../../src/store/pg/accessRules.ts';
-import { CUSTOMER_TABLES, FOUNDER_TENANT_ID } from '../../../src/store/pg/migrations.ts';
+import { CUSTOMER_TABLES, FOUNDER_TENANT_ID, PG_LATEST } from '../../../src/store/pg/migrations.ts';
 import { freshPg, type FreshPg } from '../../helpers/freshPg.ts';
 import { onPg } from '../../helpers/pg.ts';
 import { healthyCatalog } from './catalogFake.ts';
@@ -81,7 +81,7 @@ describe.runIf(onPg)('the access rules on a real Postgres', () => {
     expect(accessProblems((await owner.sql(ACCESS_SQL)).rows as unknown as CatalogRow[])).toEqual([]);
     const lines: string[] = [];
     expect(await migrate(owner, { now: () => new Date().toISOString(), out: (l) => lines.push(l) })).toEqual([]);
-    expect(lines).toEqual(['Already at P5: nothing to apply', 'Access rules checked: row security on every customer table, nothing of the platform open to wa_app']);
+    expect(lines).toEqual([`Already at P${PG_LATEST}: nothing to apply`, 'Access rules checked: row security on every customer table, nothing of the platform open to wa_app']);
   });
 
   it.each([

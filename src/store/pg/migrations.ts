@@ -19,12 +19,25 @@ import { FOUNDER_TENANT_ID } from '../../platform/store.ts';
 
 export { FOUNDER_TENANT_ID };
 
-/** The customer tables, in an order where every parent comes before its children. P2 is generated from this list. */
-export const CUSTOMER_TABLES = [
+/**
+ * The customer tables P1 creates, in an order where every parent comes before its children. Frozen: P2 (row-level
+ * security) is generated from this list, and an applied migration never changes, so a later table goes in its own
+ * migration's list (P6_TABLES), never here.
+ */
+const P1_TABLES = [
   'clients', 'messages', 'message_edits', 'reactions', 'people', 'meetings', 'tasks', 'task_events', 'decisions',
   'batches', 'spend', 'kv', 'media', 'media_stt_forget', 'reports', 'stt_forget', 'audit_log', 'settings', 'uptime_log',
   'outbox', 'wa_auth',
 ] as const;
+
+/** The assistant's chats (P6, November release lane A). */
+const P6_TABLES = ['assistant_chats', 'assistant_messages'] as const;
+
+/**
+ * Every customer table, in creation order (parents first): each has tenant_id and forced row-level security, and the
+ * access check (accessRules.ts) covers each one on the live database.
+ */
+export const CUSTOMER_TABLES = [...P1_TABLES, ...P6_TABLES] as const;
 export type CustomerTable = (typeof CUSTOMER_TABLES)[number];
 
 const TENANT = `tenant_id uuid NOT NULL DEFAULT current_setting('app.tenant_id')::uuid REFERENCES tenants (id)`;
@@ -415,7 +428,7 @@ CREATE TABLE wa_auth (
 `;
 
 /** P2: row-level security, enabled and forced, one policy per customer table; the platform tables are revoked. */
-export function rlsSql(tables: readonly string[] = CUSTOMER_TABLES): string {
+export function rlsSql(tables: readonly string[]): string {
   const per = tables.map((t) => `ALTER TABLE ${t} ENABLE ROW LEVEL SECURITY;
 ALTER TABLE ${t} FORCE ROW LEVEL SECURITY;
 CREATE POLICY ${t}_tenant ON ${t}
@@ -437,7 +450,7 @@ REVOKE ALL ON FUNCTION wa_schema_version() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION wa_schema_version() TO wa_app, wa_platform;
 `;
 
-export const P2_SQL = `${rlsSql()}${SCHEMA_VERSION_FN_SQL}`;
+export const P2_SQL = `${rlsSql(P1_TABLES)}${SCHEMA_VERSION_FN_SQL}`;
 
 /**
  * The dashboard sessions, a platform table (A4): a session must be found before its customer is known. tenant_id is
@@ -495,6 +508,53 @@ ALTER DEFAULT PRIVILEGES FOR ROLE wa_owner IN SCHEMA public REVOKE SELECT ON SEQ
 ALTER DEFAULT PRIVILEGES FOR ROLE wa_owner REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 `;
 
+/**
+ * P6 (November release, changes 1 and 8): the assistant's chats, per customer as SQLite's v13, with row-level security
+ * as P2 gives the P1 tables. The default privileges give wa_app their rows (and, after P5, no SELECT on their id
+ * sequences); wa_backup reads them.
+ */
+export const P6_SQL = `
+CREATE TABLE assistant_chats (
+  ${TENANT},
+  ${ID},
+  created_by text NOT NULL CHECK (length(created_by) BETWEEN 1 AND 320),
+  title text NOT NULL CHECK (length(title) BETWEEN 1 AND 80),
+  created_at text NOT NULL,
+  updated_at text NOT NULL,
+  UNIQUE (tenant_id, id)
+);
+CREATE INDEX assistant_chats_updated ON assistant_chats (tenant_id, updated_at);
+
+CREATE TABLE assistant_messages (
+  ${TENANT},
+  ${ID},
+  chat_id bigint NOT NULL,
+  role text NOT NULL CHECK (role IN ('user', 'assistant')),
+  body text NOT NULL CHECK (length(body) <= 16000),
+  status text NOT NULL CHECK (status IN ('running', 'done', 'stopped', 'failed')),
+  note text CHECK (note IS NULL OR length(note) BETWEEN 1 AND 300),
+  cost_usd double precision NOT NULL DEFAULT 0,
+  cards text NOT NULL DEFAULT '[]' CHECK (length(cards) <= 20000),
+  links text NOT NULL DEFAULT '[]' CHECK (length(links) <= 4000),
+  created_at text NOT NULL,
+  updated_at text NOT NULL,
+  UNIQUE (tenant_id, id),
+  FOREIGN KEY (tenant_id, chat_id) REFERENCES assistant_chats (tenant_id, id)
+);
+CREATE INDEX assistant_messages_chat ON assistant_messages (tenant_id, chat_id, id);
+${rlsSql(P6_TABLES)}`;
+
+/**
+ * P7 (November release, lane C, change 7): up to five reading phones per workspace. wa_auth's phone check (P1's, inline,
+ * so Postgres named it wa_auth_phone_check) is replaced by a wider one: phones 2 to 5 as phone2 to phone5, beside founder
+ * (phone 1) and spare. Nothing else changes: no table, no column, no row rewritten, so row security and the access rules
+ * are as P6 left them, and every row already there (founder or spare) passes the new check.
+ */
+export const P7_SQL = `
+ALTER TABLE wa_auth DROP CONSTRAINT wa_auth_phone_check;
+ALTER TABLE wa_auth ADD CONSTRAINT wa_auth_phone_check CHECK (phone IN ('founder', 'phone2', 'phone3', 'phone4', 'phone5', 'spare'));
+`;
+
 /** In order; recorded in pg_schema_version by the runner (S2.4). Never edited once applied: a change is a new entry. */
 export const PG_MIGRATIONS: readonly { version: number; sql: string }[] = [
   { version: 1, sql: P1_SQL },
@@ -502,6 +562,8 @@ export const PG_MIGRATIONS: readonly { version: number; sql: string }[] = [
   { version: 3, sql: P3_SQL },
   { version: 4, sql: P4_SQL },
   { version: 5, sql: P5_SQL },
+  { version: 6, sql: P6_SQL },
+  { version: 7, sql: P7_SQL },
 ];
 
 /** The version this code needs: openStore refuses a database at any other one (run db-migrate first). */

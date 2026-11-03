@@ -414,3 +414,43 @@ describe('history backfill: the hold ends when the backfill cannot go on, and a 
     expect(finished.at(-1)).toEqual({ clientId: SHA, found: 2, stopped: false });
   });
 });
+
+describe('history backfill: several phones (lane C, change 7)', () => {
+  it('a group whose own phone is down waits, not as a failure, while a group on an open phone is read', async () => {
+    const t = await setup({ configs: [SHARMA, MEHTA] });
+    const MEH = await idOf(t.db, MEHTA.code);
+    // Sharma's group (first in the backfill's order) on a phone that is down, Mehta's on an open one; the set as a whole
+    // is not open.
+    const down = new Set([SHARMA.groupId]);
+    Object.assign(t.g, { isOpenFor: (groupId: string) => !down.has(groupId) });
+    t.g.state = 'closed';
+    await t.live(SHARMA.groupId, 'S1', at(0, -10));
+    await t.live(MEHTA.groupId, 'M1', at(0, -10));
+    t.bf.start();
+    await t.step();
+    expect(t.asked.map((a) => a.groupId)).toEqual([MEHTA.groupId]); // past Sharma's, to the next group
+    expect(t.bf.held(MEH)).toBe(true); // its own phone is open
+    expect(await getBackfill(t.db, SHARMA.groupId)).toMatchObject({ state: 'waiting', requests: 0, failures: 0 });
+    // Mehta's reading ends; Sharma's phone is still down: nothing is asked for it, and nothing counts against it.
+    await t.answer({ groups: [{ groupId: MEHTA.groupId, events: [msg(MEHTA.groupId, 'OLD', at(9))] }] });
+    await t.s.advance(REQUEST_GAP_MS * 4);
+    expect(t.asked).toHaveLength(1);
+    expect(await getBackfill(t.db, SHARMA.groupId)).toMatchObject({ state: 'waiting', requests: 0, failures: 0 });
+    // Its phone is back: at the next tick it is read.
+    down.clear();
+    await t.step();
+    expect(t.asked.map((a) => a.groupId)).toEqual([MEHTA.groupId, SHARMA.groupId]);
+  });
+
+  it('held() asks the active group’s own phone: down, the client is not held', async () => {
+    const t = await setup({ configs: [SHARMA] });
+    let open = true;
+    Object.assign(t.g, { isOpenFor: () => open });
+    await t.live(SHARMA.groupId, 'S1', at(0, -10));
+    t.bf.start();
+    await t.step();
+    expect(t.bf.held(SHA)).toBe(true);
+    open = false;
+    expect(t.bf.held(SHA)).toBe(false);
+  });
+});

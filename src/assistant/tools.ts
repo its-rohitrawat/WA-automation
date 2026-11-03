@@ -32,6 +32,13 @@ export interface ToolDeps {
 
 /** The screens open_screen may open, with the filters each one reads from its address. */
 export const SCREENS = ['overview', 'clients', 'tasks', 'meetings', 'activity', 'tracker', 'connections', 'usage', 'automations', 'audit', 'settings'] as const;
+export type Screen = (typeof SCREENS)[number];
+
+/**
+ * A customer's dashboard (Phase B, November release piece 3): every screen but the founder's own, Connections and AI
+ * usage. A customer's assistant is given only these: its open_screen tool names no other, and refuses any other.
+ */
+export const CUSTOMER_SCREENS: readonly Screen[] = SCREENS.filter((s) => s !== 'connections' && s !== 'usage');
 const AUDIT_KINDS = ['all', 'auth', 'config', 'connection', 'task', 'meeting', 'ops'] as const;
 
 const code = z.string().trim().regex(/^[A-Za-z]{3,4}$/, 'a client code of 3 or 4 letters').transform((s) => s.toUpperCase());
@@ -268,9 +275,26 @@ async function searchMessages(db: Db, i: z.infer<typeof INPUTS.search_messages>,
   };
 }
 
-/** Where open_screen goes: the screen and the address filters it reads (the screen drops anything it does not know). */
-export function screenTarget(raw: unknown): { screen: (typeof SCREENS)[number]; search: string; label: string } {
+/**
+ * The tools as a workspace's assistant sees them: TOOL_DEFINITIONS, with open_screen naming only `screens` (a customer's
+ * never names Connections or AI usage). The founder's, with every screen, is TOOL_DEFINITIONS itself.
+ */
+export function toolDefinitions(screens: readonly Screen[] = SCREENS): Anthropic.Beta.BetaTool[] {
+  if (screens.length === SCREENS.length && SCREENS.every((s) => screens.includes(s))) return TOOL_DEFINITIONS;
+  return TOOL_DEFINITIONS.map((tool) => {
+    if (tool.name !== 'open_screen') return tool;
+    const schema = tool.input_schema as { properties: Record<string, unknown> };
+    return { ...tool, input_schema: { ...tool.input_schema, properties: { ...schema.properties, screen: oneOf(screens, 'Which screen') } } };
+  });
+}
+
+/**
+ * Where open_screen goes: the screen and the address filters it reads (the screen drops anything it does not know).
+ * `screens`: the screens this workspace's dashboard has; any other is refused (ControlError), so no link is made to it.
+ */
+export function screenTarget(raw: unknown, screens: readonly Screen[] = SCREENS): { screen: Screen; search: string; label: string } {
   const i = INPUTS.open_screen.parse(raw);
+  if (!screens.includes(i.screen)) throw new ControlError(422, 'That screen is not in this workspace.', 'screen');
   let p = new URLSearchParams();
   if (i.screen === 'tasks') {
     p = params({

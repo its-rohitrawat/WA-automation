@@ -60,9 +60,9 @@ async function navOf(page: Page): Promise<{ group(name: string): string[]; all: 
   return { group: (name) => groups.find((g) => g.name === name)?.ids ?? [], all: groups.flatMap((g) => g.ids), locked: locked.sort() };
 }
 
-/** The floating Ask button never covers a control: row actions sit outside its lane, and the screen's end scrolls clear of it. */
+/** The Ask button never covers a control: row actions sit outside its lane, and the screen's end scrolls clear of it. */
 async function clearOfAsk(page: Page, where: string) {
-  const fab = await page.locator('.asst-fab').boundingBox();
+  const fab = await page.locator('#asst-fab').boundingBox();
   if (!fab) return fail(where, 'no Ask button');
   for (const b of await page.locator('.pf-cust td:last-child, .pf-inv td:last-child').locator('button, a').all()) {
     const box = await b.boundingBox();
@@ -243,7 +243,7 @@ try {
       // active, and none of the founder's screens.
       const customerNav = await navOf(p);
       if (customerNav.group('workspace')[0] !== 'onboarding') fail(where, `the customer's Workspace starts with ${customerNav.group('workspace')[0]}`);
-      if (customerNav.locked.join() !== 'clients,meetings,tasks,tracker') fail(where, `locked: ${customerNav.locked}`);
+      if (customerNav.locked.join() !== 'assistant,clients,meetings,tasks,tracker') fail(where, `locked: ${customerNav.locked}`); // the Assistant too (Nov release piece 3)
       for (const id of ['customers', 'invite', 'connections', 'usage']) if (customerNav.all.includes(id)) fail(where, `${id} in a customer's nav`);
       if ((await p.locator('.pf-step.locked').count()) !== 4) fail(where, 'expected 4 locked steps');
       await p.locator('.pf-step.open .pf-coming', { hasText: 'Coming with the customer workspace.' }).waitFor();
@@ -252,7 +252,10 @@ try {
       await p.locator('.pf-step.locked .pf-step-head').first().click({ force: true });
       await p.locator('.toast', { hasText: 'Finish WhatsApp and your API key first.' }).waitFor();
       await shot(p, where, `onboarding-${tag}`);
-      await clearOfAsk(p, where);
+      // A customer still onboarding (November release piece 3): its Assistant is listed but locked, and there is no Ask
+      // button until its workspace is active.
+      if ((await p.locator('#nav [data-go="assistant"].locked').count()) !== 1) fail(where, 'the Assistant is not listed locked for a customer still onboarding');
+      if (await p.locator('#asst-fab').isVisible()) fail(where, 'an Ask button before the workspace is active');
 
       // (S4.6 C) Step 1, the customer's own WhatsApp: the QR shows inline; Cancel gives the button back; a scan links.
       // The preview's link is the fake dashboard's (two codes, a scan, done); the real one is the customer's own link
@@ -319,8 +322,8 @@ try {
       if ((await p.locator('.pf-cust tbody tr', { hasText: 'Nair Digital Works' }).locator('.pf-run', { hasText: 'Keeps crashing' }).count()) !== 1) fail(where, 'no runtime note');
       if ((await p.locator('.pf-cust .pf-run').count()) !== 1) fail(where, 'a runtime note on a customer without one');
       await shot(p, where, `customers-${tag}`);
-      delete fakeRuntimes[nairId];
       await clearOfAsk(p, where);
+      delete fakeRuntimes[nairId];
 
       where = `customers pause ${tag}`;
       const nairRow = p.locator('.pf-cust tbody tr', { hasText: 'Nair Digital Works' });

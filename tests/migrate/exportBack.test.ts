@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readdirSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { senderSessionDbPath, sessionDbPath, trackerDbPath } from '../../src/config/paths.ts';
@@ -9,8 +10,9 @@ import { copyPlan } from '../../src/migrate/plan.ts';
 import { FOUNDER_TENANT_ID } from '../../src/platform/store.ts';
 import { SqliteDb } from '../../src/store/engine/sqlite.ts';
 import { acquireLock } from '../../src/util/lock.ts';
+import { phoneNumberIn, sessionFileOf } from '../../src/wa/authState.ts';
 import { FakeTarget } from './fakeTarget.ts';
-import { fixture, type Fixture } from './fixture.ts';
+import { fixture, phoneNumberOf, type Fixture } from './fixture.ts';
 import { onSqlite } from '../helpers/db.ts';
 
 // export-to-sqlite against the SQLite stand-in for Postgres: a round trip SQLite -> "Postgres" -> new SQLite files gives
@@ -81,6 +83,32 @@ describe.runIf(onSqlite)('export-to-sqlite', () => {
     expect(existsSync(join(out, 'sender-session.db'))).toBe(false);
   });
 
+  it('brings phones 2 and 3 back in their own session files, row for row and still linked, with the phone list (lane C, change 7)', async () => {
+    const key = randomBytes(32);
+    const g = await fixture({ phones: { key, ids: [2, 3] } });
+    const other = await FakeTarget.open();
+    try {
+      expect((await copyToPostgres({ dataDir: g.data, tenantId: FOUNDER_TENANT_ID, apply: true, backupDir: join(g.dir, 'backup') }, other)).ok).toBe(true);
+      const out = join(g.dir, 'from-postgres');
+      const r = await exportToSqlite({ dataDir: g.data, tenantId: FOUNDER_TENANT_ID, out }, other);
+      expect(r.ok).toBe(true);
+      // Phones 4 and 5 and the spare have no keys: no file for them.
+      expect(readdirSync(out).filter((n) => n.endsWith('.db')).sort()).toEqual(['session-2.db', 'session-3.db', 'session.db', 'tracker.db']);
+      for (const phone of ['phone2', 'phone3'] as const) {
+        const a = SqliteDb.open(sessionFileOf(out, phone), { readonly: true });
+        const b = SqliteDb.open(sessionFileOf(g.data, phone), { readonly: true });
+        for (const t of ['auth', 'auth_backup']) expect(await a.all(`SELECT k, v FROM ${t} ORDER BY k`), `${phone} ${t}`).toEqual(await b.all(`SELECT k, v FROM ${t} ORDER BY k`));
+        await a.close();
+        await b.close();
+        // The agent opens it with the phone's own subkey: the same number, no relink.
+        expect(await phoneNumberIn({ engine: 'sqlite', dataDir: out }, key, phone)).toBe(phoneNumberOf(Number(phone.slice(5))));
+      }
+      expect(await sums(join(out, 'tracker.db'))).toEqual(await sums(trackerDbPath(g.data))); // the phone list (kv) too
+    } finally {
+      await other.close();
+    }
+  });
+
   it('refuses a folder that exists, and a running agent; writes nothing to Postgres', async () => {
     const there = join(f.dir, 'there');
     mkdirSync(there);
@@ -101,6 +129,25 @@ describe.runIf(onSqlite)('export-to-sqlite', () => {
     } }, pg);
     expect(r.ok).toBe(false);
     expect(r.tables.filter((t) => !t.match).map((t) => t.table)).toEqual(['tracker:clients']);
+    expect(existsSync(join(out, 'DO-NOT-USE.txt'))).toBe(true);
+  });
+
+  it('an insert that throws leaves the half-written folder as evidence, marked not to be used, and the error goes on (data review N9)', async () => {
+    // A row the new tracker.db refuses: a message whose client is not there (let into the stand-in with its checks off).
+    await pg.db.exec('PRAGMA foreign_keys = OFF');
+    await pg.db.run("UPDATE messages SET client_id = 999 WHERE wa_id = 'WA1'");
+    await pg.db.exec('PRAGMA foreign_keys = ON');
+    const out = join(f.dir, 'from-postgres');
+    await expect(exportToSqlite({ dataDir: f.data, tenantId: FOUNDER_TENANT_ID, out }, pg)).rejects.toThrow(/FOREIGN KEY/);
+    expect(readFileSync(join(out, 'DO-NOT-USE.txt'), 'utf8')).toMatch(/^The export stopped before it finished/);
+    expect(existsSync(join(out, 'tracker.db'))).toBe(true); // kept, never deleted
+    expect(await pg.count('messages')).toBe(5); // Postgres only read
+  });
+
+  it('a failure before anything is read (Postgres at another version) leaves the marker too', async () => {
+    pg.version = 2;
+    const out = join(f.dir, 'from-postgres');
+    await expect(exportToSqlite({ dataDir: f.data, tenantId: FOUNDER_TENANT_ID, out }, pg)).rejects.toThrow(/Postgres is at P2/);
     expect(existsSync(join(out, 'DO-NOT-USE.txt'))).toBe(true);
   });
 });

@@ -32,11 +32,13 @@ function step(m, html) {
 
 /**
  * The link dialog for the founder's or the spare phone. `relink` asks first (it replaces a working link).
- * @param {'founder' | 'spare'} target @param {{ relink: boolean }} opts
+ * Phones 2 to 5 (lane C, change 7) link the same way as phone 1, the founder's, named by their label.
+ * @param {'founder' | 'phone2' | 'phone3' | 'phone4' | 'phone5' | 'spare'} target @param {{ relink: boolean, label?: string }} opts
  */
 export function linkWhatsApp(target, opts) {
-  const founder = target === 'founder';
-  const who = founder ? "the founder's phone" : 'the spare phone';
+  // A reading phone (the founder's is phone 1), or the spare.
+  const founder = target !== 'spare';
+  const who = target === 'founder' ? "the founder's phone" : founder ? (opts.label ?? `Phone ${target.slice(5)}`) : 'the spare phone';
   /** @type {string | null} */
   let linkId = null;
   /** @type {EventSource | null} */
@@ -70,7 +72,7 @@ export function linkWhatsApp(target, opts) {
     cancelLink();
   };
 
-  const m = openModal(`${head(founder ? 'Founder WhatsApp' : 'Spare WhatsApp', `${opts.relink ? 'Reconnect' : 'Link'} ${who}`)}<div class="m-body"></div>`, { onClose });
+  const m = openModal(`${head(target === 'founder' ? 'Founder WhatsApp' : founder ? 'WhatsApp phone' : 'Spare WhatsApp', `${opts.relink ? 'Reconnect' : 'Link'} ${who}`)}<div class="m-body"></div>`, { onClose });
   const live = () => openDrawerElement() === m;
 
   const confirmStep = () =>
@@ -349,6 +351,8 @@ export async function runAction(btn, name) {
  */
 export function fixFor(part) {
   if (part.key === 'whatsapp') {
+    // Several phones (lane C): Connections, where each phone has its own Link or Relink.
+    if (/ of \d+ phones connected$/.test(part.detail)) return null;
     if (part.detail === 'Not linked') return 'founder-link';
     // Only a link that is gone needs a new one; Connecting or Reconnecting clears by itself.
     return part.state === 'down' && part.detail !== 'Disconnected' ? 'founder' : null;

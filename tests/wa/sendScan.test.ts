@@ -7,7 +7,8 @@ const SRC = fileURLToPath(new URL('../../src/', import.meta.url));
 /**
  * Baileys socket methods, other than sendMessage, that put traffic on WhatsApp in the account's name: a receipt, presence,
  * a chat or profile change, a call rejection, a group, community or newsletter action, a retry or analytics packet, a raw
- * node or IQ query (sendNode, query), an app-state patch or a star, a block, a logout or a pairing-code request.
+ * node or IQ query (sendNode, query, sendRawMessage), an app-state patch or a star, a label or a contact change, a privacy
+ * setting, a block, a logout or a pairing-code request; and every group setting, invite and join request.
  * The scan matches whole words, also in comments: a comment in src/ that needs one of these words is reworded.
  * (updateMediaMessage and reuploadRequest are checked by tests/media/fetch.test.ts.)
  */
@@ -16,6 +17,10 @@ const OUTBOUND_NAMES = [
   'sendMessageAck', 'sendPeerDataOperationMessage', 'sendRetryRequest', 'rejectCall', 'updateProfile\\w*',
   'group(?:Create|Leave|ParticipantsUpdate|Update\\w*)', 'newsletter\\w*', 'sendWAMBuffer', 'sendNode', 'query', 'appPatch', 'star',
   'updateBlockStatus', 'logout', 'requestPairingCode', 'community\\w*',
+  // The security review's additions (final review, S4d).
+  'sendRawMessage', 'groupAcceptInvite(?:V4)?', 'groupRevokeInvite(?:V4)?', 'groupSettingUpdate', 'groupToggleEphemeral', 'groupMemberAddMode',
+  'groupJoinApprovalMode', 'groupRequestParticipantsUpdate', 'addChatLabel', 'removeChatLabel', 'addMessageLabel', 'addLabel', 'addOrEditContact',
+  'removeContact', 'update\\w*Privacy',
 ];
 const OUTBOUND = OUTBOUND_NAMES.join('|');
 /** Every Baileys method that sends something to WhatsApp. */
@@ -29,6 +34,24 @@ const OTHER_OUTBOUND = new RegExp(`\\b(${OUTBOUND})\\b`);
  */
 const PG_ENGINE = ['store/engine/pg.ts', 'store/engine/pgModule.d.ts'];
 const SEND_NAMES_BUT_QUERY = new RegExp(`\\b(sendMessage|${OUTBOUND_NAMES.filter((n) => n !== 'query').join('|')})\\b`);
+
+/**
+ * Delete chat (November release, owner decision 2 Nov 2026): src/wa/chatDelete.ts is excused from the one word chatModify,
+ * and from nothing else. It deletes one approved group's chat on the founder's phone, once (checked below).
+ */
+const CHAT_DELETE = 'wa/chatDelete.ts';
+const SEND_NAMES_BUT_CHAT_MODIFY = new RegExp(`\\b(sendMessage|${OUTBOUND_NAMES.filter((n) => n !== 'chatModify').join('|')})\\b`);
+
+/**
+ * Unlink a phone (November release, lane C, change 7): src/wa/deviceUnlink.ts is excused from the one word logout, and
+ * from nothing else. It unlinks one reading phone's own device at WhatsApp, once, after the owner confirmed (checked below).
+ */
+const DEVICE_UNLINK = 'wa/deviceUnlink.ts';
+const SEND_NAMES_BUT_LOGOUT = new RegExp(`\\b(sendMessage|${OUTBOUND_NAMES.filter((n) => n !== 'logout').join('|')})\\b`);
+
+/** The pattern a file is held to: every send name, less the one word its exception allows. */
+const heldTo = (file: string) =>
+  PG_ENGINE.includes(file) ? SEND_NAMES_BUT_QUERY : file === CHAT_DELETE ? SEND_NAMES_BUT_CHAT_MODIFY : file === DEVICE_UNLINK ? SEND_NAMES_BUT_LOGOUT : SEND_NAMES;
 
 /**
  * The dashboard's sign-out route is a URL path (spec section 8), not a Baileys call: that one exact string literal is
@@ -53,11 +76,31 @@ describe('who may send on WhatsApp', () => {
     expect(files).toEqual(expect.arrayContaining(['wa/gateway.ts', 'wa/senderGateway.ts', 'app.ts']));
   });
 
-  it('no module except src/wa/senderGateway.ts and src/wa/groupSend.ts names a Baileys send method', () => {
+  it('no module except src/wa/senderGateway.ts and src/wa/groupSend.ts names a Baileys send method (src/wa/chatDelete.ts: chatModify alone; src/wa/deviceUnlink.ts: logout alone)', () => {
     const offenders = sources()
-      .filter((s) => s.file !== 'wa/senderGateway.ts' && s.file !== 'wa/groupSend.ts' && (PG_ENGINE.includes(s.file) ? SEND_NAMES_BUT_QUERY : SEND_NAMES).test(s.text))
+      .filter((s) => s.file !== 'wa/senderGateway.ts' && s.file !== 'wa/groupSend.ts' && heldTo(s.file).test(s.text))
       .map((s) => s.file);
     expect(offenders).toEqual([]);
+  });
+
+  it('only deviceUnlink.ts names logout, called in one place; only the gateway’s endLink uses it, and only while open (lane C)', () => {
+    expect(sources().filter((s) => /\blogout\b/.test(s.text)).map((s) => s.file)).toEqual([DEVICE_UNLINK]);
+    const unlink = readFileSync(join(SRC, 'wa', 'deviceUnlink.ts'), 'utf8');
+    expect(unlink.match(/\.logout\(/g)).toHaveLength(1);
+    expect(unlink).not.toMatch(SEND_NAMES_BUT_LOGOUT);
+    // Who reaches it: the reading gateway's endLink alone (it is imported by no other module). Whole words, so an
+    // aliased import or a passed reference counts too (final review, S4a).
+    expect(sources().filter((s) => /\b(unlinkDevice|asDeviceUnlinkSocket)\b/.test(s.text)).map((s) => s.file).sort()).toEqual([DEVICE_UNLINK, 'wa/gateway.ts']);
+    // And who reaches endLink: the gateway defines it; only the phone control and the switchable gateway call it (S4c).
+    expect(sources().filter((s) => /\bendLink\b/.test(s.text)).map((s) => s.file).sort()).toEqual(['wa/gateway.ts', 'wa/phoneControl.ts', 'wa/switchableGateway.ts']);
+    expect(sources().filter((s) => /\.endLink\b/.test(s.text)).map((s) => s.file).sort()).toEqual(['wa/phoneControl.ts', 'wa/switchableGateway.ts']);
+    const gateway = readFileSync(join(SRC, 'wa', 'gateway.ts'), 'utf8');
+    const ask = gateway.indexOf('return unlinkDevice(unlinkable, this.#opts.unlinkTimeoutMs);');
+    expect(ask).toBeGreaterThan(-1);
+    expect(gateway.match(/\bunlinkDevice\(/g)).toHaveLength(1);
+    const guard = gateway.lastIndexOf("if (this.#stopped || !sock || this.#status.state !== 'open') return false;", ask);
+    expect(guard).toBeGreaterThan(-1);
+    expect(ask - guard).toBeLessThan(250);
   });
 
   it('the Postgres engine, excused from the word query only, never imports Baileys and names no other send method', () => {
@@ -93,6 +136,15 @@ describe('who may send on WhatsApp', () => {
     ]) {
       expect(`sock.${name}(x)`).toMatch(SEND_NAMES);
       if (name !== 'sendMessage') expect(`sock.${name}(x)`).toMatch(OTHER_OUTBOUND);
+    }
+    // The security review's additions (final review, S4d).
+    for (const name of [
+      'sendRawMessage', 'groupAcceptInvite', 'groupAcceptInviteV4', 'groupRevokeInvite', 'groupRevokeInviteV4', 'groupSettingUpdate',
+      'groupToggleEphemeral', 'groupMemberAddMode', 'groupJoinApprovalMode', 'groupRequestParticipantsUpdate', 'addChatLabel', 'removeChatLabel',
+      'addMessageLabel', 'addLabel', 'addOrEditContact', 'removeContact', 'updateLastSeenPrivacy', 'updateOnlinePrivacy', 'updateGroupsAddPrivacy',
+    ]) {
+      expect(`sock.${name}(x)`, name).toMatch(SEND_NAMES);
+      expect(`sock.${name}(x)`, name).toMatch(OTHER_OUTBOUND);
     }
     for (const read of ['groupMetadata', 'groupFetchAllParticipating', 'onWhatsApp', 'profilePictureUrl']) {
       expect(`sock.${read}(x)`).not.toMatch(SEND_NAMES);
@@ -162,8 +214,20 @@ describe('the one send from the founder’s WhatsApp (Open chat, 29 Oct 2026)', 
   });
 
   it('only the dashboard’s chat route sends, and only the gateways hand out the socket', () => {
-    expect(sources().filter((s) => /\bsendGroupText\(/.test(s.text)).map((s) => s.file).sort()).toEqual(['wa/groupSend.ts', 'web/routes/chat.ts']);
-    expect(sources().filter((s) => /\bgroupSocket\(/.test(s.text)).map((s) => s.file).sort()).toEqual(['runtime/customerRuntime.ts', 'wa/gateway.ts', 'wa/switchableGateway.ts']);
+    // Whole words: an aliased import or a passed reference counts too (final review, S4a).
+    expect(sources().filter((s) => /\bsendGroupText\b/.test(s.text)).map((s) => s.file).sort()).toEqual(['wa/groupSend.ts', 'web/routes/chat.ts']);
+    expect(sources().filter((s) => /\bgroupSocket\(/.test(s.text)).map((s) => s.file).sort()).toEqual(['runtime/phones.ts', 'wa/gateway.ts', 'wa/phoneSet.ts', 'wa/switchableGateway.ts']);
+  });
+
+  it('the phone set only passes on the group’s own phone’s socket: it makes none and sends nothing (lane C)', () => {
+    const text = readFileSync(join(SRC, 'wa', 'phoneSet.ts'), 'utf8');
+    expect(text).not.toMatch(/asGroupSendSocket|asChatDeleteSocket|chatModify|sendMessage|relayMessage|\bsock\b/);
+    // Exactly one place gives each socket: the approved group's own phone's gateway, or nothing.
+    const gives = text.match(/^.*\.groupSocket\?\.\(.*$/gm) ?? [];
+    expect(gives.map((l) => l.trim())).toEqual(['return this.#memberFor(groupId)?.gateway.groupSocket?.(groupId) ?? null;']);
+    const deletes = text.match(/^.*\.chatDeleteSocket\?\.\(.*$/gm) ?? [];
+    expect(deletes.map((l) => l.trim())).toEqual(['return this.#memberFor(groupId)?.gateway.chatDeleteSocket?.(groupId) ?? null;']);
+    expect(text).toContain('#memberFor(groupId: string): Member | undefined {\n    const id = this.#phoneOf.get(groupId);'.replace(/\n/g, text.includes('\r\n') ? '\r\n' : '\n'));
   });
 
   it('the chat route checks the setting, the client and the limits, and claims the row before it sends', () => {
@@ -173,6 +237,62 @@ describe('the one send from the founder’s WhatsApp (Open chat, 29 Oct 2026)', 
     for (const before of ['if (!deps.sendingOn()) return', 'const c = await approvedClient(deps, code);', 'claimOutbox(tx,', 'markSending(deps.db,', "'dashboard send: asking WhatsApp'"]) {
       expect(text.indexOf(before), before).toBeGreaterThan(-1);
       expect(text.indexOf(before), before).toBeLessThan(send);
+    }
+  });
+});
+
+describe('the one change Delete chat makes on the founder’s WhatsApp (November release, 2 Nov 2026)', () => {
+  const chatDelete = () => readFileSync(join(SRC, 'wa', 'chatDelete.ts'), 'utf8');
+
+  it('chatModify is named only in src/wa/chatDelete.ts, called once there, and that file names no other outbound method', () => {
+    expect(sources().filter((s) => /\bchatModify\b/.test(s.text)).map((s) => s.file)).toEqual([CHAT_DELETE]);
+    const text = chatDelete();
+    expect(text.match(/\.chatModify\(/g)).toHaveLength(1);
+    // The interface, the check that a socket has it, and the one call. Nothing else.
+    expect(text.match(/\bchatModify\b/g)).toHaveLength(3);
+    expect(text).not.toMatch(SEND_NAMES_BUT_CHAT_MODIFY);
+  });
+
+  it('it is a whole-chat delete, asked after the group check and the founder gateway’s own check', () => {
+    const text = chatDelete();
+    const body = text.slice(text.indexOf('export async function deleteGroupChat('));
+    const call = body.indexOf('sock.chatModify(');
+    expect(call).toBeGreaterThan(-1);
+    for (const before of ['if (!GROUP_JID.test(groupId)', 'const sock = source(groupId);', 'if (!sock) return']) {
+      expect(body.indexOf(before), before).toBeGreaterThan(-1);
+      expect(body.indexOf(before), before).toBeLessThan(call);
+    }
+    expect(body.slice(call)).toMatch(/^sock\.chatModify\(\{ delete: true, lastMessages: \[last\] \}, groupId\)/);
+  });
+
+  it('the founder gateway gives its delete socket only for an approved group while open, right before handing it over', () => {
+    const text = readFileSync(join(SRC, 'wa', 'gateway.ts'), 'utf8');
+    const give = text.indexOf('return asChatDeleteSocket(sock);');
+    expect(give).toBeGreaterThan(-1);
+    expect(text.match(/asChatDeleteSocket\(/g)).toHaveLength(1);
+    const guard = text.lastIndexOf("if (this.#stopped || !sock || this.#status.state !== 'open' || !this.#opts.allow.has(groupId)) return null;", give);
+    expect(guard).toBeGreaterThan(-1);
+    expect(give - guard).toBeLessThan(200);
+  });
+
+  it('only the dashboard’s chat route deletes, and only the gateways and the runtime hand out the socket', () => {
+    // The callers are exact (lane B, piece B4), as the send's are, by whole word: an aliased import or a passed reference
+    // counts too (final review, S4a). The givers are exact too now the per-phone wiring is in (S4b): the gateway, the
+    // switchable gateway, the phone set and the phones runtime pass it on; the chat route is its one taker (its deps).
+    expect(sources().filter((s) => /\bdeleteGroupChat\b/.test(s.text)).map((s) => s.file).sort()).toEqual([CHAT_DELETE, 'web/routes/chat.ts']);
+    expect(sources().filter((s) => /\bchatDeleteSocket\b/.test(s.text)).map((s) => s.file).sort())
+      .toEqual(['runtime/phones.ts', 'wa/gateway.ts', 'wa/phoneSet.ts', 'wa/switchableGateway.ts', 'web/routes/chat.ts']);
+  });
+
+  it('the chat route checks the confirm and the client, claims the mark and logs the attempt before it deletes', () => {
+    const text = readFileSync(join(SRC, 'web', 'routes', 'chat.ts'), 'utf8');
+    const body = text.slice(text.indexOf('export async function chatDeleteHandler('));
+    const call = body.indexOf('await deleteGroupChat(');
+    expect(call).toBeGreaterThan(-1);
+    expect(body.match(/\bdeleteGroupChat\(/g)).toHaveLength(1);
+    for (const before of ['DeleteBody.safeParse(body)', 'const c = await approvedClient(deps, code);', 'if (!source) return', 'await setKv(tx, key, JSON.stringify(mark));', "'dashboard delete: asking WhatsApp'"]) {
+      expect(body.indexOf(before), before).toBeGreaterThan(-1);
+      expect(body.indexOf(before), before).toBeLessThan(call);
     }
   });
 });

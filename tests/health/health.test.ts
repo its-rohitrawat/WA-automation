@@ -46,6 +46,53 @@ describe('Health', () => {
     expect(h.line().ok).toBe(true);
   });
 
+  it('several reading phones (lane C): the line names the phone it is about; one phone, the texts as before', async () => {
+    const { h, clock } = await setup();
+    const phone2 = { phone: { id: 2, label: 'Front desk' }, count: 2 };
+    h.setWhatsApp({ ...status('logged_out'), ...phone2 } as GatewayStatus);
+    expect(h.line().text).toBe('❌ WhatsApp unlinked (Front desk, phone 2) since 19 Oct 13:30. Follow docs/SETUP.md → "Status logged_out".');
+    h.setWhatsApp({ ...status('forbidden'), ...phone2 } as GatewayStatus);
+    expect(h.line().text).toBe('❌ WhatsApp refused this number (403) (Front desk, phone 2) since 19 Oct 13:30. Check that phone.');
+    h.setWhatsApp({ ...status('not_linked'), ...phone2 } as GatewayStatus);
+    expect(h.line().text).toBe('❌ WhatsApp Front desk (phone 2) is not linked. Open the dashboard → Connections and link it.');
+    h.setWhatsApp({ ...status('open'), count: 2 } as GatewayStatus);
+    h.setWhatsApp({ ...status('closed'), ...phone2 } as GatewayStatus);
+    clock.advance(31 * 60_000);
+    expect(h.line()).toEqual({ ok: false, text: '❌ Disconnected (Front desk, phone 2) since 19 Oct 13:30' });
+    // One phone: named nowhere, exactly as before.
+    const one = { phone: { id: 1, label: 'Phone 1' }, count: 1 };
+    h.setWhatsApp({ ...status('logged_out'), ...one } as GatewayStatus);
+    expect(h.line().text).toBe('❌ WhatsApp unlinked since 19 Oct 13:30. Follow docs/SETUP.md → "Status logged_out".');
+    h.setWhatsApp({ ...status('not_linked'), ...one } as GatewayStatus);
+    expect(h.line().text).toBe("❌ WhatsApp is not linked. Open the dashboard → Connections and link the founder's phone.");
+  });
+
+  it('several reading phones (lane C): the snapshot lists each by name and state, never its number; one phone, none', async () => {
+    const { db, h } = await setup();
+    h.setWhatsApp(status('open'));
+    let list = [{ id: 1, label: 'Office', status: status('open'), number: '…4321' }];
+    h.watchPhones(() => list);
+    expect(h.snapshot().phones).toBeUndefined();
+    list = [...list, { id: 2, label: 'Front desk', status: status('closed'), number: '…7788' }];
+    const two = [{ id: 1, label: 'Office', state: 'open' }, { id: 2, label: 'Front desk', state: 'closed' }];
+    expect(h.snapshot().phones).toEqual(two);
+    await h.persist();
+    const read = await readHealthSnapshot(db);
+    expect(read?.phones).toEqual(two);
+    expect(JSON.stringify(read)).not.toMatch(/4321|7788/);
+    // A source that fails leaves only the phones out.
+    h.watchPhones(() => {
+      throw new Error('gone');
+    });
+    expect(h.snapshot()).toMatchObject({ whatsapp: { state: 'open' } });
+    expect(h.snapshot().phones).toBeUndefined();
+    // A broken list in a stored snapshot drops that list only.
+    await setKv(db, 'health', JSON.stringify({ ...read, phones: [{ id: 'x' }] }));
+    const broken = await readHealthSnapshot(db);
+    expect(broken).toMatchObject({ whatsapp: { state: 'open' } });
+    expect(broken?.phones).toBeUndefined();
+  });
+
   it('reports an unlinked device straight away', async () => {
     const { h } = await setup();
     h.setWhatsApp(status('logged_out'));

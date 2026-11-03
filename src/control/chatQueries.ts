@@ -1,6 +1,8 @@
 import type { ClientRow } from '../store/clients.ts';
-import type { Db } from '../store/db.ts';
+import type { Db, Sql } from '../store/db.ts';
+import { getKv, setKv } from '../store/kv.ts';
 import { outboxToShow, type OutboxRow, type OutboxState } from '../store/outbox.ts';
+import { mentionTags, tagOf, type GroupMember } from '../wa/groupMembers.ts';
 import { messageKind, oneLine, senderLabel, type ClientMessage } from './clientQueries.ts';
 
 // Open chat (owner request, 29 Oct 2026): a client's group as stored, a page at a time, newest first. Least data: a
@@ -48,6 +50,13 @@ export interface ChatPage {
   /** There are older messages than this page. */
   hasOlder: boolean;
   outbox: ChatOutboxItem[];
+  /**
+   * The agent's name for each tag ("@<digits>") the page's texts hold, when it knows one (November release). The digits
+   * are the text's own; no number is added.
+   */
+  names: Record<string, string>;
+  /** The owner deleted this chat (Delete chat) and nothing has come since: the newest page is empty for that reason. */
+  cleared: boolean;
 }
 
 // Line breaks stay (a chat message keeps its lines); other control and direction characters go.
@@ -124,24 +133,172 @@ async function messageQuote(db: Db, clientId: number, id: number): Promise<ChatO
 export async function chatPage(db: Db, c: ClientRow, now: Date, o: { before?: number; limit?: number } = {}): Promise<ChatPage> {
   const limit = Math.max(1, Math.min(CHAT_PAGE_MAX, Math.floor(o.limit ?? CHAT_PAGE)));
   let rows: RawMessage[];
+  // After Delete chat, only what came after its mark (by time, then row); with no mark, everything.
+  const hidden = await chatHidden(db, c.id);
+  const floor = markParams(hidden);
   if (o.before !== undefined) {
     const cursor = await db.get<{ ts: string; id: number }>('SELECT ts, id FROM messages WHERE client_id = ? AND id = ?', [c.id, o.before]);
     rows = cursor
       ? await db.all<RawMessage>(
-        `${SELECT} WHERE m.client_id = @client AND (m.ts < @ts OR (m.ts = @ts AND m.id < @id)) ORDER BY m.ts DESC, m.id DESC LIMIT @limit`,
-        { client: c.id, ts: cursor.ts, id: cursor.id, limit: limit + 1 },
+        `${SELECT} WHERE m.client_id = @client AND (m.ts < @ts OR (m.ts = @ts AND m.id < @id)) AND ${AFTER_MARK} ORDER BY m.ts DESC, m.id DESC LIMIT @limit`,
+        { client: c.id, ts: cursor.ts, id: cursor.id, limit: limit + 1, ...floor },
       )
       : [];
   } else {
-    rows = await db.all<RawMessage>(`${SELECT} WHERE m.client_id = ? ORDER BY m.ts DESC, m.id DESC LIMIT ?`, [c.id, limit + 1]);
+    rows = await db.all<RawMessage>(`${SELECT} WHERE m.client_id = @client AND ${AFTER_MARK} ORDER BY m.ts DESC, m.id DESC LIMIT @limit`, { client: c.id, limit: limit + 1, ...floor });
   }
   const since = new Date(now.getTime() - OUTBOX_DAYS * 86_400_000).toISOString();
   const outbox: ChatOutboxItem[] = [];
-  if (o.before === undefined) for (const row of await outboxToShow(db, c.id, since)) outbox.push(await outboxItem(db, row));
-  return { messages: rows.slice(0, limit).map(toMessage), hasOlder: rows.length > limit, outbox };
+  if (o.before === undefined) {
+    for (const row of await outboxToShow(db, c.id, since)) if (!hidden || row.createdAt > hidden.at) outbox.push(await outboxItem(db, row));
+  }
+  const messages = rows.slice(0, limit).map(toMessage);
+  const texts = [...messages, ...outbox].flatMap((x) => [x.text, x.quote?.text ?? '']);
+  return {
+    messages, hasOlder: rows.length > limit, outbox, names: await tagNames(db, c, texts),
+    cleared: hidden !== null && o.before === undefined && messages.length === 0 && outbox.length === 0,
+  };
+}
+
+/**
+ * Delete chat's mark for a client (November release, owner decision 2 Nov 2026), in the key-value store, so no schema
+ * change: the newest message the delete reached (by time, then row), when it was asked, and how it went. The chat shows
+ * only what came after it, so a new message brings the chat back. Nothing is removed from the agent's store.
+ * uptoRow and floorTs (final review, item 1): the highest row and the oldest time stored at the press. A row stored later
+ * shows even with an earlier WhatsApp time (a message written on a phone that was offline), unless it is older than
+ * everything the chat had then: history backfill only ever stores such older messages, and those stay hidden.
+ */
+export interface ChatHidden {
+  uptoTs: string;
+  uptoId: number;
+  uptoRow?: number;
+  floorTs?: string;
+  at: string;
+  state: 'asking' | 'deleted' | 'unknown';
+  code: string | null;
+}
+
+/** The messages a mark leaves showing (m is the messages table); no mark: every one. Its values: markParams. */
+const AFTER_MARK = '(m.ts > @hts OR (m.ts = @hts AND m.id > @hid) OR (m.id > @hrow AND m.ts >= @hfloor))';
+
+/** AFTER_MARK's values; a mark from before uptoRow (none in use) shows nothing stored later by row alone. */
+const markParams = (h: ChatHidden | null) => ({
+  hts: h?.uptoTs ?? '', hid: h?.uptoId ?? 0, hrow: h?.uptoRow ?? Number.MAX_SAFE_INTEGER, hfloor: h?.floorTs ?? '',
+});
+
+/** Whether a message shows after the mark: something new since that delete. */
+export async function newSinceMark(db: Sql, clientId: number, h: ChatHidden): Promise<boolean> {
+  return (await db.get<{ one: number }>(`SELECT 1 AS one FROM messages m WHERE m.client_id = @client AND ${AFTER_MARK} LIMIT 1`, { client: clientId, ...markParams(h) })) !== undefined;
+}
+
+export const chatHiddenKey = (clientId: number): string => `chat_hidden:${clientId}`;
+
+const HIDDEN_STATES: readonly string[] = ['asking', 'deleted', 'unknown'];
+
+/** The client's mark, or null (none, or one that can't be read: that hides nothing). */
+export async function chatHidden(db: Sql, clientId: number): Promise<ChatHidden | null> {
+  const raw = await getKv(db, chatHiddenKey(clientId));
+  if (!raw) return null;
+  try {
+    const v = JSON.parse(raw) as Partial<ChatHidden>;
+    if (typeof v.uptoTs === 'string' && typeof v.uptoId === 'number' && Number.isInteger(v.uptoId) && typeof v.at === 'string' && typeof v.state === 'string' && HIDDEN_STATES.includes(v.state)) {
+      const row = typeof v.uptoRow === 'number' && Number.isInteger(v.uptoRow) && typeof v.floorTs === 'string' ? { uptoRow: v.uptoRow, floorTs: v.floorTs } : {};
+      return { uptoTs: v.uptoTs, uptoId: v.uptoId, ...row, at: v.at, state: v.state, code: typeof v.code === 'string' ? v.code : null };
+    }
+  } catch {
+    // an unreadable mark hides nothing
+  }
+  return null;
+}
+
+/**
+ * When a group's phone changes (a move, or an approval of a group that already has messages), the highest row stored
+ * until then: those were read by another phone, whose own messages are not the new phone's (final review, item 2).
+ */
+export const chatPhoneFromKey = (clientId: number): string => `chat_phone_from:${clientId}`;
+
+/** Records a change of the client's group's phone: every row stored so far was read by another phone. */
+export async function noteReadingPhoneChange(db: Sql, clientId: number): Promise<void> {
+  const top = (await db.get<{ id: number | null }>('SELECT max(id) AS id FROM messages WHERE client_id = ?', [clientId]))?.id ?? null;
+  if (top !== null) await setKv(db, chatPhoneFromKey(clientId), JSON.stringify({ fromRow: Number(top) }));
+}
+
+/** The highest row read by a phone before the group's current one, or null (no change of phone recorded). */
+export async function readingPhoneFrom(db: Sql, clientId: number): Promise<number | null> {
+  const raw = await getKv(db, chatPhoneFromKey(clientId));
+  try {
+    const v = raw ? (JSON.parse(raw) as { fromRow?: unknown }) : null;
+    return v && typeof v.fromRow === 'number' && Number.isInteger(v.fromRow) ? v.fromRow : null;
+  } catch {
+    return Number.MAX_SAFE_INTEGER; // unreadable: no stored row is surely this phone's
+  }
+}
+
+/**
+ * The names of the tags in some texts: for each "@<digits>", this client's person whose id or number has those digits,
+ * named as the chat would name it. Only names the agent knows. Parameterised reads only, and only this client's rows.
+ */
+async function tagNames(db: Db, c: ClientRow, texts: readonly string[]): Promise<Record<string, string>> {
+  const tags = new Set(texts.flatMap((t) => [...mentionTags(t)]));
+  const names: Record<string, string> = {};
+  if (tags.size === 0) return names;
+  const people = await db.all<{ jid: string; number: string | null; name: string | null }>('SELECT jid, number, name FROM people WHERE client_id = ?', [c.id]);
+  for (const p of people) {
+    const name = memberName(p.name);
+    if (!name) continue;
+    for (const key of [tagOf(p.jid), p.number]) if (key && tags.has(key) && !Object.hasOwn(names, key)) names[key] = name;
+  }
+  return names;
 }
 
 /** A dashboard message as the chat shows it. */
 export async function outboxItem(db: Db, row: OutboxRow): Promise<ChatOutboxItem> {
   return { uuid: row.uuid, at: row.createdAt, text: row.text, state: row.state, quote: row.replyTo === null ? null : await messageQuote(db, row.clientId, row.replyTo) };
+}
+
+/**
+ * A group member as the group info panel shows it (November release, change 2). The one place Open chat shows a phone
+ * number: a member the agent has no name for is shown by the number WhatsApp gives, as WhatsApp's own group info does
+ * (owner request, 2 Nov 2026). A hidden number (an @lid member WhatsApp gives no number for) stays hidden, never
+ * guessed. No WhatsApp id: `tag` is only the digits a mention uses.
+ */
+export interface ChatMember {
+  name: string | null;
+  number: string | null;
+  tag: string;
+  admin: boolean;
+}
+
+/** senderLabel's rule: one line, and never a "name" that is really a number. */
+const LOOKS_LIKE_NUMBER = /(?:\d[\s().+-]*){7,}/;
+
+function memberName(name: string | null): string | null {
+  const n = oneLine(name, 60);
+  return n && !LOOKS_LIKE_NUMBER.test(n) ? n : null;
+}
+
+/** A phone-number id as WhatsApp shows the number: "+91 98000 00001" for India, "+<digits>" otherwise. */
+export function shownNumber(phoneNumberId: string): string {
+  const d = phoneNumberId.split('@')[0]!;
+  return d.length === 12 && d.startsWith('91') ? `+91 ${d.slice(2, 7)} ${d.slice(7)}` : `+${d}`;
+}
+
+/**
+ * The members of this client's group as the panel lists them: admins first, then by name, then by number, then the
+ * hidden ones. Each is named from this client's people: by the id the group uses, its phone-number or hidden-number id,
+ * or its number. Parameterised reads only, and only this client's rows.
+ */
+export async function chatMembers(db: Db, c: ClientRow, members: readonly GroupMember[]): Promise<ChatMember[]> {
+  const people = await db.all<{ jid: string; number: string | null; name: string | null }>('SELECT jid, number, name FROM people WHERE client_id = ?', [c.id]);
+  const byJid = new Map(people.map((p) => [p.jid, p]));
+  const byNumber = new Map(people.filter((p) => p.number).map((p) => [p.number!, p]));
+  const out = members.map((m): ChatMember => {
+    const digits = m.phoneNumber ? m.phoneNumber.split('@')[0]! : null;
+    const p = byJid.get(m.id) ?? (m.phoneNumber ? byJid.get(m.phoneNumber) : undefined) ?? (m.lid ? byJid.get(m.lid) : undefined) ?? (digits ? byNumber.get(digits) : undefined);
+    // A number only for a member the agent has no name for (final review, item 3): least data, and as the owner was told.
+    const name = memberName(p?.name ?? null);
+    return { name, number: !name && m.phoneNumber ? shownNumber(m.phoneNumber) : null, tag: tagOf(m.id), admin: m.admin };
+  });
+  const rank = (x: ChatMember) => (x.admin ? 0 : 3) + (x.name ? 0 : x.number ? 1 : 2);
+  return out.sort((a, b) => rank(a) - rank(b) || (a.name ?? a.number ?? '').localeCompare(b.name ?? b.number ?? '', 'en'));
 }

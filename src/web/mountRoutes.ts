@@ -16,7 +16,7 @@ import { FOUNDER_TENANT_ID } from '../config/env.ts';
 import type { Guard, OwnerSession } from './guard.ts';
 import { HttpError, sendJson } from './http.ts';
 import { registerReadApi } from './routes/api.ts';
-import { chatReadHandler, chatSendHandler, type ChatDeps } from './routes/chat.ts';
+import { chatDeleteHandler, chatMembersHandler, chatReadHandler, chatSendHandler, type ChatDeps } from './routes/chat.ts';
 import { clientDetailHandler, clientsListHandler, type ClientsDeps } from './routes/clients.ts';
 import type { ApiResult, AuditFn, OwnerContext } from './routes/context.ts';
 import { registerControlApi } from './routes/controlScreens.ts';
@@ -24,7 +24,7 @@ import { CALLBACK_PATH, GoogleConnectRoutes, type GoogleConnectDeps } from './ro
 import { groupsApplyHandler, groupsBulkHandler, groupsListHandler, suggestCodeHandler, type GroupsDeps } from './routes/groups.ts';
 import { mountPlatformRoutes, mountSignupRoutes, type PlatformRouteDeps, type SignupDeps } from './routes/platform.ts';
 import { actionSession, readBody } from './routes/respond.ts';
-import { WhatsAppLinkRoutes } from './routes/whatsapp.ts';
+import { PhoneRoutes, WhatsAppLinkRoutes, type PhoneRoutesDeps } from './routes/whatsapp.ts';
 import { registerWorkApi } from './routes/work.ts';
 import type { RequestContext } from './router.ts';
 import { hashToken } from './sessions.ts';
@@ -69,6 +69,8 @@ export interface AgentRoutesDeps {
   google: Omit<GoogleConnectDeps, 'audit'>;
   actions: Omit<ActionDeps, 'audit'>;
   links: LinkSessions;
+  /** The workspace's reading phones (lane C, change 7): list, add, rename, unlink, remove. Absent: no phone routes. */
+  phones?: PhoneRoutesDeps;
   /** The AI assistant (DASHBOARD_ASSISTANT): its Claude client, the agent's spend guard and the prices. None: no assistant. */
   assistant?: { ai: AssistantAi; paid: App['paidCalls']; prices: Prices };
   /** The platform screens (SaaS S5): invites, customers, onboarding. Absent: no platform routes. */
@@ -103,6 +105,13 @@ function redirect(res: ServerResponse, location: string): void {
   res.setHeader('Cache-Control', 'no-store');
   res.end();
 }
+
+/**
+ * Each workspace's assistant listener for ended sessions, per session store (review N1). A restarted runtime's routes
+ * are mounted again, and the listener of the earlier mount is removed then: one per workspace. A stopped workspace's
+ * stays until it is mounted again; it only drops cards that no one can confirm any more.
+ */
+const assistantEnds = new WeakMap<DashboardMount['sessions'], Map<string, () => void>>();
 
 export function mountAgentRoutes(m: DashboardMount, d: AgentRoutesDeps): void {
   const { router, guard: memberGuard } = m;
@@ -178,10 +187,19 @@ export function mountAgentRoutes(m: DashboardMount, d: AgentRoutesDeps): void {
   if (d.platform) mountPlatformRoutes({ read: memberRead, change: memberChange }, { ...d.platform, isFounder: (o) => o.role === 'founder' });
   if (d.signup) mountSignupRoutes(router, d.signup);
   if (d.chat) {
-    const chat: ChatDeps = { ...d.chat, audit };
+    // The phone list Groups has: Delete's confirm names the group's phone when there are more (final review, item 4).
+    const chat: ChatDeps = { ...d.chat, audit, ...(d.groups.phones ? { phones: d.groups.phones } : {}) };
     read('/dashboard/api/clients/:code/chat', async ({ params, url }, o) =>
       await chatReadHandler(chat, o, params.code!, { before: url.searchParams.get('before'), limit: url.searchParams.get('limit') }));
+    // The members are read from WhatsApp: counted against the action limit, as a change is (final review, S6).
+    router.get('/dashboard/api/clients/:code/chat/members', async (ctx) => {
+      const s = await guard.requireSession(ctx.req);
+      inScope(s, tenant);
+      m.actions.hit(ctx.req, ctx.res);
+      send(ctx.res, await chatMembersHandler(chat, ownerOf(ctx, s), ctx.params.code!));
+    });
     change('/dashboard/api/clients/:code/chat/send', ({ params }, o, body) => chatSendHandler(chat, o, params.code!, body));
+    change('/dashboard/api/clients/:code/chat/delete', ({ params }, o, body) => chatDeleteHandler(chat, o, params.code!, body));
   }
 
   // Google reconnect and add-account (D3).
@@ -214,15 +232,21 @@ export function mountAgentRoutes(m: DashboardMount, d: AgentRoutesDeps): void {
     send(ctx.res, await actionHandler(ctx.params.name!, actions, ownerOf(ctx, s)));
   });
 
-  // The AI assistant: answers, opens screens, and drafts changes that run only on the owner's Confirm. A session that
-  // ends takes its chat and its waiting cards with it.
+  // The AI assistant: answers, points to screens, and drafts changes that run only on the owner's Confirm. Its chats are
+  // the workspace's, kept in this runtime's own database (src/store/assistantChats.ts); a session that ends takes only
+  // its waiting cards with it.
   if (d.assistant) {
     const pending = new PendingActions(d.clock);
     const assistant = new Assistant({
       ai: d.assistant.ai, paid: d.assistant.paid, prices: d.assistant.prices, pending, settings: d.settings, log: d.log, clock: d.clock,
       db: d.db, control: d.control, spend: d.spend, voiceLocal: d.voiceLocal, health: d.health, ...(d.accountOf ? { accountOf: d.accountOf } : {}),
+      customer: tenant !== FOUNDER_TENANT_ID, // a customer's assistant: no Connections or AI usage
     });
-    m.sessions.onEnd((e) => assistant.forget(e));
+    // One listener per workspace: a mount again (its runtime restarted) first removes the earlier mount's.
+    const ends = assistantEnds.get(m.sessions) ?? new Map<string, () => void>();
+    assistantEnds.set(m.sessions, ends);
+    ends.get(tenant)?.();
+    ends.set(tenant, m.sessions.onEnd((e) => assistant.forget(e)));
     registerAssistantApi(router, { ...action, db: d.db, clock: d.clock, assistant, pending, settings: d.settings, audit: m.audit });
   }
 
@@ -236,4 +260,14 @@ export function mountAgentRoutes(m: DashboardMount, d: AgentRoutesDeps): void {
     if (r instanceof Promise) await r;
     else send(ctx.res, r);
   });
+
+  // Reading phones (lane C, change 7): the list, and add, rename, unlink and remove behind the change guard.
+  if (d.phones) {
+    const phones = new PhoneRoutes(d.phones);
+    read('/dashboard/api/whatsapp/phones', () => phones.list());
+    change('/dashboard/api/whatsapp/phones', (_ctx, o, body) => phones.add(o, body));
+    change('/dashboard/api/whatsapp/phones/:id/rename', ({ params }, o, body) => phones.rename(o, params.id, body));
+    change('/dashboard/api/whatsapp/phones/:id/unlink', ({ params }, o, body) => phones.unlink(o, params.id, body));
+    change('/dashboard/api/whatsapp/phones/:id/remove', ({ params }, o, body) => phones.remove(o, params.id, body));
+  }
 }

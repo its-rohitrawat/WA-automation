@@ -84,6 +84,27 @@ async function check(page: Page, where: string, selector: string, shot: string) 
   await page.screenshot({ path: join(OUT, `${shot}.png`), fullPage: true });
 }
 
+/**
+ * The assistant's button, bottom right, covers no control: with the screen scrolled to its end, nothing of it lies under
+ * the button (content above the end scrolls out from under it).
+ */
+async function askClear(page: Page, where: string) {
+  const fab = page.locator('#asst-fab');
+  if (!(await fab.isVisible())) return fail(where, 'no Ask button');
+  await page.evaluate(() => scrollTo(0, document.documentElement.scrollHeight));
+  await page.waitForTimeout(200);
+  const box = await fab.boundingBox();
+  if (!box) return fail(where, 'no Ask button');
+  const covered = await page.evaluate((f) => [...document.querySelectorAll('#view :is(button, a, input, select, textarea)')]
+    .filter((e) => {
+      const r = e.getBoundingClientRect();
+      return r.width > 0 && r.height > 0 && r.right > f.x && r.left < f.x + f.width && r.bottom > f.y && r.top < f.y + f.height;
+    })
+    .map((e) => e.textContent?.trim().slice(0, 30) || e.tagName), box);
+  if (covered.length) fail(where, `the Ask button covers ${covered.join(', ')} at the end of the screen`);
+  await page.evaluate(() => scrollTo(0, 0));
+}
+
 async function launch() {
   for (const channel of CHANNELS) {
     try {
@@ -147,6 +168,7 @@ async function main() {
         where = `overview ${tag}`;
         await p.goto(`${base}/dashboard`);
         await check(p, where, '.kpis', `overview-${tag}`);
+        await askClear(p, where);
         // The uptime strip lists the newest outages with their exact times ("Off from 02:14 to 06:33 (4 h 19 min)").
         if ((await p.locator('[data-uptime-outages] li', { hasText: / to \d\d:\d\d \(/ }).count()) < 1) fail(where, 'no outage with its exact times');
         if ((await p.locator('#view b', { hasText: '<b>' }).count()) !== 1) fail(where, 'agent text was not shown as plain text');
@@ -216,46 +238,128 @@ async function main() {
         await p.goto(`${base}/dashboard`);
         await p.locator('.kpis').waitFor();
 
-        // The AI assistant, on a scripted Claude (scripts/assistantFake.ts: no API call): open it, ask, Confirm a card,
-        // let it open a screen, and close it with Escape.
+        // The AI assistant's page (November release), on a scripted Claude (scripts/assistantFake.ts: no API call): open it
+        // from the side menu's button, ask, Confirm a card, and follow an answer's "Open …" link (it never jumps by itself).
         where = `assistant ${tag}`;
+        if (vp.name === 'phone') {
+          // The phone's drawer lists the Assistant, and the Ask button is not shown over it.
+          await p.locator('#mnav').click();
+          await p.waitForTimeout(400);
+          if (!(await p.locator('#nav [data-go="assistant"]').isVisible())) fail(where, 'no Assistant in the drawer');
+          if (await p.locator('#asst-fab').isVisible()) fail(where, 'the Ask button shows over the open menu');
+          await p.screenshot({ path: join(OUT, `menu-drawer-${tag}.png`) });
+          await p.keyboard.press('Escape');
+          await p.waitForTimeout(400);
+        } else {
+          // Collapsed on a laptop: icons only, the Ask button still bottom right, and the menu opens again.
+          await p.locator('#collapse').click();
+          await p.waitForTimeout(400);
+          if (!(await p.locator('#asst-fab').isVisible())) fail(where, 'no Ask button with the menu collapsed');
+          await p.screenshot({ path: join(OUT, `menu-collapsed-${tag}.png`) });
+          await p.locator('#collapse').click();
+          await p.waitForTimeout(400);
+        }
+        // The round button at the bottom right opens the page, and is not shown on the page itself.
         await p.locator('#asst-fab').click();
-        await p.locator('#asst .asst-sugg .chip').first().waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'no suggested questions'));
-        await p.waitForTimeout(400);
+        await p.waitForURL('**/dashboard/assistant', { timeout: WAIT_MS }).catch(() => fail(where, `the Ask button did not open the page: ${p.url()}`));
+        if ((await p.locator('#nav [data-go="assistant"][aria-current="page"]').count()) !== 1) fail(where, 'the Assistant entry is not marked');
+        if (await p.locator('#asst-fab').isVisible()) fail(where, 'the Ask button shows on the assistant page');
+        await p.locator('.asst-page .asst-hero .asst-sugg-card').first().waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'no suggested questions'));
+        if ((await p.locator('.asst-page [data-waves] canvas').count()) !== 1) fail(where, 'no waves on the empty chat');
+        await p.waitForTimeout(1_000); // the waves' fade-in and first frames
         await p.screenshot({ path: join(OUT, `assistant-open-${tag}.png`) });
-        await p.locator('#asst .chip', { hasText: 'Summarise today' }).click();
-        await p.locator('#asst .asst-meta').first().waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'the answer never finished'));
-        if ((await p.locator('#asst .asst-msg.bot b', { hasText: '11 open tasks' }).count()) !== 1) fail(where, 'the answer was not drawn');
+        await p.locator('.asst-page .asst-sugg-card', { hasText: 'Summarise today' }).click();
+        // While it streams: the orb thinks, the hero is gone, and the waves think behind the first answer, dimmed.
+        await p.locator('.asst-page .asst-msg.bot .asst-orb.thinking').waitFor({ timeout: WAIT_MS }).then(async () => {
+          await p.locator('.asst-page .asst-msg.bot .asst-text').first().waitFor({ timeout: WAIT_MS });
+          await p.waitForTimeout(220); // past the 200 ms fade-up, still within the answer
+          if ((await p.locator('.asst-page [data-waves].behind canvas').count()) !== 1) fail(where, 'no thinking waves behind the first answer');
+          await p.screenshot({ path: join(OUT, `assistant-streaming-${tag}.png`) });
+        }).catch(() => {}); // a fast answer may finish first: the steps below check it
+        if ((await p.locator('.asst-page .asst-hero').count()) !== 0) fail(where, 'the empty chat stayed after the first question');
+        await p.locator('.asst-page .asst-meta').first().waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'the answer never finished'));
+        // The first answer ended: the waves fade out and are freed (their canvas goes); later questions get none.
+        await p.locator('.asst-page [data-waves] canvas').waitFor({ state: 'detached', timeout: 5_000 }).catch(() => fail(where, 'the waves stayed after the first answer'));
+        if ((await p.locator('.asst-page .asst-msg.bot b', { hasText: '11 open tasks' }).count()) !== 1) fail(where, 'the answer was not drawn');
         await p.locator('#asst-q').fill('Add a task for Acme: book the photo shoot');
         await p.keyboard.press('Enter');
-        await p.locator('#asst .asst-card [data-confirm]').waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'no card to confirm'));
-        await p.locator('#asst .asst-meta').nth(1).waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'the second answer never finished'));
+        await p.locator('.asst-page .asst-card [data-confirm]').waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'no card to confirm'));
+        await p.locator('.asst-page .asst-meta').nth(1).waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'the second answer never finished'));
+        if ((await p.locator('.asst-page [data-waves] canvas').count()) !== 0) fail(where, 'waves came back for a later question');
         await p.waitForTimeout(300);
         await p.screenshot({ path: join(OUT, `assistant-card-${tag}.png`) });
-        await p.locator('#asst .asst-card [data-confirm]').click();
-        await p.locator('#asst .asst-card .ok', { hasText: 'added' }).waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'Confirm did not finish'));
+        await p.locator('.asst-page .asst-card [data-confirm]').click();
+        await p.locator('.asst-page .asst-card .ok', { hasText: 'added' }).waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'Confirm did not finish'));
         await p.locator('#asst-q').fill('Show overdue tasks');
         await p.keyboard.press('Enter');
-        await p.waitForURL('**/dashboard/tasks?status=overdue', { timeout: WAIT_MS }).catch(() => fail(where, `did not open the overdue tasks: ${p.url()}`));
-        await p.locator('#asst .asst-meta').nth(2).waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'the third answer never finished'));
+        await p.locator('.asst-page .asst-meta').nth(2).waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'the third answer never finished'));
+        if (!p.url().endsWith('/dashboard/assistant')) fail(where, `the page jumped away on its own: ${p.url()}`);
         await p.waitForTimeout(300);
-        await p.screenshot({ path: join(OUT, `assistant-screen-${tag}.png`) });
+        await p.screenshot({ path: join(OUT, `assistant-link-${tag}.png`) });
         const asstSideways = await p.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
         if (asstSideways > 1) fail(where, `scrolls sideways by ${asstSideways}px`);
-        await p.locator('#asst-q').focus();
-        await p.keyboard.press('Escape');
-        await p.locator('#asst').waitFor({ state: 'hidden', timeout: 5_000 }).catch(() => fail(where, 'Escape did not close it'));
+        await p.locator('.asst-page .asst-open').first().click();
+        await p.waitForURL('**/dashboard/tasks?status=overdue', { timeout: WAIT_MS }).catch(() => fail(where, `the link did not open the overdue tasks: ${p.url()}`));
+        if ((await p.locator('.asst-page').count()) !== 0) fail(where, 'the assistant page stayed behind the next screen');
+
+        // The chats kept for the workspace (piece 2): back on the page, the list holds this round's chats; open one,
+        // rename it, and delete it after the confirm. On a phone the list is a drawer.
+        where = `assistant chats ${tag}`;
+        await p.locator('#asst-fab').click();
+        await p.waitForURL('**/dashboard/assistant', { timeout: WAIT_MS });
+        const openList = async () => {
+          if (vp.name !== 'phone') return;
+          await p.locator('.asst-page [data-drawer]').click();
+          await p.locator('.asst-page.side-open .asst-side').waitFor({ timeout: 5_000 }).catch(() => fail(where, 'the chat drawer did not open'));
+          await p.waitForTimeout(350);
+        };
+        await openList();
+        await p.locator('.asst-chats .asst-chat').first().waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'no past chats listed'));
+        if ((await p.locator('.asst-chats .asst-chats-group .eyebrow', { hasText: 'Today' }).count()) !== 1) fail(where, 'the chats are not grouped under Today');
+        await p.screenshot({ path: join(OUT, `assistant-list-${tag}.png`) });
+        const row = p.locator('.asst-chats .asst-chat').first();
+        await row.locator('a[data-chat]').click();
+        await p.waitForURL(/\/dashboard\/assistant\/\d+$/, { timeout: WAIT_MS }).catch(() => fail(where, `the chat did not open: ${p.url()}`));
+        await p.locator('.asst-page .asst-msg.me').first().waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'the past chat has no messages'));
+        if ((await p.locator('.asst-page [data-waves] canvas').count()) !== 0) fail(where, 'a past chat has waves');
+        if (vp.name === 'phone' && (await p.locator('.asst-page.side-open').count()) !== 0) fail(where, 'the drawer stayed open after picking a chat');
+        await openList();
+        const opened = p.locator('.asst-chats .asst-chat.on');
+        await opened.locator('[data-rename]').click();
+        await p.locator('.asst-chats .asst-rename').fill('Renamed in the smoke test');
+        await p.keyboard.press('Enter');
+        await p.locator('.asst-chats .asst-chat', { hasText: 'Renamed in the smoke test' }).waitFor({ timeout: WAIT_MS }).catch(() => fail(where, 'the rename did not show'));
+        if ((await p.locator('.asst-page .asst-title', { hasText: 'Renamed in the smoke test' }).count()) !== 1) fail(where, 'the open chat\'s title did not follow the rename');
+        const before = await p.locator('.asst-chats .asst-chat').count();
+        await p.locator('.asst-chats .asst-chat', { hasText: 'Renamed in the smoke test' }).locator('[data-delete]').click();
+        await p.locator('.modal [data-yes]').click();
+        await p.waitForURL('**/dashboard/assistant', { timeout: WAIT_MS }).catch(() => fail(where, `deleting the open chat did not start a new one: ${p.url()}`));
+        await openList();
+        await p.waitForTimeout(300);
+        if ((await p.locator('.asst-chats .asst-chat', { hasText: 'Renamed in the smoke test' }).count()) !== 0) fail(where, 'the deleted chat is still listed');
+        if ((await p.locator('.asst-chats .asst-chat').count()) !== before - 1) fail(where, 'the delete removed more or less than one chat');
+        const chatsSideways = await p.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+        if (chatsSideways > 1) fail(where, `scrolls sideways by ${chatsSideways}px`);
+        if (vp.name === 'phone') await p.keyboard.press('Escape');
 
         where = `connections ${tag}`;
         if (vp.name === 'phone') {
           await p.locator('#mnav').click();
           await p.waitForTimeout(400);
         }
+        // The reading phones are the fake's own list (the answer this screen fetches): a card each, in place of the
+        // founder's card, beside the 6 other connections. Each card carries its label as plain text.
+        const phonesAnswer = p.waitForResponse((r) => r.url().endsWith('/dashboard/api/whatsapp/phones') && r.request().method() === 'GET');
         await p.locator('#nav [data-go="connections"]').click();
         await p.waitForURL('**/dashboard/connections');
         await check(p, where, '.conn', `connections-${tag}`);
+        const { phones } = (await (await phonesAnswer).json()) as { phones: { id: number; label: string }[] };
         const cards = await p.locator('.conn').count();
-        if (cards !== 7) fail(where, `expected 7 cards, found ${cards}`);
+        if (cards !== 6 + phones.length) fail(where, `expected ${6 + phones.length} cards (6 and ${phones.length} phones), found ${cards}`);
+        for (const ph of phones) {
+          const h3 = p.locator(`.conn[data-conn="phone-${ph.id}"] h3`);
+          if ((await h3.count()) !== 1 || (await h3.textContent()) !== ph.label) fail(where, `no card for phone ${ph.id} named "${ph.label}"`);
+        }
         const driveCard = p.locator('[data-conn="drive"]');
         if ((await driveCard.locator('dd', { hasText: 'owner@example.com' }).count()) !== 1) fail(where, 'the Drive card does not name the account');
         if ((await driveCard.locator('a[data-open-drive][href^="https://drive.google.com/file/d/"]').count()) !== 1) fail(where, 'the Drive card has no Open in Drive');
@@ -266,6 +370,7 @@ async function main() {
           await p.goto(`${base}/dashboard/${screen}`);
           await p.locator('#view .skel').first().waitFor({ state: 'detached', timeout: WAIT_MS }).catch(() => fail(where, 'still loading'));
           await check(p, where, '#view .card', `${screen}-${tag}`);
+          if (screen === 'tasks' || screen === 'settings') await askClear(p, where);
           if (await p.locator('#view .err-state').count()) fail(where, 'shows its error panel');
           if ((await p.locator('#view', { hasText: 'Coming in the next update' }).count()) !== 0) fail(where, 'is still the placeholder');
           if (screen === 'tracker') {
@@ -311,6 +416,7 @@ async function main() {
         where = `clients ${tag}`;
         await p.goto(`${base}/dashboard/clients`);
         await check(p, where, '.ccard', `clients-${tag}`);
+        await askClear(p, where);
         // Every card has its status line; the ones the agent is working on have the travelling edge.
         if ((await p.locator('.ccard .cstat').count()) !== (await p.locator('.ccard').count())) fail(where, 'a card has no status line');
         if ((await p.locator('.ccard.busy').count()) !== 2) fail(where, 'expected 2 busy cards (Acme reading, Blue Harbour reading its last 7 days)');
@@ -342,6 +448,9 @@ async function main() {
 
         // Open chat. Sending is off at first: the chat says so and has no text box.
         where = `open chat, sending off ${tag}`;
+        const askHiddenOverSheet = async () => {
+          if (await p.locator('#asst-fab').isVisible()) fail(where, 'the Ask button shows over the chat sheet');
+        };
         const openAcmeChat = async () => {
           await p.locator('.ccard', { hasText: 'Acme Traders' }).click();
           await p.locator('.drawer [data-open-chat]').click();
@@ -353,6 +462,8 @@ async function main() {
           if (fromEnd > 80) fail(where, `the chat did not open at its newest message (${fromEnd}px from the end)`);
         };
         await openAcmeChat();
+        await askHiddenOverSheet();
+        await p.screenshot({ path: join(OUT, `clients-chat-sheet-${tag}.png`) });
         await p.locator('.chat-sheet .ch-off', { hasText: 'Sending is off' }).waitFor();
         if ((await p.locator('.chat-sheet #ch-text').count()) !== 0) fail(where, 'a text box while sending is off');
         if ((await p.locator('.chat-sheet .ch-reply').count()) !== 0) fail(where, 'Reply buttons while sending is off');
@@ -454,6 +565,7 @@ async function main() {
         await p.screenshot({ path: join(OUT, `group-drawer-${tag}.png`) });
         await p.locator('.drawer button[type="submit"]').click();
         await p.locator('.savebar', { hasText: '1 change not saved' }).waitFor();
+        await p.locator('.drawer').waitFor({ state: 'detached' });
         if (vp.name === 'laptop' && theme === 'dark') {
           // A code a listed client has: the drawer says so before any save.
           where = `manage groups refused ${tag}`;

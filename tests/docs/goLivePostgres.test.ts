@@ -42,7 +42,7 @@ describe('GO-LIVE-postgres.md', () => {
   it('keeps Postgres on 127.0.0.1, run by waagent, with scram passwords', () => {
     expect(guide).toContain("listen_addresses = '127.0.0.1'");
     expect(guide).toContain('--auth=scram-sha-256');
-    expect(guide).toContain('never** `*:5432`');
+    expect(guide).toContain('never** `*:<port>`');
     for (const host of guide.matchAll(/ -h (\S+)/g)) expect(host[1]).toBe('127.0.0.1');
     const plists = [...guide.matchAll(/<plist version="1\.0">([\s\S]*?)<\/plist>/g)].map((m) => m[1]!);
     expect(plists).toHaveLength(2);
@@ -53,12 +53,12 @@ describe('GO-LIVE-postgres.md', () => {
   it('holds no secret: every database address is a placeholder on 127.0.0.1, and no key or token appears', () => {
     const urls = [...guide.matchAll(/postgres:\/\/[^\n`]+/g)].map((m) => m[0].trim()); // placeholders hold spaces
     expect(urls).toHaveLength(3);
-    for (const u of urls) expect(u).toMatch(/^postgres:\/\/wa_(app|platform|owner):<(app|platform|owner) password>@127\.0\.0\.1:5432\/wa_agent$/);
+    for (const u of urls) expect(u).toMatch(/^postgres:\/\/wa_(app|platform|owner):<(app|platform|owner) password>@127\.0\.0\.1:<port>\/wa_agent$/);
     // The nightly dump reads only its own password file, as the read-only wa_backup role; its password is never in the
     // agent's .env (lane A's S2 decision, b405561).
     expect(guide).not.toContain('DATABASE_BACKUP_URL=');
-    expect(guide).toContain('127.0.0.1:5432:wa_agent:wa_backup:<backup password>');
-    expect(guide).toContain('pg_dump -h 127.0.0.1 -U wa_backup');
+    expect(guide).toContain('127.0.0.1:<port>:wa_agent:wa_backup:<backup password>');
+    expect(guide).toContain('pg_dump -h 127.0.0.1 -p <port> -U wa_backup');
     expect(guide).not.toContain(':postgres:<'); // no superuser password file
     expect(guide).not.toMatch(/sk-ant|[0-9a-f]{32,}|[A-Za-z0-9+/]{40,}={0,2}/);
   });
@@ -85,8 +85,59 @@ describe('GO-LIVE-postgres.md', () => {
     expect(guide).not.toContain('confirm at S2');
     expect(confirmBox).toContain('> **Checked against the code**');
     expect(guide).toContain('`Database: SQLite (data/tracker.db)`');
-    expect(guide).toContain('`Database: Postgres (127.0.0.1:5432/wa_agent as wa_app)`');
+    expect(guide).toContain('`Database: Postgres (127.0.0.1:<port>/wa_agent as wa_app)`');
     expect(read('src/store/open.ts')).toContain("`Database: Postgres (${u.hostname}:${u.port || '5432'}${decodeURIComponent(u.pathname)} as ${decodeURIComponent(u.username)})`");
+  });
+
+  it('names the port wherever it connects: 5433 on the office Mac, never the ATP server’s 5432 (November release)', () => {
+    expect(guide).toContain("On the office Mac, WA Agent's own Postgres is on **5433**");
+    expect(guide).toContain('never point anything of WA Agent\'s at 5432');
+    expect(guide).toContain('echo "port = <port>" >> /opt/wa-agent-db/data/postgresql.conf');
+    // Every command that connects (pg_isready, createdb, pg_restore, psql, dropdb, pg_dump) names the port.
+    const connecting = [...guide.matchAll(/\b(pg_isready|createdb|pg_restore|psql|dropdb|pg_dump) -h 127\.0\.0\.1( -p <port>)?/g)];
+    expect(connecting.map((m) => m[1])).toEqual(expect.arrayContaining(['pg_isready', 'createdb', 'pg_restore', 'psql', 'dropdb', 'pg_dump']));
+    for (const m of connecting) expect(m[2], m[0]).toBe(' -p <port>');
+    for (const m of guide.matchAll(/ -h 127\.0\.0\.1( -p <port>)?/g)) expect(m[1], m[0]).toBe(' -p <port>');
+    expect(guide).not.toContain('127.0.0.1:5432');
+  });
+
+  it('locks the data-folder zip to its owner: it holds the WhatsApp logins and the keys', () => {
+    const zips = [...guide.matchAll(/sudo ditto -c -k --sequesterRsrc --keepParent \/opt\/wa-agent\/data "\$Z"\n\s*sudo chmod 600 "\$Z"/g)];
+    expect(zips).toHaveLength(2); // 4.3, and part 9
+    expect(guide.match(/sudo ditto /g)).toHaveLength(2);
+  });
+
+  it('carries every phone’s session file (session-2 to session-5) in the copies and in rollback B', () => {
+    const files = 'for f in tracker session session-2 session-3 session-4 session-5 sender-session; do [ -f data/$f.db ] && ';
+    expect(guide).toContain(`${files}sqlite3 data/$f.db ".backup '/opt/wa-agent-db/rehearsal/$f.db'"`);
+    expect(guide).toContain(`${files}sqlite3 data/$f.db ".backup '/opt/wa-agent-db/sqlite-before-postgres/$f.db'"`);
+    const b = guide.slice(guide.indexOf('### B. Bring the Postgres days back to SQLite'), guide.indexOf('## Part 7.'));
+    expect(b).toContain(`${files}mv data/$f.db* /opt/wa-agent-db/sqlite-before-rollback/`); // -wal and -shm too, moved, not deleted
+    expect(b).not.toMatch(/\brm\b/);
+    expect(guide.match(/for f in /g)).toHaveLength(3);
+  });
+
+  it('updates to the November release in a safe order, and says a revert alone is not enough on Postgres', () => {
+    const part9 = guide.slice(guide.indexOf('## Part 9.'), guide.indexOf('## Part 10.'));
+    const at = (s: string) => {
+      expect(part9, s).toContain(s);
+      return part9.indexOf(s);
+    };
+    // Stopped and backed up before the merge; the dump kept under its own name and checked; then the update.
+    expect(at('sudo launchctl bootout system/com.wa-agent')).toBeLessThan(at('sudo launchctl kickstart system/com.wa-agent.pgdump'));
+    expect(at('/opt/wa-agent-db/before-november.dump')).toBeLessThan(at('git pull --ff-only'));
+    expect(at('pg_restore -l /opt/wa-agent-db/before-november.dump')).toBeLessThan(at('git pull --ff-only'));
+    expect(at('git pull --ff-only')).toBeLessThan(at('npm ci'));
+    expect(at('npm ci')).toBeLessThan(at('npm run cli -- db-migrate'));
+    expect(at('`Applied P6`, then `Applied P7`, then `Access rules checked: …`')).toBeLessThan(at('sudo launchctl bootstrap system /Library/LaunchDaemons/com.wa-agent.plist'));
+    expect(part9).toContain('putting the old version back is **not** enough by itself');
+    expect(part9).toContain('restore `before-november.dump` into a fresh database');
+    expect(read('src/store/pg/migrations.ts')).toMatch(/\{ version: 7, sql: P7_SQL \}/);
+    // The phones part: the limits as the code sets them.
+    const part10 = guide.slice(guide.indexOf('## Part 10.'));
+    expect(part10).toContain('up to **5 reading phones**');
+    expect(part10).toContain('**One link at a time.**');
+    expect(read('src/wa/authState.ts')).toContain('export const MAX_PHONES = 5;');
   });
 
   it('says when to use each way back, and never sends a secret to Claude', () => {

@@ -1,5 +1,7 @@
 import { systemClock, type Clock } from '../util/clock.ts';
+import type { ChatDeleteSocket } from './chatDelete.ts';
 import type { EventHandler, GatewayLike, GatewayState, GatewayStatus, HistoryAnchor, HistoryAnswer } from './gateway.ts';
+import type { GroupMember } from './groupMembers.ts';
 import type { GroupSendSocket } from './groupSend.ts';
 import type { NormalizedEvent } from './normalize.ts';
 
@@ -106,6 +108,26 @@ export class SwitchableGateway implements GatewayLike {
     const inner = this.#inner;
     if (!inner?.groupSocket || inner.status().state !== 'open') return null;
     return inner.groupSocket(groupId);
+  }
+
+  /** The current gateway's members of an approved group (groupMembers.ts); null without one, or while it is not open. */
+  async groupMembers(groupId: string, o?: { fresh?: boolean }): Promise<GroupMember[] | null> {
+    const inner = this.#inner;
+    if (!inner?.groupMembers || inner.status().state !== 'open') return null;
+    return inner.groupMembers(groupId, o);
+  }
+
+  /** The current gateway's socket for Delete chat (chatDelete.ts); null without one, or while it is not open. */
+  chatDeleteSocket(groupId: string): ChatDeleteSocket | null {
+    const inner = this.#inner;
+    if (!inner?.chatDeleteSocket || inner.status().state !== 'open') return null;
+    return inner.chatDeleteSocket(groupId);
+  }
+
+  /** An unlink (lane C): the current gateway's endLink at WhatsApp; false without one, or one that cannot. */
+  async endLink(): Promise<boolean> {
+    const inner = this.#inner;
+    return inner?.endLink ? inner.endLink() : false;
   }
 
   status(): GatewayStatus {

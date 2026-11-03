@@ -18,6 +18,8 @@ const ClientSchema = z.object({
   phases: z.array(z.string().trim().min(1)).min(1).optional(),
   emailDomains: z.array(DomainSchema).optional(),
   meetingKeywords: z.array(z.string().trim().min(3, 'must be at least 3 characters')).max(20, 'at most 20 per client').optional(),
+  /** The reading phone the group is read through (lane C, change 7): 1 to 5; missing means phone 1. */
+  phone: z.number({ message: 'phone must be a number from 1 to 5' }).int('phone must be a whole number from 1 to 5').min(1, 'phone must be from 1 to 5').max(5, 'phone must be from 1 to 5').optional(),
 });
 
 const FileSchema = z.object({ clients: z.array(ClientSchema) });
@@ -29,6 +31,8 @@ export interface ClientConfig {
   phases: string[];
   emailDomains: string[];
   meetingKeywords: string[];
+  /** The reading phone it is read through, when not phone 1 (src/wa/phoneSet.ts phoneOfConfig reads a missing one as 1). */
+  phone?: 1 | 2 | 3 | 4 | 5;
 }
 
 /**
@@ -68,6 +72,7 @@ export function parseGroupsFile(json: string): ClientConfig[] {
     phases: c.phases ?? DEFAULT_PHASES,
     emailDomains: c.emailDomains ?? [],
     meetingKeywords: c.meetingKeywords ?? [],
+    ...(c.phone !== undefined && c.phone !== 1 ? { phone: c.phone as 2 | 3 | 4 | 5 } : {}),
   }));
 }
 

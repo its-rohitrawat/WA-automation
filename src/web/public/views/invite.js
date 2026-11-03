@@ -51,6 +51,12 @@ function statusPill(v) {
   return pill({ cls: 'p-review', label: 'Link copied' });
 }
 
+/** An address, escaped, that may break only after its @ when the column is narrow. @param {string} email */
+function emailHtml(email) {
+  const at = email.lastIndexOf('@');
+  return at < 0 ? esc(email) : `${esc(email.slice(0, at + 1))}<wbr>${esc(email.slice(at + 1))}`;
+}
+
 /** @param {Invite} v @param {boolean} gmail */
 function row(v, gmail) {
   const open = v.status === 'open' || v.status === 'expired';
@@ -63,7 +69,7 @@ function row(v, gmail) {
     : '';
   const sent = v.sentAt ?? v.createdAt;
   const after = v.status === 'accepted' ? `Used ${when(v.usedAt)}` : v.status === 'cancelled' ? 'Link no longer works' : `expires ${when(v.expiresAt)}`;
-  return `<tr><td data-label="Business"><b>${esc(v.business)}</b><small class="pf-sub pf-mono">${esc(v.email)}</small></td>
+  return `<tr><td data-label="Business"><b>${esc(v.business)}</b><small class="pf-sub pf-mono">${emailHtml(v.email)}</small></td>
     <td data-label="Status">${statusPill(v)}</td>
     <td data-label="Sent" class="pf-when">${esc(when(sent))}<small class="pf-sub">${esc(after)}</small></td>
     <td data-label="Actions"><div class="pf-acts">${acts || '<span class="pf-faint">—</span>'}</div></td></tr>`;
@@ -76,7 +82,7 @@ function render(d, f) {
   const gmail = d.gmail.connected;
   const unknown = d.invites.some((v) => v.status === 'open' && v.send === 'unknown');
   return `<div class="grid">
-    <section class="card col-4 pf-col-form"><div class="card-head"><h3>New invite</h3><span class="eyebrow">${d.left} of ${d.perDay} left today</span></div>
+    <section class="card col-12 pf-col-form"><div class="card-head"><h3>New invite</h3><span class="eyebrow">${d.left} of ${d.perDay} left today</span></div>
       <form class="pf-stack" data-invite novalidate>
         <label class="pf-lbl"><span>Business name</span><input class="pf-inp" name="business" maxlength="80" autocomplete="off" placeholder="Kapoor Design Studio" value="${esc(f.business ?? '')}"></label>
         <label class="pf-lbl"><span>Their Gmail address</span><input class="pf-inp" name="email" type="email" maxlength="254" autocomplete="off" spellcheck="false" placeholder="name@example.com" value="${esc(f.email ?? '')}">
@@ -89,7 +95,7 @@ function render(d, f) {
         ? `Sent from your Gmail, <code class="pf-note-code">${esc(d.gmail.from ?? '')}</code>.`
         : 'Gmail is not connected for invites, so Send invite is off.'} The link works once, only for that Google account, and expires in 7 days. ${gmail ? 'Gmail not working? ' : ''}Use Copy link and send it yourself.</span></div>
     </section>
-    <section class="card col-8 pf-col-list"><div class="card-head"><h3>Invites</h3><span class="eyebrow">${d.invites.length} total</span></div>
+    <section class="card col-12 pf-col-list"><div class="card-head"><h3>Invites</h3><span class="eyebrow">${d.invites.length} total</span></div>
       ${d.invites.length
         ? `<div class="tbl-wrap"><table class="tbl tbl-cards pf-inv"><caption class="sr-only">Invites</caption>
           <thead><tr><th>Business</th><th>Status</th><th>Sent</th><th>Actions</th></tr></thead><tbody>${d.invites.map((v) => row(v, gmail)).join('')}</tbody></table></div>`

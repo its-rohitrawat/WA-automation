@@ -41,13 +41,15 @@ export interface ProposalCard {
   expiresAt: string;
 }
 
-interface Pending {
+export interface Pending {
   action: ProposalAction;
   card: ProposalCard;
   /** The session's hash, and its owner's email (sign out everywhere ends all of an email's cards). */
   owner: string;
   email: string;
   expires: number;
+  /** The stored answer that drafted it, so the chat records what became of it. */
+  messageId?: number;
 }
 
 const show = (v: string | null | undefined) => (v === null || v === undefined || v === '' ? 'none' : v);
@@ -121,15 +123,15 @@ export class PendingActions {
     this.#clock = clock;
   }
 
-  /** Keeps a draft for this session and returns its card. */
-  add(owner: { key: string; email: string }, draft: { action: ProposalAction; title: string; lines: string[] }): ProposalCard {
+  /** Keeps a draft for this session and returns its card. `messageId`: the stored answer that drafted it. */
+  add(owner: { key: string; email: string }, draft: { action: ProposalAction; title: string; lines: string[] }, messageId?: number): ProposalCard {
     this.#sweep();
     const mine = [...this.#byId].filter(([, p]) => p.owner === owner.key);
     if (mine.length >= PENDING_MAX) this.#byId.delete(mine[0]![0]);
     const id = randomBytes(18).toString('base64url');
     const expires = this.#clock.now().getTime() + PENDING_TTL_MS;
     const card: ProposalCard = { id, title: draft.title, lines: draft.lines, expiresAt: new Date(expires).toISOString() };
-    this.#byId.set(id, { action: draft.action, card, owner: owner.key, email: owner.email, expires });
+    this.#byId.set(id, { action: draft.action, card, owner: owner.key, email: owner.email, expires, ...(messageId === undefined ? {} : { messageId }) });
     return card;
   }
 
@@ -145,10 +147,19 @@ export class PendingActions {
     return p;
   }
 
-  /** Cancel: the card is gone, whatever its state. */
-  drop(id: unknown, ownerKey: string): void {
-    if (typeof id !== 'string') return;
-    if (this.#byId.get(id)?.owner === ownerKey) this.#byId.delete(id);
+  /** Cancel: the card is gone, whatever its state. Returns it when it was this session's. */
+  drop(id: unknown, ownerKey: string): Pending | undefined {
+    if (typeof id !== 'string') return undefined;
+    const p = this.#byId.get(id);
+    if (p?.owner !== ownerKey) return undefined;
+    this.#byId.delete(id);
+    return p;
+  }
+
+  /** Which of these cards this session can still Confirm (waiting, not expired): a chat opened again shows them live. */
+  live(ids: readonly string[], ownerKey: string): Set<string> {
+    this.#sweep();
+    return new Set(ids.filter((id) => this.#byId.get(id)?.owner === ownerKey));
   }
 
   /** A new chat, or a session that ended: its cards go. */

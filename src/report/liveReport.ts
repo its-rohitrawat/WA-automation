@@ -20,6 +20,8 @@ export interface LiveReportSettings {
   report: ReportSettings;
   /** The founder's number, digits only; undefined while none is set. */
   recipient: string | undefined;
+  /** The owner's own morning message text; undefined (or absent): the default. */
+  message?: string | undefined;
 }
 
 /** A sender for one recipient, and how to close what it opened (the spare number's session file). */
@@ -130,6 +132,7 @@ export class LiveReport {
     const scheduler = new ReportScheduler({
       db, clock, log, sender: opened.sender, healthLine, ...(build ? { build } : {}),
       settings: () => this.#o.settings().report,
+      message: () => this.#o.settings().message,
     });
     try {
       await scheduler.recover();

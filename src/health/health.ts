@@ -9,7 +9,7 @@ import { getKv, setKv } from '../store/kv.ts';
 import type { MediaStats } from '../store/media.ts';
 import type { Clock } from '../util/clock.ts';
 import { istDate, istShortDate, istTime } from '../util/time.ts';
-import type { GatewayStatus } from '../wa/gateway.ts';
+import type { GatewayState, GatewayStatus } from '../wa/gateway.ts';
 import { setupLine } from './setupLine.ts';
 import type { DownReason } from './uptimeLog.ts';
 
@@ -83,6 +83,18 @@ export interface HealthSnapshot {
   report?: ReportHealth;
   /** Why voice notes are not transcribed (Phase 2b Task 10). Missing when they are (or are off), and in older snapshots. */
   voiceProblem?: VoiceProblem;
+  /**
+   * Each reading phone by name and state, for the status command (more phones, lane C). Only with more than one phone;
+   * missing with one, and in older snapshots. Never a number.
+   */
+  phones?: PhoneHealth[];
+}
+
+/** One reading phone in the snapshot: its id, the owner's name for it and its state. */
+export interface PhoneHealth {
+  id: number;
+  label: string;
+  state: GatewayState;
 }
 
 /**
@@ -112,6 +124,7 @@ export class Health {
   #asked = 0;
   #landed = 0;
   #wa: GatewayStatus;
+  #phones: (() => readonly { id: number; label: string; status: GatewayStatus }[]) | undefined;
   #downSince: Date | null;
   #failed = new Map<number, string>();
   #paused = new Map<number, string>(); // clientId -> IST day
@@ -271,16 +284,25 @@ export class Health {
     return this.#compute(false);
   }
 
+  /** Several reading phones (lane C): the phone the WhatsApp state is about, to name in the line; none with one phone. */
+  #phoneNamed(): { id: number; label: string } | undefined {
+    const s = this.#wa as GatewayStatus & { phone?: { id: number; label: string }; count?: number };
+    return s.phone && (s.count ?? 1) > 1 ? s.phone : undefined;
+  }
+
   #compute(withPublish: boolean): HealthLine {
     const now = this.#clock.now();
-    const setup = setupLine(this.#wa.state, this.#googleConnected);
+    const named = this.#phoneNamed();
+    const setup = setupLine(this.#wa.state, this.#googleConnected, named);
     if (setup) return setup;
     const since = stamp(new Date(this.#wa.since));
-    if (this.#wa.state === 'logged_out') return { ok: false, text: `❌ WhatsApp unlinked since ${since}. Follow docs/SETUP.md → "Status logged_out".` };
-    if (this.#wa.state === 'replaced') return { ok: false, text: `❌ Another copy of WA Agent took over the WhatsApp session at ${since}. Stop the other copy, then restart the service.` };
-    if (this.#wa.state === 'forbidden') return { ok: false, text: `❌ WhatsApp refused this number (403) since ${since}. Check the founder's phone.` };
+    // With several phones the line names the one it is about; with one, the texts as before.
+    const on = named ? ` (${named.label}, phone ${named.id})` : '';
+    if (this.#wa.state === 'logged_out') return { ok: false, text: `❌ WhatsApp unlinked${on} since ${since}. Follow docs/SETUP.md → "Status logged_out".` };
+    if (this.#wa.state === 'replaced') return { ok: false, text: `❌ Another copy of WA Agent took over the WhatsApp session${on} at ${since}. Stop the other copy, then restart the service.` };
+    if (this.#wa.state === 'forbidden') return { ok: false, text: `❌ WhatsApp refused this number (403)${on} since ${since}. Check ${named ? 'that phone' : "the founder's phone"}.` };
     if (this.#downSince && now.getTime() - this.#downSince.getTime() > DISCONNECT_GRACE_MS) {
-      return { ok: false, text: `❌ Disconnected since ${stamp(this.#downSince)}` };
+      return { ok: false, text: `❌ Disconnected${on} since ${stamp(this.#downSince)}` };
     }
     const pubFail = withPublish ? this.#publishFailedSince : null;
     if (pubFail && this.#publishAuthFailed) return { ok: false, text: '❌ Google sign-in expired. Run: npm run cli -- google-auth, then restart the service' };
@@ -379,7 +401,26 @@ export class Health {
       spendByKind: this.#spend.spentTodayByKind(),
       ...(this.#report ? { report: { ...this.#report } } : {}),
       ...(this.#voiceProblem === null ? {} : { voiceProblem: this.#voiceProblem }),
+      ...this.#phonesNow(),
     };
+  }
+
+  /**
+   * The reading phones each snapshot lists (more phones, lane C): read when it is taken, so a phone's own change shows
+   * at the next write. Only names and states are kept, never a number.
+   */
+  watchPhones(fn: () => readonly { id: number; label: string; status: GatewayStatus }[]): void {
+    this.#phones = fn;
+  }
+
+  /** With more than one phone, each by name and state; none with one. A source that fails leaves only them out. */
+  #phonesNow(): { phones?: PhoneHealth[] } {
+    try {
+      const list = this.#phones?.() ?? [];
+      return list.length > 1 ? { phones: list.map((p) => ({ id: p.id, label: p.label, state: p.status.state })) } : {};
+    } catch {
+      return {};
+    }
   }
 
   /** A change's snapshot write, not awaited; a failure goes to onError. */
@@ -460,6 +501,13 @@ const isReportHealth = (r: unknown): r is ReportHealth => {
 
 const isVoiceProblem = (p: unknown): p is VoiceProblem => typeof p === 'string' && Object.hasOwn(VOICE_PROBLEM_LINES, p);
 
+/** Phones 1 to 5, each with a name and a state. */
+const isPhonesHealth = (p: unknown): p is PhoneHealth[] =>
+  Array.isArray(p) && p.every((x: unknown) => {
+    const r = x as Record<string, unknown> | null;
+    return typeof r === 'object' && r !== null && Number.isInteger(r.id) && (r.id as number) >= 1 && (r.id as number) <= 5 && typeof r.label === 'string' && typeof r.state === 'string';
+  });
+
 export async function readHealthSnapshot(db: Db): Promise<HealthSnapshot | undefined> {
   const v = await getKv(db, 'health');
   if (!v) return undefined;
@@ -484,10 +532,12 @@ export async function readHealthSnapshot(db: Db): Promise<HealthSnapshot | undef
     // A pause reason or provider this version does not know (a newer writer) drops only the meetings, not the snapshot.
     // So does a voice problem it does not know (including the earlier 'local_not_set_up', written before the problem
     // named its setting): only that field is dropped. Snapshots before Task 10 have none.
-    const { meetings, voiceProblem, ...rest } = o;
+    // So does a phone list it cannot read (more phones, lane C); one-phone and older snapshots have none.
+    const { meetings, voiceProblem, phones, ...rest } = o;
     const keep = meetings !== undefined && isKnownMeetingsState(meetings) ? { meetings } : {};
     const voice = isVoiceProblem(voiceProblem) ? { voiceProblem } : {};
-    return { ...rest, ...keep, ...voice, ingestFailures: o.ingestFailures ?? 0 } as HealthSnapshot;
+    const listed = isPhonesHealth(phones) ? { phones } : {};
+    return { ...rest, ...keep, ...voice, ...listed, ingestFailures: o.ingestFailures ?? 0 } as HealthSnapshot;
   } catch {
     return undefined;
   }
