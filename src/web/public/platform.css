@@ -23,9 +23,16 @@
 /* Invite a customer */
 .pf-inv td { vertical-align: top; }
 .pf-inv .pf-when { white-space: nowrap; }
+.pf-inv .pf-mono { overflow-wrap: break-word; } /* an address breaks only after its @ (invite.js emailHtml) */
+.pf-inv .pill { white-space: nowrap; }
 .pf-link-box { display: grid; gap: 8px; margin-top: 12px; }
 .pf-link-box input { font: 400 12.5px var(--mono); }
-@media (max-width: 1200px) { .grid > .pf-col-form, .grid > .pf-col-list { grid-column: span 12; } }
+/* The list needs the width, so the form sits above it, with its two fields side by side. */
+@media (min-width: 721px) {
+  .pf-col-form .pf-stack { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; max-width: 880px; }
+  .pf-col-form .pf-stack > .pf-err, .pf-col-form .pf-stack > .pf-row { grid-column: 1 / -1; }
+}
+@media (min-width: 1280px) { .pf-inv .pf-acts { flex-wrap: nowrap; } }
 
 /* Getting started (onboarding) */
 .pf-ob-top { display: grid; gap: 14px; }
@@ -98,11 +105,11 @@
 :root[data-theme="light"] .pf-signup .si-denied b, :root[data-theme="light"] .pf-signup .si-error b { color: #b23247; }
 :root[data-theme="light"] .pf-signup .si-foot { color: var(--faint); }
 
-/* Room for the floating Ask button (assistant.css: a pill 24px from the corner on laptops, a 52px circle 16px from it on
-   phones). Row actions sit outside its lane, on the left of it on laptops and at the left of each card on phones, and the
-   end of each platform screen scrolls clear of it. */
+/* Room for the floating Ask button (assistant.css: a 56px circle 24px from the corner on laptops, a 52px circle 16px from
+   it on phones). Row actions sit outside its lane, on the left of it on laptops and at the left of each card on phones,
+   and the end of each platform screen scrolls clear of it. */
 .view:has(.pf-cust, .pf-col-form, .pf-steps) { padding-bottom: 112px; }
-.pf-cust td:last-child, .pf-inv td:last-child { padding-right: 120px; }
+.pf-cust td:last-child, .pf-inv td:last-child { padding-right: 64px; }
 @media (max-width: 720px) {
   .pf-cust td:last-child, .pf-inv td:last-child { padding-right: 56px; justify-content: flex-start; }
 }

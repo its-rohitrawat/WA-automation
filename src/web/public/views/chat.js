@@ -16,6 +16,10 @@ const PAGE = 50;
 const TEXT_MAX = 4096;
 /** Near the end of the list: new messages keep it scrolled to the end. */
 const STICK_PX = 80;
+/** The text box grows to about 5 lines (20px each, and its padding), then scrolls. */
+const BOX_MAX_PX = 124;
+/** The floating day fades this long after the owner stops scrolling. */
+const FLOAT_MS = 1000;
 const IST = 'Asia/Kolkata';
 /** A computer: a mouse or trackpad that can hover. */
 const desk = matchMedia('(hover: hover) and (pointer: fine)');
@@ -39,7 +43,8 @@ const desk = matchMedia('(hover: hover) and (pointer: fine)');
  *   draft: string, armed: boolean, onBack: () => void, names: Record<string, string>, members: Member[] | null,
  *   reading: Promise<{ name: string, members: Member[] } | { name: string, note: string }> | null,
  *   failed: { note: string, at: number } | null, labels: Map<string, string>, picks: Map<string, string>,
- *   picker: { start: number, query: string, active: number } | null, cleared: boolean, deleting: boolean } | null}
+ *   picker: { start: number, query: string, active: number } | null, cleared: boolean, deleting: boolean,
+ *   floatTimer: number, drawnAt: number } | null}
  */
 let chat = null;
 
@@ -106,16 +111,21 @@ function richText(text) {
   return out + esc(text.slice(last));
 }
 
-/** A stored message. `showName`: the first of a run by one sender (in a group, names show on others' messages only). @param {Msg} m @param {boolean} showName */
-function bubble(m, showName) {
+/**
+ * A stored message. `first`: the first of a run by one sender, as in WhatsApp: a little more room above, the bubble's
+ * tail, and (in a group, on others' messages only) the sender's name.
+ * @param {Msg} m @param {boolean} first
+ */
+function bubble(m, first) {
+  const row = `ch-row ${m.mine ? 'out' : 'in'}${first ? ' first' : ''}`;
   if (m.deleted) {
-    return `<div class="ch-row ${m.mine ? 'out' : 'in'}"><div class="ch-bub ch-gone">${icon('close', 13)}<i>This message was deleted</i><span class="ch-meta">${esc(clock(m.at))}</span></div></div>`;
+    return `<div class="${row}"><div class="ch-bub ch-gone">${icon('close', 13)}<i>This message was deleted</i><span class="ch-meta">${esc(clock(m.at))}</span></div></div>`;
   }
-  const name = !m.mine && showName ? `<b class="ch-name ${tone(m.sender)}">${esc(m.sender)}</b>` : '';
+  const name = !m.mine && first ? `<b class="ch-name ${tone(m.sender)}">${esc(m.sender)}</b>` : '';
   const transcript = m.transcript ? `<p class="ch-tr">${esc(m.transcript)}</p>` : '';
   const text = m.text ? `<p>${richText(m.text)}</p>` : '';
   const replyBtn = chat?.sendingOn ? `<button class="ch-reply" type="button" data-reply="${m.id}" aria-label="Reply to ${esc(m.sender)}">${icon('undo', 14)}</button>` : '';
-  return `<div class="ch-row ${m.mine ? 'out' : 'in'}" data-msg="${m.id}"><div class="ch-bub">${name}${quoteBlock(m.quote)}${kindTag(m.kind, m.seconds)}${transcript}${text}
+  return `<div class="${row}" data-msg="${m.id}"><div class="ch-bub">${name}${quoteBlock(m.quote)}${kindTag(m.kind, m.seconds)}${transcript}${text}
     <span class="ch-meta">${m.edited ? 'edited · ' : ''}${esc(clock(m.at))}</span></div>${replyBtn}</div>`;
 }
 
@@ -127,10 +137,10 @@ function outState(o) {
   return { cls: 'wait', ic: 'clock', words: 'Sending…' };
 }
 
-/** A message sent (or being sent) from here that the chat shows on its own. @param {Out} o */
-function outBubble(o) {
+/** A message sent (or being sent) from here that the chat shows on its own. @param {Out} o @param {boolean} first */
+function outBubble(o, first) {
   const s = outState(o);
-  return `<div class="ch-row out ch-own ${s.cls}" data-out="${esc(o.uuid)}"><div class="ch-bub">${quoteBlock(o.quote)}<p>${richText(o.text)}</p>
+  return `<div class="ch-row out${first ? ' first' : ''} ch-own ${s.cls}" data-out="${esc(o.uuid)}"><div class="ch-bub">${quoteBlock(o.quote)}<p>${richText(o.text)}</p>
     <span class="ch-meta">${esc(clock(o.at))} <span class="ch-state">${icon(s.ic, 13)}${esc(s.words)}</span></span></div></div>`;
 }
 
@@ -139,24 +149,28 @@ function listHtml() {
   if (!chat) return '';
   const msgs = [...chat.messages.values()].sort((a, b) => (a.at ?? '').localeCompare(b.at ?? '') || a.id - b.id);
   let lastDay = '';
-  let lastSender = '';
+  // Who wrote the message before: 'me', or 'in:' and the sender; a new day starts a new run.
+  let lastWho = '';
   const parts = [];
   for (const m of msgs) {
     const d = day(m.at);
     if (d !== lastDay) {
       parts.push(`<div class="ch-day" role="separator"><span>${esc(dayLabel(d))}</span></div>`);
       lastDay = d;
-      lastSender = '';
+      lastWho = '';
     }
-    const who = m.mine ? '' : m.sender;
-    parts.push(bubble(m, who !== lastSender));
-    lastSender = who;
+    const who = m.mine ? 'me' : `in:${m.sender}`;
+    parts.push(bubble(m, who !== lastWho));
+    lastWho = who;
   }
   const own = [...chat.outbox.values()].sort((a, b) => (a.at ?? '').localeCompare(b.at ?? ''));
   if (own.length) {
     const d = day(own[0]?.at ?? null);
-    if (d !== lastDay) parts.push(`<div class="ch-day" role="separator"><span>${esc(dayLabel(d))}</span></div>`);
-    for (const o of own) parts.push(outBubble(o));
+    if (d !== lastDay) {
+      parts.push(`<div class="ch-day" role="separator"><span>${esc(dayLabel(d))}</span></div>`);
+      lastWho = '';
+    }
+    own.forEach((o, i) => parts.push(outBubble(o, i === 0 && lastWho !== 'me')));
   }
   if (parts.length === 0) {
     parts.push(chat.cleared ? '<p class="ch-empty">You deleted this chat. New messages in the group will show here.</p>' : '<p class="ch-empty">No messages stored for this group yet.</p>');
@@ -200,16 +214,48 @@ function draw(o = {}) {
     grow();
     if (typing) /** @type {HTMLElement | null} */ (chat.el.querySelector('#ch-text'))?.focus({ preventScroll: true });
   }
+  chat.drawnAt = performance.now(); // this move of the list is not the owner scrolling (floatDay)
   if (o.toEnd || atEnd) body.scrollTop = body.scrollHeight;
   else body.scrollTop = body.scrollHeight - fromEnd;
 }
 
-/** The text box grows with its lines, up to a few. */
+/** The text box grows with its lines, up to about 5, and only then scrolls. */
 function grow() {
   const t = /** @type {HTMLTextAreaElement | null} */ (chat?.el.querySelector('#ch-text') ?? null);
   if (!t) return;
   t.style.height = 'auto';
-  t.style.height = `${Math.min(t.scrollHeight, 140)}px`;
+  // scrollHeight leaves out the border, which the box's height includes: without it, a one-line box scrolls.
+  const full = t.scrollHeight + t.offsetHeight - t.clientHeight;
+  t.style.height = `${Math.min(full, BOX_MAX_PX)}px`;
+  t.style.overflowY = full > BOX_MAX_PX ? 'auto' : 'hidden';
+}
+
+/**
+ * While the owner scrolls, the day of the messages at the top floats there, as in WhatsApp, and fades a second after.
+ * At rest only the days in the list show, so nothing covers a message. Hidden while a day in the list is at the top.
+ */
+function floatDay() {
+  const c = chat;
+  if (!c || performance.now() - c.drawnAt < 150) return;
+  const body = /** @type {HTMLElement} */ ($('.ch-body', c.el));
+  const pill = /** @type {HTMLElement} */ ($('.ch-float', c.el));
+  const top = body.scrollTop;
+  let label = '';
+  let atTop = false;
+  for (const d of /** @type {NodeListOf<HTMLElement>} */ (body.querySelectorAll('.ch-day'))) {
+    if (d.offsetTop <= top + 8) label = d.textContent ?? '';
+    else if (d.offsetTop < top + 48) atTop = true;
+  }
+  clearTimeout(c.floatTimer);
+  /** @type {HTMLElement} */ (pill.firstElementChild).textContent = label;
+  pill.classList.toggle('on', label !== '' && !atTop);
+  c.floatTimer = window.setTimeout(() => pill.classList.remove('on'), FLOAT_MS);
+}
+
+/** The header's line under the group's name: the client's code, and how many members once they are read. @param {NonNullable<typeof chat>} c */
+function showCount(c) {
+  const n = c.members?.length;
+  $('.ch-sub', c.el).textContent = n ? `${c.code} · ${n} ${n === 1 ? 'member' : 'members'}` : c.code;
 }
 
 /** Takes the agent's page into the chat. The dashboard's own messages are the agent's list, plus the ones still in flight here. @param {ChatData} d @param {boolean} newest */
@@ -247,6 +293,8 @@ async function loadNewest(first = false) {
       $('.ch-who', c.el).textContent = c.groupName;
       // Only now, at the end of the list: scrolling up near the top loads the page before.
       c.armed = true;
+      // The members, for the header's count (and kept for tagging and Group info).
+      if (c.connected) void fetchMembers(c);
     }
   } catch (e) {
     if (chat !== c) return;
@@ -345,6 +393,7 @@ async function deliver(c, out, replyTo, tries) {
 
 /** Closes the chat (the layer's own close). */
 function forget() {
+  if (chat) clearTimeout(chat.floatTimer);
   chat = null;
 }
 
@@ -420,6 +469,7 @@ function setMembers(c, members) {
   for (const m of members) count.set(base(m), (count.get(base(m)) ?? 0) + 1);
   c.members = members;
   c.labels = new Map(members.map((m) => [m.tag, (count.get(base(m)) ?? 0) > 1 ? `${base(m)} ${m.tag.slice(-4)}` : base(m)]));
+  if (chat === c) showCount(c);
 }
 
 /** Opens the group info panel over the chat and reads the members. */
@@ -598,11 +648,11 @@ function closeInfo() {
 export function openChat(code, onBack) {
   // The group's picture and name open its info, as in WhatsApp. The name is the sheet's title (the h2), as a button.
   const el = openChatLayer(`<div class="ch-head"><button class="icon-btn" type="button" data-chat-back aria-label="Back to the client">${icon('arrowL', 18)}</button>
-      <span class="ch-av" data-chat-info aria-hidden="true">${icon('users', 18)}</span><div class="grow-1 ch-title"><h2><button class="ch-who" type="button" data-chat-info aria-haspopup="dialog">Loading…</button></h2><small>${esc(code)} · stored messages</small></div>
+      <span class="ch-av" data-chat-info aria-hidden="true">${icon('users', 18)}</span><div class="grow-1 ch-title"><h2><button class="ch-who" type="button" data-chat-info aria-haspopup="dialog">Loading…</button></h2><small class="ch-sub">${esc(code)}</small></div>
       <button class="icon-btn" type="button" data-chat-menu aria-haspopup="menu" aria-expanded="false" aria-controls="ch-menu" aria-label="Chat menu">${icon('dots', 18)}</button>
       <button class="icon-btn" type="button" data-close aria-label="Close the chat">${icon('close', 18)}</button>
       <div class="ch-menu" id="ch-menu" role="menu" aria-label="Chat menu" hidden><button type="button" role="menuitem" data-chat-delete>${icon('trash', 16)}Delete chat</button></div></div>
-    <div class="ch-body" tabindex="0" aria-label="Messages"><button class="ch-older link" type="button" hidden>Load older messages</button>
+    <div class="ch-body" tabindex="0" aria-label="Messages"><div class="ch-float" aria-hidden="true"><span></span></div><button class="ch-older link" type="button" hidden>Load older messages</button>
       <div class="ch-list" aria-live="polite"><p class="ch-empty">Loading the messages…</p></div></div>
     <div class="ch-foot"></div>
     <section class="ch-info" aria-label="Group info" hidden></section>`, { onClose: forget });
@@ -610,6 +660,7 @@ export function openChat(code, onBack) {
     code, el, messages: new Map(), outbox: new Map(), hasOlder: false, loadingOlder: false, sendingOn: false, connected: false, phone: null,
     groupName: code, clientName: '', replyTo: null, draft: '', armed: false, onBack,
     names: {}, members: null, reading: null, failed: null, labels: new Map(), picks: new Map(), picker: null, cleared: false, deleting: false,
+    floatTimer: 0, drawnAt: 0,
   };
   const body = /** @type {HTMLElement} */ ($('.ch-body', el));
   // Scrolling up near the top loads the page before; the button does the same for keyboards. Checked on scroll, and
@@ -618,6 +669,7 @@ export function openChat(code, onBack) {
     if (chat?.el === el && chat.armed && body.scrollTop < 300) void loadOlder();
   };
   body.addEventListener('scroll', nearTop, { passive: true });
+  body.addEventListener('scroll', floatDay, { passive: true });
   for (const type of ['wheel', 'touchmove', 'keydown']) body.addEventListener(type, () => requestAnimationFrame(nearTop), { passive: true });
   el.addEventListener('click', (e) => {
     const t = /** @type {Element} */ (e.target);
