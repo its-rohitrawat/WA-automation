@@ -89,7 +89,7 @@ async function stores(): Promise<{ platformDb: Db; founderDb: Db; customerDbOf: 
  * `noStateKey`: the Supervisor gets no Google state key. `fakeSockets`: each customer's reading gateways get these fake
  * sockets (a linked phone then reaches no WhatsApp). Returns `built`: each customer runtime's deps, by customer id.
  */
-async function setup(o: { keyFor: ('a' | 'b')[]; noStateKey?: boolean; fakeSockets?: FakeSocket[] }) {
+async function setup(o: { keyFor: ('a' | 'b')[]; noStateKey?: boolean; fakeSockets?: FakeSocket[]; status?: 'active' | 'onboarding' }) {
   dir = mkdtempSync(join(tmpdir(), 'wa-full-'));
   const groups = join(dir, 'allowed-groups.json');
   writeFileSync(groups, '[]');
@@ -107,7 +107,8 @@ async function setup(o: { keyFor: ('a' | 'b')[]; noStateKey?: boolean; fakeSocke
   if (founderDb !== platformDb) opened.push(founderDb);
   await ensureFounderTenant(platformDb, { name: 'Your business', at: AT });
   await new TokenStore(founderDb, master).save('founder-refresh-token-placeholder');
-  const ids = { a: (await createTenant(platformDb, { name: 'Acme', status: 'active', at: AT })).id, b: (await createTenant(platformDb, { name: 'Blue', status: 'active', at: AT })).id };
+  const status = o.status ?? 'active';
+  const ids = { a: (await createTenant(platformDb, { name: 'Acme', status, at: AT })).id, b: (await createTenant(platformDb, { name: 'Blue', status, at: AT })).id };
   const dbs: Record<string, Db> = {};
   const tenantKeys = new TenantKeys({ db: platformDb, master, clock: manualClock(AT) });
   for (const k of ['a', 'b'] as const) {
@@ -193,6 +194,35 @@ describe('a customer’s full runtime (Phase B 2 and 3)', () => {
     expect(readdirSync(resolve(dir, 'tenants')).sort()).toEqual([ids.a, ids.b].sort());
     expect((await tenantKeys.dataKey(ids.a)).equals(await tenantKeys.dataKey(ids.b))).toBe(false);
     expect(new Set(sdk.keys)).toEqual(new Set(['sk-ant-customer-a-placeholder', 'sk-ant-customer-b-placeholder']));
+  });
+
+  // Owner report, 4 Nov: an onboarding customer's WhatsApp QR never opened. Linking needs its full runtime's routes, and
+  // the customer becomes active only once WhatsApp is linked, so its key alone must be enough for the full runtime.
+  it('an onboarding customer with its own key runs its full runtime, so its dashboard can link WhatsApp; without one, its setup shell', async () => {
+    const { ps, ids } = await setup({ keyFor: ['a'], status: 'onboarding' });
+    await ps.start();
+    expect(ps.supervisor.state(ids.a)).toBe('running');
+    expect(ps.tenants.get(ids.a)).toBeDefined(); // its own dashboard routes, the WhatsApp link among them
+    expect(ps.supervisor.facts(ids.a)).toMatchObject({ whatsappLinked: false, aiKey: 'configured' });
+    expect(sdk.keys.every((k) => k === 'sk-ant-customer-a-placeholder')).toBe(true);
+    expect(wa.sockets).toBe(0); // no socket until a link is started
+    // B is onboarding without a key: its setup shell, no routes of its own.
+    expect(ps.supervisor.facts(ids.b)?.aiKey).toBe('missing');
+    expect(ps.tenants.get(ids.b)).toBeUndefined();
+  });
+
+  it('an onboarding customer that adds its key mid-setup gets its full runtime on restart', async () => {
+    const { ps, ids } = await setup({ keyFor: [], status: 'onboarding' });
+    await ps.start();
+    expect(ps.tenants.get(ids.a)).toBeUndefined();
+    await ps.hooks.aiKeys!(ids.a)!.set('sk-ant-customer-a-placeholder', 'owner@example.com');
+    ps.hooks.restart!(ids.a);
+    await ps.supervisor.settled();
+    expect(ps.supervisor.state(ids.a)).toBe('running');
+    expect(ps.tenants.get(ids.a)).toBeDefined();
+    // reconcile agrees with what restart started: it is not stopped again.
+    await ps.supervisor.reconcile();
+    expect(ps.tenants.get(ids.a)).toBeDefined();
   });
 
   it('a customer never loads the founder’s Google token: its Drive stays off until it connects its own', async () => {

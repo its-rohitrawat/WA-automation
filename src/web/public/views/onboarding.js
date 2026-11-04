@@ -37,7 +37,7 @@ function readOnboarding(raw) {
 function statePill(s) {
   if (s.state === 'done') return pill({ cls: 'p-done', label: 'Done' });
   if (s.state === 'locked') return pill({ cls: 'p-muted', label: 'Locked' });
-  if (s.state === 'coming') return pill({ cls: 'p-muted', label: 'Coming soon' });
+  if (s.state === 'coming') return pill({ cls: 'p-muted', label: 'Getting ready' });
   if (s.optional) return pill({ cls: 'p-muted', label: 'Optional' });
   return s.need ? pill({ cls: 'p-warn', label: 'Needed' }) : pill({ cls: 'p-review', label: 'To do' });
 }
@@ -68,16 +68,33 @@ function linkPanel(s) {
   return `<div data-link-box><button class="btn btn-primary btn-sm" type="button" data-link="${target}">${icon('link', 15)}Show QR code</button></div>`;
 }
 
-/** @param {Step} s */
-function body(s) {
+/**
+ * The workspace's own WhatsApp link runs in its full runtime, which starts once the key is in: until then step 1 sends
+ * the customer to step 2 (owner report, 4 Nov: the QR never opened). @param {Step} s @param {boolean} keyDone
+ */
+function body(s, keyDone) {
   if (s.id === 'key' && (s.state === 'todo' || s.state === 'done')) return keyPanel(s);
+  if (s.id === 'whatsapp' && s.state === 'todo' && !keyDone) {
+    return `<div class="pf-coming">${icon('key', 16)}<span><b>Add your Anthropic API key first.</b> The QR code shows here once your key is saved (step 2).</span></div>
+      <div class="pf-row"><button class="btn btn-primary btn-sm" type="button" data-open="key">${icon('key', 15)}Go to step 2</button></div>`;
+  }
   if ((s.id === 'whatsapp' || s.id === 'spare') && s.state === 'todo') return linkPanel(s);
   if (s.state === 'done') return `<p class="pf-faint">${icon('ok', 16)} Done.</p>`;
-  return `<div class="pf-coming">${icon('clock', 16)}<span><b>Coming with the customer workspace.</b> ${esc(s.coming)}</span></div>`;
+  return `<div class="pf-coming">${icon('clock', 16)}<span><b>Your workspace is getting ready.</b> This page updates by itself. ${esc(s.coming)}</span></div>`;
+}
+
+/** A paused workspace: nothing runs, so no steps, only what happened and that nothing is lost. @param {Onboarding} d */
+function renderPaused(d) {
+  return `<div class="grid">
+    <section class="card col-12 pf-ob-top"><div class="pf-ob-hello"><div><span class="eyebrow">${esc(d.business)}</span><h2>This workspace is paused.</h2>
+        <p class="muted-p">${esc(d.founderName)}, who runs WA Agent, has paused it. Nothing is read or sent until they resume it, and your setup and data are kept.</p></div>
+        <div class="pf-ob-prog">${pill({ cls: 'p-muted', label: 'Paused' })}</div></div></section></div>`;
 }
 
 /** @param {Onboarding} d @param {string | null} open */
 function render(d, open) {
+  if (d.status === 'paused') return renderPaused(d);
+  const keyDone = d.steps.some((s) => s.id === 'key' && s.state === 'done');
   const steps = d.steps.map((s, i) => {
     const locked = s.state === 'locked';
     const isOpen = open === s.id && !locked;
@@ -86,7 +103,7 @@ function render(d, open) {
         <span class="pf-num">${s.state === 'done' ? icon('tick', 16) : locked ? icon('lock', 15) : i + 1}</span>
         <span class="pf-step-txt"><b>${icon(ICONS[s.id] ?? 'task', 15)} ${esc(s.title)}</b><small>${esc(locked ? 'Unlocks after WhatsApp and your API key.' : s.text)}</small></span>
         <span class="pf-step-st">${statePill(s)}${locked ? '' : icon('chev', 16)}</span></button>
-      ${isOpen ? `<div class="pf-step-body">${body(s)}</div>` : ''}</li>`;
+      ${isOpen ? `<div class="pf-step-body">${body(s, keyDone)}</div>` : ''}</li>`;
   }).join('');
   const work = (/** @type {boolean} */ on, /** @type {string} */ text) => `<li class="${on ? 'yes' : ''}">${icon(on ? 'ok' : 'lock', 16)}<span>${esc(text)}</span></li>`;
   return `<div class="grid">
@@ -114,13 +131,19 @@ export function mountOnboarding(ctx) {
   let open;
   /** A WhatsApp link showing in a step (steps 1 and 3), until it is linked, cancelled or left. @type {{ stop(): void } | null} */
   let linking = null;
+  /** A quick look again while the workspace is still getting ready (its runtime starting, or restarting after a key). */
+  let soon = 0;
 
   const draw = () => {
     if (!ctx.live() || !data) return;
     // A redraw replaces the step bodies: a link still waiting for its scan is cancelled first (the phone stays as it was).
     linking?.stop();
     linking = null;
-    if (open === undefined) open = data.steps.find((s) => s.state !== 'done' && s.state !== 'locked')?.id ?? null;
+    if (open === undefined) {
+      const next = data.steps.find((s) => s.state !== 'done' && s.state !== 'locked')?.id ?? null;
+      // WhatsApp waits for the key (see body): open the key first while it is still to do.
+      open = next === 'whatsapp' && data.steps.some((s) => s.id === 'key' && s.state === 'todo') ? 'key' : next;
+    }
     ctx.redraw(render(data, open));
     // The bar's width is set here, not in the markup: the page allows no inline styles.
     const bar = /** @type {HTMLElement | null} */ (ctx.view.querySelector('[data-progress]'));
@@ -136,6 +159,8 @@ export function mountOnboarding(ctx) {
       const next = readOnboarding(await get('/platform/onboarding'));
       if (!ctx.live()) return;
       data = next;
+      clearTimeout(soon);
+      if (next.status !== 'paused' && next.steps.some((s) => s.need && s.state === 'coming')) soon = window.setTimeout(() => void load(), 5000);
       if (!typing() && !linking) draw(); // never under someone typing a key or scanning a code
     } catch (e) {
       if (ctx.live() && !data) ctx.redraw(failed(e));
@@ -163,6 +188,7 @@ export function mountOnboarding(ctx) {
       try {
         await post('/platform/ai-key', { key });
         toast('Key tested and saved. It is never shown again.');
+        open = undefined; // on to the next step: WhatsApp, once the workspace has started with the key
         await load();
       } catch (err) {
         refused(err);
@@ -212,6 +238,7 @@ export function mountOnboarding(ctx) {
   });
   // Leaving the screen cancels a link still waiting for its scan.
   return () => {
+    clearTimeout(soon);
     linking?.stop();
     off();
   };

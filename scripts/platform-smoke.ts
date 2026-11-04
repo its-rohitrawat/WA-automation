@@ -246,7 +246,7 @@ try {
       if (customerNav.locked.join() !== 'assistant,clients,meetings,tasks,tracker') fail(where, `locked: ${customerNav.locked}`); // the Assistant too (Nov release piece 3)
       for (const id of ['customers', 'invite', 'connections', 'usage']) if (customerNav.all.includes(id)) fail(where, `${id} in a customer's nav`);
       if ((await p.locator('.pf-step.locked').count()) !== 4) fail(where, 'expected 4 locked steps');
-      await p.locator('.pf-step.open .pf-coming', { hasText: 'Coming with the customer workspace.' }).waitFor();
+      await p.locator('.pf-step.open .pf-coming', { hasText: 'Your workspace is getting ready.' }).waitFor();
       await p.locator('.pf-ob-prog', { hasText: '0 of 6 done' }).waitFor();
       // A locked step is aria-disabled (so Playwright will not click it by itself); a person can still tap it.
       await p.locator('.pf-step.locked .pf-step-head').first().click({ force: true });
@@ -260,8 +260,22 @@ try {
       // (S4.6 C) Step 1, the customer's own WhatsApp: the QR shows inline; Cancel gives the button back; a scan links.
       // The preview's link is the fake dashboard's (two codes, a scan, done); the real one is the customer's own link
       // session (S4.6 A), on the same routes.
-      where = `onboarding whatsapp ${tag}`;
+      // The key comes first (owner report, 4 Nov): the link is the workspace's full runtime's, which starts with the key.
+      // Both to do: the key step opens first, and step 1 sends the customer to step 2.
+      where = `onboarding key first ${tag}`;
       fakeSteps.whatsapp = 'todo';
+      fakeSteps.key = 'todo';
+      await p.reload();
+      await p.locator('.pf-step.open', { hasText: 'Anthropic' }).waitFor();
+      await p.locator('.pf-step-head', { hasText: 'Connect WhatsApp' }).click();
+      await p.locator('.pf-step.open .pf-coming', { hasText: 'Add your Anthropic API key first.' }).waitFor();
+      if ((await p.locator('[data-link="founder"]').count()) !== 0) fail(where, 'a QR button before the key');
+      await p.locator('.pf-step.open [data-open="key"]').click();
+      await p.locator('.pf-step.open [data-key-form]').waitFor();
+      await shot(p, where, `onboarding-key-first-${tag}`, false);
+
+      where = `onboarding whatsapp ${tag}`;
+      fakeSteps.key = 'done';
       await p.reload();
       await p.locator('[data-link="founder"]').click();
       await p.locator('[data-link-cancel]').click();
@@ -271,6 +285,7 @@ try {
       await shot(p, where, `onboarding-whatsapp-${tag}`, false);
       await p.locator('.toast', { hasText: 'WhatsApp linked as "WA Agent - Tracker".' }).waitFor();
       delete fakeSteps.whatsapp;
+      delete fakeSteps.key;
 
       // (S4.2) The customer's own Anthropic key: an obvious fake, and the preview's tester never calls Anthropic. It
       // leaves the field and never reaches the page. (The founder, whose key is in .env, has no Getting started at all;
@@ -279,7 +294,7 @@ try {
       const FAKE_KEY = 'sk-ant-test-0000';
       fakeSteps.key = 'todo';
       await p.reload();
-      await p.locator('.pf-step-head', { hasText: 'Anthropic' }).click();
+      await p.locator('.pf-step.open', { hasText: 'Anthropic' }).waitFor(); // opens by itself: the key comes first
       const keyField = p.locator('[data-key-form] input[name="key"]');
       await keyField.fill(FAKE_KEY);
       await shot(p, where, `onboarding-key-${tag}`, false);
@@ -303,6 +318,15 @@ try {
       // Active: the customer's Workspace unlocks.
       await p.waitForFunction(() => document.querySelectorAll('#nav [data-go].locked').length === 0);
       await shot(p, where, `onboarding-active-${tag}`);
+      // Paused (owner report, 4 Nov: a paused workspace looked like a broken setup): it says so, with no steps.
+      where = `onboarding paused ${tag}`;
+      await platformDb.run("UPDATE tenants SET status = 'paused' WHERE name = 'Joshi Interiors'");
+      for (const k of Object.keys(fakeSteps) as (keyof typeof fakeSteps)[]) delete fakeSteps[k];
+      await p.reload();
+      await p.locator('.pf-ob-top h2', { hasText: 'This workspace is paused.' }).waitFor();
+      await p.locator('.pf-ob-prog .pill', { hasText: 'Paused' }).waitFor();
+      if ((await p.locator('.pf-step').count()) !== 0) fail(where, 'steps on a paused workspace');
+      await shot(p, where, `onboarding-paused-${tag}`, false);
       for (const k of Object.keys(fakeSteps) as (keyof typeof fakeSteps)[]) delete fakeSteps[k];
       await platformDb.run("UPDATE tenants SET status = 'onboarding' WHERE name = 'Joshi Interiors'");
       previewAs.founder = true; // the founder again, for Customers

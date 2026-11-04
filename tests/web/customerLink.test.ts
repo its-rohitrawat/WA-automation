@@ -47,14 +47,14 @@ let founderRt: CustomerRuntime;
 let web: WebServer;
 let base: string;
 let tenantKeys: TenantKeys;
-const ids = { a: '', b: '' };
+const ids = { a: '', b: '', c: '' };
 const dbs: Record<string, Db> = {};
 /** The fake sockets each customer's runtime made, and whose context each was made in. */
 const sockets: Record<string, { sock: FakeSocket; owner: string | undefined }[]> = {};
 /** How many spare sockets each customer's runtime made. */
 const senders: Record<string, number> = {};
 type S = { id: string; csrf: string };
-const s: Record<'founder' | 'a' | 'b', S> = {} as never;
+const s: Record<'founder' | 'a' | 'b' | 'c', S> = {} as never;
 
 beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), 'wa-link-'));
@@ -90,15 +90,16 @@ beforeAll(async () => {
   opened.push(founderDb);
   await ensureFounderTenant(platform, { name: 'Your business', at: AT });
   tenantKeys = new TenantKeys({ db: platform, master, clock: manualClock(AT) });
-  for (const k of ['a', 'b'] as const) {
-    ids[k] = (await createTenant(platform, { name: `Customer ${k}`, status: 'active', at: AT })).id;
+  // C is still onboarding (Getting started), with its key in: owner report, 4 Nov, its QR never opened.
+  for (const k of ['a', 'b', 'c'] as const) {
+    ids[k] = (await createTenant(platform, { name: `Customer ${k}`, status: k === 'c' ? 'onboarding' : 'active', at: AT })).id;
     const db = await customerDbOf(ids[k]);
     opened.push(db);
     dbs[ids[k]] = db;
     sockets[ids[k]] = [];
     await new AiKeys({ db, platform, tenantId: ids[k], dataKey: () => tenantKeys.dataKey(ids[k]), tester: async () => 'ok', clock: manualClock(AT) })
       .set(`sk-ant-customer-${k}-placeholder`, OWNER);
-    const user = `00000000-0000-4000-8000-00000000000${k === 'a' ? '1' : '2'}`.replace(/1$/, k === 'a' ? 'a' : 'b');
+    const user = `00000000-0000-4000-8000-00000000000${k}`;
     await platform.run('INSERT INTO users (id, email, name, created_at) VALUES (?, ?, ?, ?)', [user, `${k}@example.com`, null, AT]);
     await platform.run("INSERT INTO memberships (tenant_id, user_id, role, created_at) VALUES (?, ?, 'owner', ?)", [ids[k], user, AT]);
   }
@@ -142,6 +143,7 @@ beforeAll(async () => {
   s.founder = await sessions.create(OWNER, 'Test');
   s.a = await sessions.create('a@example.com', 'Test', undefined, ids.a);
   s.b = await sessions.create('b@example.com', 'Test', undefined, ids.b);
+  s.c = await sessions.create('c@example.com', 'Test', undefined, ids.c);
 }, 60_000);
 
 afterAll(async () => {
@@ -220,4 +222,16 @@ describe('a customer links its own WhatsApp from the dashboard (S4.6 A)', () => 
     if (own.ok) await own.db.close();
     expect(await openSenderSession(home, await tenantKeys.dataKey(ids.b))).toEqual({ ok: false, code: 'decrypt_failed' });
   }, 20_000);
+
+  it('a customer still onboarding, with its key in, links its WhatsApp from Getting started (owner report, 4 Nov)', async () => {
+    const started = await call('POST', '/dashboard/api/whatsapp/link/start', s.c, { target: 'founder', confirm: true });
+    expect(started.status).toBe(200); // was 503 workspace_starting: only a setup shell, which cannot link
+    await settle(() => sockets[ids.c]!.length > 0);
+    const sock = sockets[ids.c]!.at(-1)!;
+    expect(sock.owner).toBe(ids.c);
+    sock.sock.emit('connection.update', { qr: 'qr-placeholder' });
+    sock.sock.emit('connection.update', { connection: 'open' });
+    await settle(() => ps.supervisor.facts(ids.c)?.whatsappLinked === true);
+    expect(ps.supervisor.facts(ids.c)?.whatsappLinked).toBe(true);
+  });
 });
