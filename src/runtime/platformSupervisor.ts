@@ -115,12 +115,13 @@ export function platformSupervisor(o: {
   const supervisor = new Supervisor({
     db: o.platformDb, clock: o.clock, log: o.log, engine: o.env.DB_ENGINE,
     maxActive: o.env.PLATFORM_MAX_ACTIVE, maxRssMb: o.env.PLATFORM_MAX_RSS_MB, rssMb,
-    // A FULL runtime only for an active customer that has its own Claude key: the factory's rule, so that a reconcile
-    // and a restart agree and a keyed setup shell never counts toward the active limit wrongly.
+    // A FULL runtime for an active or onboarding customer that has its own Claude key: the factory's rule, so that a
+    // reconcile and a restart agree and a keyed setup shell never counts toward the active limit wrongly. Onboarding too
+    // (owner report, 4 Nov): the WhatsApp link is the full runtime's, and the customer becomes active only once it is linked.
     // The founder (adopted) by its status alone; a key that cannot be read is no key (a setup shell, never a failed
     // reconcile for everyone).
     wantsFull: async (tenantId, status) => {
-      if (status !== 'active') return false;
+      if (status !== 'active' && status !== 'onboarding') return false;
       if (tenantId === FOUNDER_TENANT_ID) return true;
       return (await keysOf(tenantId)?.state().catch(() => 'missing' as const)) === 'configured';
     },

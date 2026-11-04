@@ -295,8 +295,15 @@ async function refreshStatus() {
     $('#offline').hidden = true;
   } catch (e) {
     if (/** @type {{ status?: number }} */ (e).status === 401) return;
-    // A customer's workspace still starting is not the agent being offline: the screen says it is starting.
-    if (/** @type {{ code?: string }} */ (e).code === 'workspace_starting') return;
+    // A customer's workspace still starting is not the agent being offline: the screen says it is starting. Its health
+    // comes once it runs (after Getting started's key), so the pill says so instead of "Checking…" for ever.
+    if (/** @type {{ code?: string }} */ (e).code === 'workspace_starting') {
+      $('#offline').hidden = true;
+      $('#hpill-t').textContent = 'Setting up';
+      $('#sh-t').textContent = 'Your workspace is setting up';
+      $('#sh-s').textContent = 'Finish Getting started';
+      return;
+    }
     $('#offline').hidden = false;
     return;
   }
