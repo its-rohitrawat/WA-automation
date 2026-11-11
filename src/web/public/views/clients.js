@@ -239,6 +239,15 @@ export function mountClients(ctx) {
     };
   }
 
+  // A tracker Chat link (11 Nov 2026): ?client=<code>&chat=<message> opens that client's chat at the message, once,
+  // when the client is in the list. The address is cleaned at once, so a reload or Back does not open it again. Read
+  // after the groups tab, which keeps its own search and filters in the address.
+  const link = new URLSearchParams(location.search);
+  const linkAt = link.get('chat');
+  /** @type {{ code: string, at: number } | null} */
+  let jump = link.get('client') && linkAt !== null && /^\d{1,9}$/.test(linkAt) ? { code: link.get('client') ?? '', at: Number(linkAt) } : null;
+  if (link.has('client') || link.has('chat')) history.replaceState(null, '', location.pathname);
+
   /** @type {ReturnType<typeof readClients> | null} */
   let clients = null;
   /** @type {unknown} */
@@ -287,6 +296,11 @@ export function mountClients(ctx) {
       if (!ctx.live()) return;
       clients = next;
       error = null;
+      if (jump && next.some((c) => c.code === jump?.code)) {
+        const { code, at } = jump;
+        jump = null;
+        openChat(code, () => void clientDrawer(code), at);
+      }
     } catch (e) {
       if (!ctx.live() || clients) return;
       error = e;

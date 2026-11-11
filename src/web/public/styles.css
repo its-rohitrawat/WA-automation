@@ -635,11 +635,11 @@ button[disabled] { cursor: not-allowed; opacity: .55; }
 
 /* Open chat: a phone-sized sheet in WhatsApp's own colours (the whole screen on a phone) */
 .chat-sheet { --ch-wall: #0B141A; --ch-in: #202C33; --ch-out: #005C4B; --ch-ink: #E9EDEF; --ch-meta: rgba(233,237,239,.6); --ch-bar: #202C33; --ch-quote: rgba(0,0,0,.22);
-  --ch-pill: #182229; --ch-field: #2A3942; --ch-dots: rgba(233,237,239,.035); --ch-thumb: rgba(233,237,239,.18); --ch-focus: rgba(37,211,102,.55);
+  --ch-pill: #182229; --ch-field: #2A3942; --ch-dots: rgba(233,237,239,.035); --ch-thumb: rgba(233,237,239,.18); --ch-focus: rgba(37,211,102,.55); --ch-hit: rgba(245,166,35,.9);
   position: fixed; inset: 16px; margin: auto; z-index: 61; width: min(440px, calc(100vw - 32px)); height: min(900px, calc(100dvh - 32px)); display: flex; flex-direction: column;
   border-radius: 22px; overflow: hidden; background: var(--ch-wall); color: var(--ch-ink); border: 1px solid var(--line-2); box-shadow: 0 30px 80px -30px rgba(0,0,0,.8); }
 :root[data-theme="light"] .chat-sheet { --ch-wall: #EFEAE2; --ch-in: #FFFFFF; --ch-out: #D9FDD3; --ch-ink: #111B21; --ch-meta: #667781; --ch-bar: #F0F2F5; --ch-quote: rgba(11,20,26,.06);
-  --ch-pill: #FFFFFF; --ch-field: #FFFFFF; --ch-dots: rgba(11,20,26,.05); --ch-thumb: rgba(11,20,26,.2); --ch-focus: rgba(0,128,105,.5); }
+  --ch-pill: #FFFFFF; --ch-field: #FFFFFF; --ch-dots: rgba(11,20,26,.05); --ch-thumb: rgba(11,20,26,.2); --ch-focus: rgba(0,128,105,.5); --ch-hit: rgba(245,166,35,.9); }
 /* Thin, see-through scrollbars inside the chat, not the dashboard's green ones */
 .chat-sheet * { scrollbar-width: thin; scrollbar-color: var(--ch-thumb) transparent; }
 .chat-sheet ::-webkit-scrollbar { width: 6px; height: 6px; }
@@ -667,6 +667,8 @@ button[disabled] { cursor: not-allowed; opacity: .55; }
 .ch-row.out { flex-direction: row-reverse; }
 .ch-bub { position: relative; max-width: min(82%, 520px); padding: 6px 9px 6px; border-radius: 10px; background: var(--ch-in); box-shadow: 0 1px 1px rgba(0,0,0,.13); font-size: 14px; line-height: 1.4; }
 .ch-row.out .ch-bub { background: var(--ch-out); }
+/* A tracker Chat link's message (11 Nov 2026): lit for a few seconds, a still ring (no motion), cleared by chat.js */
+.ch-row.ch-hit .ch-bub { box-shadow: 0 0 0 3px var(--ch-hit); }
 .ch-row.first .ch-bub::before { content: ""; position: absolute; top: 0; width: 8px; height: 13px; background: inherit; }
 .ch-row.in.first .ch-bub { border-top-left-radius: 0; } .ch-row.in.first .ch-bub::before { left: -8px; clip-path: polygon(0 0, 100% 0, 100% 100%); }
 .ch-row.out.first .ch-bub { border-top-right-radius: 0; } .ch-row.out.first .ch-bub::before { right: -8px; clip-path: polygon(0 0, 100% 0, 0 100%); }

@@ -20,6 +20,10 @@ const STICK_PX = 80;
 const BOX_MAX_PX = 124;
 /** The floating day fades this long after the owner stops scrolling. */
 const FLOAT_MS = 1000;
+/** How many older pages Open chat reads, at most, to reach a message a tracker Chat link names (11 Nov 2026). */
+const JUMP_PAGES = 20;
+/** How long that message stays lit. */
+const HIT_MS = 4000;
 const IST = 'Asia/Kolkata';
 /** A computer: a mouse or trackpad that can hover. */
 const desk = matchMedia('(hover: hover) and (pointer: fine)');
@@ -37,14 +41,15 @@ const desk = matchMedia('(hover: hover) and (pointer: fine)');
 /**
  * The open chat, or null. Tagging (November release): `names` are the agent's names for the tags on the pages shown;
  * `members` the group's members (read when the picker or the group info first needs them) and `labels` the name each
- * shows as in the composer ("@Label"); `picks` the members tagged in the draft, by label.
+ * shows as in the composer ("@Label"); `picks` the members tagged in the draft, by label. `hit`: the message a tracker
+ * Chat link opened at, lit while it is set (state, not a DOM class: every draw rewrites the list).
  * @type {{ code: string, el: HTMLElement, messages: Map<number, Msg>, outbox: Map<string, Out>, hasOlder: boolean,
  *   loadingOlder: boolean, sendingOn: boolean, connected: boolean, phone: string | null, groupName: string, clientName: string, replyTo: Msg | null,
  *   draft: string, armed: boolean, onBack: () => void, names: Record<string, string>, members: Member[] | null,
  *   reading: Promise<{ name: string, members: Member[] } | { name: string, note: string }> | null,
  *   failed: { note: string, at: number } | null, labels: Map<string, string>, picks: Map<string, string>,
  *   picker: { start: number, query: string, active: number } | null, cleared: boolean, deleting: boolean,
- *   floatTimer: number, drawnAt: number } | null}
+ *   floatTimer: number, drawnAt: number, hit: number | null } | null}
  */
 let chat = null;
 
@@ -118,7 +123,7 @@ function richText(text) {
  * @param {Msg} m @param {boolean} first
  */
 function bubble(m, first) {
-  const row = `ch-row ${m.mine ? 'out' : 'in'}${first ? ' first' : ''}`;
+  const row = `ch-row ${m.mine ? 'out' : 'in'}${first ? ' first' : ''}${chat?.hit === m.id ? ' ch-hit' : ''}`;
   if (m.deleted) {
     return `<div class="${row}"><div class="ch-bub ch-gone">${icon('close', 13)}<i>This message was deleted</i><span class="ch-meta">${esc(clock(m.at))}</span></div></div>`;
   }
@@ -322,6 +327,29 @@ async function loadOlder() {
     c.loadingOlder = false;
     if (chat === c) $('.ch-older', c.el).textContent = 'Load older messages';
   }
+}
+
+/**
+ * Shows the message `id` (a tracker Chat link): reads older pages, up to JUMP_PAGES, until it is in the chat, then
+ * scrolls to it and lights it up for HIT_MS. Further back than that, it says so and stays at the newest.
+ * @param {number} id
+ */
+async function jumpTo(id) {
+  const c = chat;
+  // Not armed: the first page did not load, and the chat already says so.
+  if (!c || !c.armed) return;
+  for (let i = 0; i < JUMP_PAGES && !c.messages.has(id) && c.hasOlder && chat === c; i++) await loadOlder();
+  if (chat !== c) return;
+  if (!c.messages.has(id)) return void toast('That message is too far back to show here.', false);
+  c.hit = id;
+  draw();
+  // The lit row, found by its class: a deleted message's row has no data-msg.
+  /** @type {HTMLElement | null} */ (c.el.querySelector('.ch-row.ch-hit'))?.scrollIntoView({ block: 'center' });
+  setTimeout(() => {
+    if (chat !== c || c.hit !== id) return;
+    c.hit = null;
+    draw();
+  }, HIT_MS);
 }
 
 /** Asks, then sends. The text and the reply stay in the box until the owner confirms. */
@@ -643,10 +671,11 @@ function closeInfo() {
 }
 
 /**
- * Opens the chat of a client. `onBack` reopens what it came from (the client's panel).
- * @param {string} code @param {() => void} onBack
+ * Opens the chat of a client. `onBack` reopens what it came from (the client's panel). `at`: a message to open at (a
+ * tracker Chat link), or null.
+ * @param {string} code @param {() => void} onBack @param {number | null} [at]
  */
-export function openChat(code, onBack) {
+export function openChat(code, onBack, at = null) {
   // The group's picture and name open its info, as in WhatsApp. The name is the sheet's title (the h2), as a button.
   const el = openChatLayer(`<div class="ch-head"><button class="icon-btn" type="button" data-chat-back aria-label="Back to the client">${icon('arrowL', 18)}</button>
       <span class="ch-av" data-chat-info aria-hidden="true">${icon('users', 18)}</span><div class="grow-1 ch-title"><h2><button class="ch-who" type="button" data-chat-info aria-haspopup="dialog">Loading…</button></h2><small class="ch-sub">${esc(code)}</small></div>
@@ -661,7 +690,7 @@ export function openChat(code, onBack) {
     code, el, messages: new Map(), outbox: new Map(), hasOlder: false, loadingOlder: false, sendingOn: false, connected: false, phone: null,
     groupName: code, clientName: '', replyTo: null, draft: '', armed: false, onBack,
     names: {}, members: null, reading: null, failed: null, labels: new Map(), picks: new Map(), picker: null, cleared: false, deleting: false,
-    floatTimer: 0, drawnAt: 0,
+    floatTimer: 0, drawnAt: 0, hit: null,
   };
   const body = /** @type {HTMLElement} */ ($('.ch-body', el));
   // Scrolling up near the top loads the page before; the button does the same for keyboards. Checked on scroll, and
@@ -774,7 +803,8 @@ export function openChat(code, onBack) {
       closeInfo();
     }
   });
-  void loadNewest(true);
+  // A Chat link's message, once the newest page is in, and only in this chat (it may have been closed meanwhile).
+  void loadNewest(true).then(() => (at !== null && chat?.el === el ? jumpTo(at) : undefined));
   return el;
 }
 
