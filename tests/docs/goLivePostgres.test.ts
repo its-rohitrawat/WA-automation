@@ -144,14 +144,21 @@ describe('GO-LIVE-postgres.md', () => {
     const part9 = guide.slice(guide.indexOf('## Part 9.'), guide.indexOf('## Part 10.'));
     const part11 = guide.slice(guide.indexOf('## Part 11.'));
     expect(guide.indexOf('## Part 10.')).toBeLessThan(guide.indexOf('## Part 11.'));
-    // Every command block is Part 9's, word for word, with only the dump's name changed.
+    // Every command block is Part 9's, word for word, with only the dump's name changed; then step 7's sample picture,
+    // made in the waagent window from the code folder and opened in the normal window.
     const blocks = (part: string) => [...part.matchAll(/```sh\n([\s\S]*?)```/g)].map((m) => m[1]!.replace(/^ +/gm, ''));
     expect(blocks(part9).length).toBeGreaterThan(5);
-    expect(blocks(part11)).toEqual(blocks(part9).map((b) => b.replaceAll('before-november', 'before-pictures')));
+    const sample = ['cd /opt/wa-agent\nnode scripts/picture-sample.ts --out ~/picture-sample.png\n', 'open ~waagent/picture-sample.png\n'];
+    expect(blocks(part11)).toEqual([...blocks(part9).map((b) => b.replaceAll('before-november', 'before-pictures')), ...sample]);
     const at = (s: string) => {
       expect(part11, s).toContain(s);
       return part11.indexOf(s);
     };
+    // The sample comes after the new version is in (the script is part of it), and the script takes --out as written.
+    expect(at('npm ci')).toBeLessThan(at('node scripts/picture-sample.ts --out ~/picture-sample.png'));
+    expect(read('scripts/picture-sample.ts')).toContain("process.argv.indexOf('--out')");
+    expect(part11).toContain('a run makes up to 20, newest tasks first');
+    expect(part11).not.toContain('20 per update');
     expect(at('**Do steps 1 and 2 before anything is merged.**')).toBeLessThan(at('sudo launchctl bootout system/com.wa-agent'));
     expect(at('pg_restore -l /opt/wa-agent-db/before-pictures.dump')).toBeLessThan(at('git pull --ff-only'));
     expect(at('`Applied P8`, then `Access rules checked: …`')).toBeLessThan(at('sudo launchctl bootstrap system /Library/LaunchDaemons/com.wa-agent.plist'));

@@ -733,7 +733,33 @@ updates its files itself when it starts.
      `Health: ✅ Connected…`.
    - After the next tracker update, open Tracker.xlsx. An open task's **Source message** is a link to a picture in
      `WA Agent/Clients/<Client>/Sources/`, and its **Chat** cell opens the message in the dashboard (the Chat cells
-     stay empty while `DASHBOARD_PUBLIC_URL` is not set). Pictures come 20 per update, newest tasks first.
+     stay empty while `DASHBOARD_PUBLIC_URL` is not set).
+   - How the pictures come: a run makes up to 20, newest tasks first. Runs come after each tracker upload and on the
+     agent's regular tick (every 30 seconds), so the open tasks' backlog fills within minutes. Each picture's link
+     appears in Tracker.xlsx with the tracker upload that follows it. While Google Drive is unreachable, the pictures
+     wait and are tried again later, each wait longer than the last.
+
+7. **Look at a sample picture**, to check the Mac's fonts. It is drawn from fixed words, with no database, no WhatsApp
+   and no Drive. In the waagent window:
+
+   ```sh
+   cd /opt/wa-agent
+   node scripts/picture-sample.ts --out ~/picture-sample.png
+   ```
+
+   It prints `Sample picture: …`. Then open it (normal window):
+
+   ```sh
+   open ~waagent/picture-sample.png
+   ```
+
+   If `open` says you have no permission, run `sudo cp ~waagent/picture-sample.png ~/Desktop/` and open the copy on
+   your Desktop. Check that:
+   - the Hindi words (बहुत बढ़िया) are drawn as Hindi, not as empty boxes;
+   - the emoji (👍 and 🙏) are drawn, not boxes;
+   - the bubbles sit left and right in order, with names, times and the highlighted source message inside them.
+
+   If something looks wrong, send Claude the picture: it holds only the sample's fixed words.
 
 **Going back.** On Postgres, putting the old version back is **not** enough by itself: the old version refuses a
 database at P8, and `db-migrate` never undoes a change. Choose one, as in Part 9:

@@ -26,6 +26,12 @@
 - **Task 3** (43cc84a): the quote's sender reads "Member", and the number guard uses `LOOKS_LIKE_NUMBER`.
 - **Task 4** (e48ab08): lines are capped (12 for text, 6 for transcripts), the header is cleaned with `oneLine`, it uses `formatDuration`, and a reply to a deleted message reads "deleted message".
 - **Task 6** (320045f): unsaved Drive ids are held (`#unsaved`), runs pause when the database can't write, the Drive root is checked before any drawing, and logs carry `{ taskId, code }`.
+- **Final review** (11 Nov), replacing decision 5:
+  - a failed picture waits `retryMs(tries)` (2, 4, 8 ... minutes, `src/util/retry.ts`, shared with the file uploader) before its next try, kept in the new `next_at` column; it is tried at most 8 times, as the uploader;
+  - a Drive failure stops the run and pauses runs for 2 minutes; a drawing failure goes on to the next task; the Sources folder is found before the picture is drawn;
+  - the client folders are found or made one call at a time per database (`withClientSubfolder`);
+  - `pictureWindow` respects Delete chat;
+  - `drawChatPicture` draws one picture at a time in the process.
 
 **House rules for every task:**
 - Match the code around you: comments say *why*, in full sentences, and use the same density as the file.
