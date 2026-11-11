@@ -1,5 +1,7 @@
 import sharp, { type OverlayOptions } from 'sharp';
 import type { PictureMessage, PictureWindow } from '../control/chatQueries.ts';
+import { oneLine } from '../control/clientQueries.ts';
+import { formatDuration } from '../media/labels.ts';
 import { istShortDate, istTime } from '../util/time.ts';
 
 // A task's chat picture (owner request, 11 Nov 2026): a WhatsApp-style picture of its source message and the few around
@@ -22,6 +24,9 @@ const EDGE = 3 * SCALE;
 const DPI = 72 * SCALE;
 /** A message longer than this is cut, with "…". */
 const TEXT_MAX = 600;
+/** ...and at most this many lines (a 600-character message of line breaks would be a 600-line picture); a transcript gets half. */
+const TEXT_LINES = 12;
+const TRANSCRIPT_LINES = 6;
 const C = {
   wall: '#efeae2', head: '#008069', headText: '#ffffff', headSub: '#d9fdd3', in: '#ffffff', out: '#d9fdd3',
   hit: '#fff3c4', hitEdge: '#f5a623', name: '#1f7aec', meta: '#667781', text: '#111b21',
@@ -46,6 +51,12 @@ function cut(s: string, max: number): string {
 
 const span = (color: string, text: string, extra = '') => `<span foreground="${color}"${extra}>${text}</span>`;
 
+/** At most max lines, with runs of blank lines folded to one, "…" when cut. */
+function fewLines(s: string, max: number): string {
+  const all = s.replace(/\n{3,}/g, '\n\n').split('\n');
+  return all.length > max ? `${all.slice(0, max).join('\n').trimEnd()}…` : all.join('\n');
+}
+
 /** One bubble's words as Pango markup: the sender (theirs only), the quote, the media label, the text, the time. */
 function bubbleMarkup(m: PictureMessage): string {
   const lines: string[] = [];
@@ -53,13 +64,13 @@ function bubbleMarkup(m: PictureMessage): string {
   if (m.deleted) {
     lines.push(span(C.meta, 'This message was deleted', ' style="italic"'));
   } else {
-    if (m.quote) lines.push(span(C.meta, `↩ ${markup(m.quote.sender)}: ${markup(cut(m.quote.text || KIND[m.quote.kind] || '', 80))}`, ' size="small"'));
+    if (m.quote) lines.push(span(C.meta, `↩ ${markup(m.quote.sender)}: ${markup(cut(m.quote.text || KIND[m.quote.kind] || 'deleted message', 80))}`, ' size="small"'));
     const label = KIND[m.kind];
     if (label) {
-      const length = m.seconds !== null ? ` ${Math.floor(m.seconds / 60)}:${String(m.seconds % 60).padStart(2, '0')}` : '';
-      lines.push(span(C.meta, `${label}${length}${m.transcript ? `: ${markup(cut(m.transcript, TEXT_MAX))}` : ''}`, ' style="italic"'));
+      const length = m.seconds ? ` ${formatDuration(m.seconds)}` : '';
+      lines.push(span(C.meta, `${label}${length}${m.transcript ? `: ${markup(fewLines(cut(m.transcript, TEXT_MAX), TRANSCRIPT_LINES))}` : ''}`, ' style="italic"'));
     }
-    if (m.text) lines.push(span(C.text, markup(cut(m.text, TEXT_MAX))));
+    if (m.text) lines.push(span(C.text, markup(fewLines(cut(m.text, TEXT_MAX), TEXT_LINES))));
   }
   lines.push(span(C.meta, `${m.edited && !m.deleted ? 'edited · ' : ''}${istTime(new Date(m.at))}`, ' size="x-small"'));
   return lines.join('\n');
@@ -76,7 +87,7 @@ async function words(text: string, width: number): Promise<{ png: Buffer; width:
 export async function drawChatPicture(w: PictureWindow): Promise<Buffer> {
   const source = w.messages.find((m) => m.source) ?? w.messages[0];
   const sub = `${w.client.code}${source ? ` · ${istShortDate(new Date(source.at))}` : ''}`;
-  const head = await words(`${span(C.headText, markup(w.client.name), ' weight="bold"')}\n${span(C.headSub, markup(sub), ' size="small"')}`, PICTURE_WIDTH - 2 * PAD);
+  const head = await words(`${span(C.headText, markup(oneLine(w.client.name, 80)), ' weight="bold"')}\n${span(C.headSub, markup(oneLine(sub, 80)), ' size="small"')}`, PICTURE_WIDTH - 2 * PAD);
   const layers: OverlayOptions[] = [{ input: head.png, top: Math.max(0, Math.round((HEADER - head.height) / 2)), left: PAD }];
   const rects: string[] = [];
   let y = HEADER + PAD;

@@ -7,7 +7,7 @@ const msg = (o: Partial<PictureMessage> = {}): PictureMessage => ({
   id: 1, at: '2026-11-03T05:12:00.000Z', mine: false, sender: 'Rahul', text: 'Banner thoda bright karo', kind: 'text', seconds: null,
   transcript: null, quote: null, edited: false, deleted: false, source: false, ...o,
 });
-const win = (messages: PictureMessage[]): PictureWindow => ({ client: { code: 'SHA', name: 'Sharma Interiors' }, messages });
+const win = (messages: PictureMessage[], name = 'Sharma Interiors'): PictureWindow => ({ client: { code: 'SHA', name }, messages });
 const size = async (png: Buffer) => {
   const m = await sharp(png).metadata();
   return { format: m.format, width: m.width, height: m.height ?? 0 };
@@ -27,14 +27,20 @@ describe('drawChatPicture (11 Nov 2026)', () => {
 
   it('draws markup-looking, Hindi and emoji text, replies, media and deleted messages without error', async () => {
     const png = await drawChatPicture(win([
-      msg({ text: '<span foreground="red">x</span> & <b>bold?</b>' }),
-      msg({ text: 'बैनर थोड़ा ब्राइट करो 👍', quote: { sender: 'Priya', text: 'logo final?', kind: 'text' } }),
-      msg({ kind: 'voice', seconds: 42, text: '', transcript: 'The blue one works' }),
+      msg({ text: '<span foreground="red">x</span> & <b>bold?</b>', sender: 'R&D <team>' }),
+      msg({ text: 'बैनर थोड़ा ब्राइट करो 👍', quote: { sender: 'P&Q <x>', text: 'logo & <final>?', kind: 'text' } }),
+      msg({ text: 'reply', quote: { sender: 'Priya', text: '', kind: 'text' } }),
+      msg({ kind: 'voice', seconds: 42, text: '', transcript: 'Blue & <red> works' }),
       msg({ kind: 'image', text: 'see this' }),
       msg({ deleted: true, text: '' }),
       msg({ source: true, edited: true }),
-    ]));
+    ], 'A&B <Co>\u0007'));
     expect((await size(png)).width).toBe(PICTURE_WIDTH);
+  });
+
+  it('cuts a message of many lines, so a picture stays a picture', async () => {
+    const { height } = await size(await drawChatPicture(win([msg({ source: true, text: 'a\n'.repeat(300) })])));
+    expect(height).toBeLessThan(2600);
   });
 
   it('cuts a very long message, so a picture stays a picture', async () => {
