@@ -428,6 +428,9 @@ export async function buildCustomerRuntime(
           },
         }
         : {}),
+      // The tracker's Chat links open the dashboard (11 Nov 2026): only when it is on and has a public address. Never the
+      // localhost fallback the site uses: that link opens nothing on the owner's phone, so the Chat column stays empty.
+      ...(env.DASHBOARD_ENABLED && env.DASHBOARD_PUBLIC_URL ? { dashboardUrl: env.DASHBOARD_PUBLIC_URL } : {}),
     });
     // Each reading phone by name and state in the health snapshot, for the status command's WhatsApp line (lane C).
     app.health.watchPhones(() => gateway.phones());
