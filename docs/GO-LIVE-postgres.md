@@ -27,7 +27,7 @@ each kept apart. You run every step yourself, on the Mac, with the Mac assistant
 > - `db-bootstrap`: asks for the `postgres` password, then the new `wa_backup` password twice, and shows nothing as you
 >   type. It never takes a password on the command line. `--superuser <name>` defaults to `postgres`. It connects to
 >   the host and port in `DATABASE_OWNER_URL`.
-> - `db-migrate`, which applies the migrations P1 to P7, then checks the access rules.
+> - `db-migrate`, which applies the migrations P1 to P8, then checks the access rules.
 > - `migrate-to-postgres`, with `--apply`, `--backup-dir <new folder>` and `--data-dir <folder>`.
 > - `export-to-sqlite`, with `--out <new folder>` (required) and `--data-dir <folder>`.
 > - The `.env` names `DB_ENGINE`, `DATABASE_URL`, `DATABASE_OWNER_URL` and `DATABASE_PLATFORM_URL`. The backup password
@@ -649,3 +649,99 @@ and the health line names the phone. Use its **Relink** in Connections.
 
 **Memory:** each linked phone keeps its own connection to WhatsApp open on the Mac, so each one uses a little more
 memory.
+
+## Part 11. Updating to the chat-picture release (P8)
+
+This release adds one table, `source_pictures`, for each task's chat picture. It needs the same steps as Part 9, with
+the dump named `before-pictures.dump`, and takes about 20 minutes, with the agent stopped.
+
+**Do steps 1 and 2 before anything is merged.** The Mac updates itself as soon as the merge lands. While the agent is
+stopped, that update's restart fails, which is expected and harmless, and the new version waits for you.
+
+These steps are for the Mac on Postgres. On SQLite, skip the database dump in step 2 and all of step 4: the agent
+updates its files itself when it starts.
+
+1. **Stop the agent** (normal window), as in Part 9:
+
+   ```sh
+   sudo launchctl disable system/com.wa-agent
+   sudo launchctl bootout system/com.wa-agent
+   sudo launchctl print system/com.wa-agent | grep -E 'state'
+   ```
+
+   The last command prints nothing, or says it could not find the service.
+
+2. **Back up, twice**, as in Part 9.
+   - **The database.** Run the nightly dump now (normal window):
+
+     ```sh
+     sudo launchctl kickstart system/com.wa-agent.pgdump
+     ```
+
+     After a minute, in the waagent window, give that dump its own name, so the nightly job never writes over it, and
+     check it:
+
+     ```sh
+     cp -p /opt/wa-agent-db/backups/wa-$(date +%a).dump /opt/wa-agent-db/before-pictures.dump
+     ls -l /opt/wa-agent-db/before-pictures.dump
+     /usr/local/opt/postgresql@17/bin/pg_restore -l /opt/wa-agent-db/before-pictures.dump | grep -c 'TABLE DATA'
+     ```
+
+     `ls -l` shows a time from a minute ago and a size larger than zero. The last line is a number above 10. If you
+     see `0` or an error, stop: look at `/opt/wa-agent-db/pgdump.log` and run the dump again.
+   - **The data folder** (normal window):
+
+     ```sh
+     Z=~/wa-backup-$(date +%Y%m%d-%H%M).zip
+     sudo ditto -c -k --sequesterRsrc --keepParent /opt/wa-agent/data "$Z"
+     sudo chmod 600 "$Z"
+     ls -l "$Z"
+     sudo unzip -l "$Z" | tail -1
+     ```
+
+     `ls -l` starts with `-rw-------`, and the last line shows more than zero files.
+
+3. **Merge, then bring the new version in.** Merge the release (or ask the developer to). Then, in the waagent window:
+
+   ```sh
+   cd /opt/wa-agent
+   git pull --ff-only
+   npm ci
+   ```
+
+   If the Mac's own update already ran, this changes nothing.
+
+4. **Update the database** (waagent window):
+
+   ```sh
+   npm run cli -- db-migrate
+   ```
+
+   You should see `Applied P8`, then `Access rules checked: …`. If it ends any other way, don't start the agent: send
+   Claude that output (part 8).
+
+5. **Start the agent** (normal window):
+
+   ```sh
+   sudo launchctl enable system/com.wa-agent
+   sudo launchctl bootstrap system /Library/LaunchDaemons/com.wa-agent.plist
+   ```
+
+6. **Check**, after a minute:
+   - Waagent window: `npm run cli -- status`. The first line says
+     `Database: Postgres (127.0.0.1:<port>/wa_agent as wa_app)`, with 5433 on the office Mac, then
+     `Health: ✅ Connected…`.
+   - After the next tracker update, open Tracker.xlsx. An open task's **Source message** is a link to a picture in
+     `WA Agent/Clients/<Client>/Sources/`, and its **Chat** cell opens the message in the dashboard (the Chat cells
+     stay empty while `DASHBOARD_PUBLIC_URL` is not set). Pictures come 20 per update, newest tasks first.
+
+**Going back.** On Postgres, putting the old version back is **not** enough by itself: the old version refuses a
+database at P8, and `db-migrate` never undoes a change. Choose one, as in Part 9:
+- **Everything as it was before the update:** stop the agent, and restore `before-pictures.dump` into a fresh database
+  for the old version. Nothing in `wa_agent` is deleted. Claude gives you those steps for your case.
+- **For a short time:** rollback A (part 6). The agent runs on the SQLite files from the switch. What it saved on
+  Postgres since is not shown until you use B.
+- **Rollback B** (part 6) brings the Postgres days into SQLite files. Run it while the new version is still in place:
+  the old version can't read P8.
+
+The pictures already in Drive stay in the Sources folders; the old version just doesn't link them.
