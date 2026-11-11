@@ -7,6 +7,7 @@ import { getKv } from '../store/kv.ts';
 import { isUploadCandidate, markUploaded, markUploadFailed, uploadCandidates, type UploadCandidate } from '../store/media.ts';
 import type { Clock } from '../util/clock.ts';
 import type { Logger } from '../util/logger.ts';
+import { retryMs } from '../util/retry.ts';
 import { displayName } from './labels.ts';
 
 export const UPLOAD_MAX_ATTEMPTS = 8;
@@ -16,8 +17,9 @@ export const FILE_UPLOAD_TIMEOUT_MS = 600_000;
 const AUTH_RETRY_MS = 15 * 60_000;
 /** How long the uploader pauses when the database cannot save an upload result. */
 const LEDGER_RETRY_MS = 15 * 60_000;
-/** Delay before the next try after `attempt` failed tries: 2, 4, 8 ... minutes, at most 6 hours. Exported for tests. */
-export const retryMs = (attempt: number): number => Math.min(60_000 * 2 ** attempt, 6 * 3_600_000);
+// The delay before the next try (2, 4, 8 ... minutes, at most 6 hours) lives in src/util/retry.ts, shared with the chat
+// pictures. Exported from here too, for tests.
+export { retryMs };
 const MIME = /^[a-z0-9][a-z0-9.+-]*\/[a-z0-9][a-z0-9.+-]*$/;
 
 function safeMime(m: string | null): string {

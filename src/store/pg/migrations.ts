@@ -575,6 +575,7 @@ CREATE TABLE source_pictures (
   attempts integer NOT NULL DEFAULT 0,
   made_at text,
   tried_at text NOT NULL,
+  next_at text,
   UNIQUE (tenant_id, id),
   UNIQUE (tenant_id, task_id),
   FOREIGN KEY (tenant_id, task_id) REFERENCES tasks (tenant_id, id),

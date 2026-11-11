@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
+import { UPLOAD_MAX_ATTEMPTS } from '../../src/media/uploader.ts';
 import { insertMessage } from '../../src/store/messages.ts';
 import { picturesDue, PICTURE_TRIES, recordPictureFailed, recordPictureMade, sourceLinks } from '../../src/store/sourcePictures.ts';
 import { createTask, setTaskStatus, type NewTask } from '../../src/store/tasks.ts';
+import { retryMs } from '../../src/util/retry.ts';
 import { NOW, seeded } from '../helpers/db.ts';
 
 const task = (clientId: number, sourceWaId: string | null, o: Partial<NewTask> = {}): NewTask => ({
@@ -48,17 +50,41 @@ describe('the chat pictures store (11 Nov 2026)', () => {
     expect((await picturesDue(db, new Date(NOW), 10)).map((d) => d.taskId)).toEqual([b.id, a.id]);
   });
 
-  it('a failure waits 10 minutes before it is tried again, and stops after PICTURE_TRIES', async () => {
+  it('tries a failed picture 8 times, as many as the file uploader tries a file', () => {
+    expect(PICTURE_TRIES).toBe(8);
+    expect(PICTURE_TRIES).toBe(UPLOAD_MAX_ATTEMPTS);
+  });
+
+  it('a failure waits retryMs(tries) before it is tried again, longer each time, and stops after PICTURE_TRIES', async () => {
     const { db, a, b } = await fixture();
-    const t0 = new Date(NOW).getTime();
-    const due = await picturesDue(db, new Date(t0), 10);
+    const due = await picturesDue(db, new Date(NOW), 10);
     const bDue = due.find((d) => d.taskId === b.id)!;
-    await recordPictureFailed(db, { ...bDue, errorCode: 'ECONNRESET', at: new Date(t0).toISOString() });
-    expect((await picturesDue(db, new Date(t0 + 5 * 60_000), 10)).map((d) => d.taskId)).toEqual([a.id]);
-    expect((await picturesDue(db, new Date(t0 + 11 * 60_000), 10)).map((d) => d.taskId)).toEqual([b.id, a.id]);
-    for (let i = 1; i < PICTURE_TRIES; i++) await recordPictureFailed(db, { ...bDue, errorCode: 'ECONNRESET', at: new Date(t0).toISOString() });
-    expect((await picturesDue(db, new Date(t0 + 60 * 60_000), 10)).map((d) => d.taskId)).toEqual([a.id]);
+    const ids = async (t: number) => (await picturesDue(db, new Date(t), 10)).map((d) => d.taskId);
+    let t = new Date(NOW).getTime();
+    for (let n = 1; n <= PICTURE_TRIES; n++) {
+      await recordPictureFailed(db, { ...bDue, errorCode: 'ECONNRESET', at: new Date(t).toISOString() });
+      expect(await db.get('SELECT attempts, next_at AS nextAt FROM source_pictures WHERE task_id = ?', [b.id]))
+        .toEqual({ attempts: n, nextAt: new Date(t + retryMs(n)).toISOString() });
+      expect(await ids(t + retryMs(n) - 1), `before try ${n + 1}`).toEqual([a.id]); // not due a moment early
+      if (n < PICTURE_TRIES) expect(await ids(t + retryMs(n)), `try ${n + 1}`).toEqual([b.id, a.id]);
+      t += retryMs(n);
+    }
+    expect(retryMs(2)).toBeGreaterThan(retryMs(1));
+    expect(await ids(t + 7 * 86_400_000)).toEqual([a.id]); // after the last try, never again
     expect(await db.get('SELECT error_code AS code, attempts FROM source_pictures WHERE task_id = ?', [b.id])).toEqual({ code: 'ECONNRESET', attempts: PICTURE_TRIES });
+  });
+
+  it('a made picture clears the next try; a failure for a new source starts the count again', async () => {
+    const { db, b, msg } = await fixture();
+    const bDue = (await picturesDue(db, new Date(NOW), 10)).find((d) => d.taskId === b.id)!;
+    const row = () => db.get('SELECT attempts, next_at AS nextAt, error_code AS code FROM source_pictures WHERE task_id = ?', [b.id]);
+    await recordPictureFailed(db, { ...bDue, errorCode: 'ECONNRESET', at: NOW });
+    await recordPictureFailed(db, { ...bDue, errorCode: 'ECONNRESET', at: NOW });
+    await recordPictureMade(db, { ...bDue, driveFileId: 'file-1', at: NOW });
+    expect(await row()).toEqual({ attempts: 3, nextAt: null, code: null });
+    const moved = { ...bDue, messageId: await msg('w3') }; // the task's source changed
+    await recordPictureFailed(db, { ...moved, errorCode: 'ECONNRESET', at: NOW });
+    expect(await row()).toEqual({ attempts: 1, nextAt: new Date(Date.parse(NOW) + retryMs(1)).toISOString(), code: 'ECONNRESET' });
   });
 
   it('never lists another client’s message for a task', async () => {

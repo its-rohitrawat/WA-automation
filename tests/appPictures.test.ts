@@ -16,6 +16,7 @@ import { insertMessage, markProcessed } from '../src/store/messages.ts';
 import { createTask } from '../src/store/tasks.ts';
 import { systemClock } from '../src/util/clock.ts';
 import { silentLogger } from '../src/util/logger.ts';
+import { retryMs } from '../src/util/retry.ts';
 import { AllowList } from '../src/wa/allowlist.ts';
 import { openSessionDb, useEncryptedAuthState } from '../src/wa/authState.ts';
 import { WhatsAppGateway } from '../src/wa/gateway.ts';
@@ -32,7 +33,6 @@ import { SHARMA_PN } from './helpers/wa.ts';
 // first publish, with the media pipeline on.
 
 const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.2 };
-const MINUTE = 60_000;
 /** Drawing a picture is real work (sharp), not fake time: a wait for it gets more than the default 1 s under load. */
 const SLOW_IO = { timeout: 10_000 };
 const DASHBOARD = 'https://agent.example.com';
@@ -190,13 +190,15 @@ describe('app chat pictures (11 Nov 2026)', () => {
     await vi.waitFor(async () =>
       expect(await row(db, 'SELECT drive_file_id AS file, attempts, error_code AS code FROM source_pictures')).toEqual({ file: null, attempts: 1, code: 'Error' }),
     SLOW_IO);
-    // Due again 10 minutes after that try. Nothing else happens meanwhile: no message, no file, no upload.
-    const { triedAt } = (await row<{ triedAt: string }>(db, 'SELECT tried_at AS triedAt FROM source_pictures'))!;
-    await advance(Date.parse(triedAt) + 10 * MINUTE - Date.now() - 1_000);
+    // Due again retryMs(1), 2 minutes, after that try, and a Drive failure keeps runs off for those 2 minutes too.
+    // Nothing else happens meanwhile: no message, no file, no upload.
+    const { triedAt, nextAt } = (await row<{ triedAt: string; nextAt: string }>(db, 'SELECT tried_at AS triedAt, next_at AS nextAt FROM source_pictures'))!;
+    expect(Date.parse(nextAt) - Date.parse(triedAt)).toBe(retryMs(1));
+    await advance(Date.parse(nextAt) - Date.now() - 1_000);
     expect(pictureOf(drive, task.code)).toBeUndefined();
     const published = bodies.length;
-    // The first tick after that makes it, and the upload it asks for links it.
-    await advance(31_000);
+    // A tick after that makes it (two ticks: the pause began a moment after the try), and the upload it asks for links it.
+    await advance(61_000);
     await vi.waitFor(() => expect(pictureOf(drive, task.code)).toBeDefined(), SLOW_IO);
     expect(uploadsAtPicture).toEqual([published]); // no tracker upload came between: the tick started it
     await advance(61_000);

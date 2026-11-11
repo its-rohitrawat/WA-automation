@@ -14,6 +14,8 @@ import { DriveRootMissingError, withClientSubfolder } from './folders.ts';
 export const PICTURES_PER_RUN = 20;
 /** After a Google sign-in failure, or when the database cannot save a result, no run starts for this long (as the file uploader). */
 const PAUSE_MS = 15 * 60_000;
+/** After a Drive failure (a network error, a 5xx or 429 answer, a folder that cannot be made), no run starts for this long. */
+const DRIVE_PAUSE_MS = 2 * 60_000;
 
 export interface SourcePicturesOptions {
   db: Db;
@@ -27,8 +29,8 @@ export interface SourcePicturesOptions {
   perRun?: number;
 }
 
-/** Why runs are paused: the database cannot save a result, or Google sign-in failed. */
-type PauseReason = 'ledger' | 'auth';
+/** Why runs are paused: the database cannot save a result, Google sign-in failed, or Drive failed. */
+type PauseReason = 'ledger' | 'auth' | 'drive';
 
 /** An error's code, or its name: never its message. Short and plain, for the row and the log. */
 function codeOf(e: unknown): string {
@@ -43,7 +45,12 @@ function codeOf(e: unknown): string {
  * WA Agent/Clients/<Client>/Sources/<task code>.png, then records it. One run at a time; never deletes or replaces
  * anything in Drive. A changed source gets a new file and the old one stays, as the file uploader leaves its copies.
  * Before the first tracker upload has made the WA Agent folder, a run does nothing. A Google sign-in failure pauses
- * runs for 15 minutes; any other failure is recorded by its code and tried again later (picturesDue).
+ * runs for 15 minutes. Any other failure is recorded by its code, and that task is tried again later, each wait longer
+ * than the last (picturesDue, retryMs). The step that failed decides what the run does next:
+ * - Drive (the Sources folder, or the upload): every other task would fail the same way, so the run stops there and
+ *   no run starts for 2 minutes. An outage costs one try per run, not a drawing and a try for every task due.
+ * - The messages or the drawing: that picture only, so the run goes on to the next task.
+ * The Sources folder is found or made before anything is drawn, so a folder that cannot be made costs no drawing.
  *
  * Duplicate copies are possible, and accepted, for the reasons the file uploader gives: Drive can store a file while
  * its answer never arrives, and the next try then uploads it again. When Drive answers but the database cannot save the
@@ -113,7 +120,7 @@ export class SourcePictures {
           await recordPictureMade(db, { ...u.due, driveFileId: u.fileId, at: clock.now().toISOString() });
         } catch (e) {
           log.warn({ taskId, code: codeOf(e) }, 'source picture result could not be saved');
-          this.#pause('ledger');
+          this.#pause('ledger', PAUSE_MS);
           return;
         }
         this.#unsaved.delete(taskId);
@@ -126,6 +133,8 @@ export class SourcePictures {
         if (this.#stopped) break;
         const at = clock.now().toISOString();
         let fileId: string;
+        // The step under way, so a failure is told apart by where it happened, not by its error code.
+        let step: 'messages' | 'draw' | 'drive' = 'messages';
         try {
           const c = await getClient(db, d.clientId);
           const members = this.#o.members;
@@ -134,26 +143,41 @@ export class SourcePictures {
             if (!(await this.#failed(d, 'source_missing', at))) break;
             continue;
           }
-          const png = await drawChatPicture(w);
-          fileId = await withClientSubfolder(db, api, { clientId: c.id, clientName: c.name }, 'Sources', (folderId) =>
-            api.createFile(`${d.code}.png`, 'image/png', png, folderId));
+          // The Sources folder first, so a folder Drive cannot make costs no drawing. When a folder removed in Drive is
+          // rebuilt, put runs again with the picture already drawn.
+          let png: Buffer | undefined;
+          step = 'drive';
+          fileId = await withClientSubfolder(db, api, { clientId: c.id, clientName: c.name }, 'Sources', async (folderId) => {
+            if (!png) {
+              step = 'draw';
+              png = await drawChatPicture(w);
+              step = 'drive';
+            }
+            return api.createFile(`${d.code}.png`, 'image/png', png, folderId);
+          });
         } catch (err) {
           if (err instanceof DriveRootMissingError) break; // the first tracker upload makes it; nothing to record
           if (isAuthFailure(err)) {
-            this.#pause('auth');
+            this.#pause('auth', PAUSE_MS);
             break;
           }
           const code = codeOf(err);
-          log.warn({ taskId: d.taskId, code }, 'source picture not made');
+          log.warn({ taskId: d.taskId, code, step }, 'source picture not made');
           if (!(await this.#failed(d, code, at))) break;
-          continue;
+          // Drive failed: every task after this one would fail the same way. The run stops, so an outage costs one try
+          // per run, not a drawing and a try for every task due.
+          if (step === 'drive') {
+            this.#pause('drive', DRIVE_PAUSE_MS);
+            break;
+          }
+          continue; // the messages or the drawing failed: that picture only
         }
         try {
           await recordPictureMade(db, { ...d, driveFileId: fileId, at });
         } catch (e) {
           log.warn({ taskId: d.taskId, code: codeOf(e) }, 'source picture result could not be saved');
           this.#unsaved.set(d.taskId, { due: d, fileId });
-          this.#pause('ledger');
+          this.#pause('ledger', PAUSE_MS);
           break;
         }
         made += 1;
@@ -176,14 +200,14 @@ export class SourcePictures {
       return true;
     } catch (e) {
       this.#o.log.warn({ taskId: d.taskId, code: codeOf(e) }, 'source picture failure not recorded');
-      this.#pause('ledger');
+      this.#pause('ledger', PAUSE_MS);
       return false;
     }
   }
 
-  /** The one pause for every reason: no run starts until 15 minutes from now. In memory only, so a restart ends it too. */
-  #pause(reason: PauseReason): void {
-    const until = this.#o.clock.now().getTime() + PAUSE_MS;
+  /** The one pause for every reason: no run starts until ms from now. In memory only, so a restart ends it too. */
+  #pause(reason: PauseReason, ms: number): void {
+    const until = this.#o.clock.now().getTime() + ms;
     this.#paused = { until, reason };
     this.#o.log.warn({ reason, until: new Date(until).toISOString() }, 'source pictures paused');
   }
