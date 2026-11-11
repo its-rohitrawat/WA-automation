@@ -166,8 +166,8 @@ export interface App {
    */
   start(): void;
   /**
-   * Starts no new AI run, file read or file upload, and stops a local speech engine run in flight (free: the voice note
-   * is tried again after the restart). Waits for AI calls and file reads in flight (up to drainMs) and
+   * Starts no new AI run, file read, file upload or chat picture, and stops a local speech engine run in flight (free:
+   * the voice note is tried again after the restart). Waits for AI calls and file reads in flight (up to drainMs) and
    * books any paid call still running at its estimate. Then flushes the publisher (the upload in flight plus one more
    * if anything changed) and waits for the file upload and the chat picture in flight, up to 10 s each in parallel.
    * Leaves no timers.

@@ -2,7 +2,7 @@ import '../../src/media/image.ts'; // the app blocks sharp's SVG loader this way
 import sharp from 'sharp';
 import { describe, expect, it } from 'vitest';
 import type { PictureMessage, PictureWindow } from '../../src/control/chatQueries.ts';
-import { drawChatPicture, markup, PICTURE_WIDTH } from '../../src/output/chatPicture.ts';
+import { drawChatPicture, markup, PICTURE_WIDTH, roundRect } from '../../src/output/chatPicture.ts';
 
 const msg = (o: Partial<PictureMessage> = {}): PictureMessage => ({
   id: 1, at: '2026-11-03T05:12:00.000Z', mine: false, sender: 'Rahul', text: 'Banner thoda bright karo', kind: 'text', seconds: null,
@@ -47,5 +47,22 @@ describe('drawChatPicture (11 Nov 2026)', () => {
   it('cuts a very long message, so a picture stays a picture', async () => {
     const { height } = await size(await drawChatPicture(win([msg({ source: true, text: 'word '.repeat(2000) })])));
     expect(height).toBeLessThan(2600);
+  });
+});
+
+describe('roundRect', () => {
+  it('paints a box of radius 0 solid, and only the part of a box on the canvas', () => {
+    // A black canvas 4 pixels wide and 3 high; a pixel's colour as [r, g, b].
+    const canvas = () => Buffer.alloc(4 * 3 * 4);
+    const at = (buf: Buffer, x: number, y: number) => [...buf.subarray((y * 4 + x) * 4, (y * 4 + x) * 4 + 3)];
+    const square = canvas();
+    roundRect(square, 4, 1, 1, 2, 2, 0, '#ff0000');
+    for (const [x, y] of [[1, 1], [2, 1], [1, 2], [2, 2]] as const) expect(at(square, x, y)).toEqual([255, 0, 0]);
+    expect(at(square, 0, 0)).toEqual([0, 0, 0]);
+    // 4 wide from x = 2: its last two pixels are off the right edge, and must not land at the start of row 1.
+    const wide = canvas();
+    roundRect(wide, 4, 2, 0, 4, 1, 0, '#0000ff');
+    expect(at(wide, 3, 0)).toEqual([0, 0, 255]);
+    expect([at(wide, 0, 1), at(wide, 1, 1)]).toEqual([[0, 0, 0], [0, 0, 0]]);
   });
 });

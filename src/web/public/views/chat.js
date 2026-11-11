@@ -347,7 +347,7 @@ async function jumpTo(id) {
   }
   if (chat !== c) return;
   if (!c.messages.has(id)) {
-    // No older pages left: a wrong id, or a chat emptied with Delete chat.
+    // Older pages left after JUMP_PAGES: too far back. None left: a wrong id, or a chat emptied with Delete chat.
     return void toast(c.hasOlder ? 'That message is too far back to show here.' : 'That message isn’t in this chat any more.', false);
   }
   c.hit = id;

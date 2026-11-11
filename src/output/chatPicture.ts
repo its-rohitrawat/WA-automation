@@ -8,8 +8,9 @@ import { istShortDate, istTime } from '../util/time.ts';
 // it, drawn with sharp, which the agent already has. Each bubble's words come from sharp's text renderer (Pango: it
 // wraps lines and draws Hindi and emoji with the machine's fonts); the wall, the header and the bubbles are raw
 // pixels underneath, holding no words. They are not an SVG because the service process blocks sharp's SVG loader
-// (src/media/image.ts: untrusted images must never reach librsvg), and drawing needs no loader. Every word from WhatsApp is escaped for Pango markup first (markup()), so a message can
-// never change how the picture looks. No I/O: the caller uploads the PNG.
+// (src/media/image.ts: untrusted images must never reach librsvg), and drawing needs no loader. Every word from
+// WhatsApp is escaped for Pango markup first (markup()), so a message can never change how the picture looks. No I/O:
+// the caller uploads the PNG.
 
 /** Drawn at twice the size it is shown at, so it stays sharp on a phone. */
 const SCALE = 2;
@@ -99,18 +100,27 @@ function canvas(width: number, height: number, color: string): Buffer {
   return buf;
 }
 
-/** A rounded rectangle painted over the canvas; a corner pixel is blended by how much of it lies inside the curve. */
-function roundRect(buf: Buffer, x: number, y: number, w: number, h: number, radius: number, color: string): void {
+/**
+ * A rounded rectangle painted over an RGBA canvas `width` pixels wide. Only the part on the canvas is painted, so a box
+ * can never spill into the next row. A pixel in a corner square is blended by how much of it lies inside the curve;
+ * every other pixel takes the full colour, so a radius of 0 (or under half a pixel) paints a plain rectangle.
+ */
+export function roundRect(
+  buf: Buffer, width: number, x: number, y: number, w: number, h: number, radius: number, color: string,
+): void {
   const [cr, cg, cb] = rgb(color);
+  const height = buf.length / 4 / width;
   const r = Math.min(radius, w / 2, h / 2);
-  for (let py = y; py < y + h; py++) {
-    for (let px = x; px < x + w; px++) {
+  for (let py = Math.max(y, 0); py < Math.min(y + h, height); py++) {
+    for (let px = Math.max(x, 0); px < Math.min(x + w, width); px++) {
       // Distance past the nearest corner's centre, when the pixel is in a corner square.
       const dx = Math.max(x + r - (px + 0.5), px + 0.5 - (x + w - r), 0);
       const dy = Math.max(y + r - (py + 0.5), py + 0.5 - (y + h - r), 0);
-      const a = Math.min(1, Math.max(0, r + 0.5 - Math.hypot(dx, dy)));
+      // Outside the corner squares the box is solid: the curve's formula would paint those pixels at r + 0.5, which is
+      // half colour at radius 0.
+      const a = dx === 0 || dy === 0 ? 1 : Math.min(1, Math.max(0, r + 0.5 - Math.hypot(dx, dy)));
       if (a === 0) continue;
-      const i = (py * PICTURE_WIDTH + px) * 4;
+      const i = (py * width + px) * 4;
       buf[i] = Math.round(buf[i]! + (cr - buf[i]!) * a);
       buf[i + 1] = Math.round(buf[i + 1]! + (cg - buf[i + 1]!) * a);
       buf[i + 2] = Math.round(buf[i + 2]! + (cb - buf[i + 2]!) * a);
@@ -147,10 +157,10 @@ export async function drawChatPicture(w: PictureWindow): Promise<Buffer> {
   for (const b of boxes) {
     // The source's border is a rounded rectangle in the edge colour with the fill drawn inside it.
     if (b.hit) {
-      roundRect(back, b.x, b.y, b.w, b.h, RADIUS, C.hitEdge);
-      roundRect(back, b.x + EDGE, b.y + EDGE, b.w - 2 * EDGE, b.h - 2 * EDGE, RADIUS - EDGE, b.fill);
+      roundRect(back, PICTURE_WIDTH, b.x, b.y, b.w, b.h, RADIUS, C.hitEdge);
+      roundRect(back, PICTURE_WIDTH, b.x + EDGE, b.y + EDGE, b.w - 2 * EDGE, b.h - 2 * EDGE, RADIUS - EDGE, b.fill);
     } else {
-      roundRect(back, b.x, b.y, b.w, b.h, RADIUS, b.fill);
+      roundRect(back, PICTURE_WIDTH, b.x, b.y, b.w, b.h, RADIUS, b.fill);
     }
   }
   return sharp(back, { raw: { width: PICTURE_WIDTH, height, channels: 4 } }).composite(layers).png({ compressionLevel: 9 }).toBuffer();

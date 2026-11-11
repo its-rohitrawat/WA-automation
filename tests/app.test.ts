@@ -223,7 +223,9 @@ describe('app end to end', () => {
     expect((await listTasks(db, await idOf(db, 'SHA'))).map((t) => t.code)).toEqual(['SHA-001']);
 
     await advance(60_000);
-    // SHA-001's chat picture may be in Drive too by now; the tracker is the one file of the agent's own.
+    // That upload makes SHA-001's chat picture: waited for here, as in the deletion test, so none lands after the checks.
+    // The tracker is then the one file of the agent's own.
+    await vi.waitFor(() => expect(drive.created.map((f) => f.name)).toContain('SHA-001.png'), SLOW_IO);
     expect(notPictures(drive).map((f) => f.name)).toEqual(['Tracker.xlsx']);
     expect(drive.updated.length).toBeGreaterThanOrEqual(1);
     for (const name of SEND_METHODS) expect(sock[name]).not.toHaveBeenCalled();
