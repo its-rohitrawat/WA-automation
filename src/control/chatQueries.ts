@@ -299,18 +299,30 @@ export interface PictureWindow {
  * PICTURE_BEFORE before it and the PICTURE_AFTER after it (by time, then row), oldest first, as Open chat shows them.
  * Senders and tags are by name only: someone with no name is "Member", a tag with no name "@member", never a number. A
  * reply's quote comes with its message. Null when the message is not this client's. Parameterised reads only.
+ *
+ * After Delete chat, the messages around the source are only those its mark leaves showing, as in Open chat (chatPage).
+ * The source itself is always shown. When the mark hides the source too, it is shown alone: what Open chat shows next
+ * came after the delete, not around the source.
  */
 export async function pictureWindow(db: Db, c: ClientRow, messageId: number, members?: () => Promise<readonly GroupMember[] | null>): Promise<PictureWindow | null> {
   const src = await db.get<RawMessage>(`${SELECT} WHERE m.client_id = ? AND m.id = ?`, [c.id, messageId]);
   if (!src) return null;
-  const before = await db.all<RawMessage>(
-    `${SELECT} WHERE m.client_id = @client AND (m.ts < @ts OR (m.ts = @ts AND m.id < @id)) ORDER BY m.ts DESC, m.id DESC LIMIT @limit`,
-    { client: c.id, ts: src.at, id: src.id, limit: PICTURE_BEFORE },
-  );
-  const after = await db.all<RawMessage>(
-    `${SELECT} WHERE m.client_id = @client AND (m.ts > @ts OR (m.ts = @ts AND m.id > @id)) ORDER BY m.ts, m.id LIMIT @limit`,
-    { client: c.id, ts: src.at, id: src.id, limit: PICTURE_AFTER },
-  );
+  const hidden = await chatHidden(db, c.id);
+  const floor = markParams(hidden);
+  const sourceShows = hidden === null
+    || (await db.get<{ one: number }>(`SELECT 1 AS one FROM messages m WHERE m.client_id = @client AND m.id = @id AND ${AFTER_MARK}`, { client: c.id, id: src.id, ...floor })) !== undefined;
+  const before = sourceShows
+    ? await db.all<RawMessage>(
+      `${SELECT} WHERE m.client_id = @client AND (m.ts < @ts OR (m.ts = @ts AND m.id < @id)) AND ${AFTER_MARK} ORDER BY m.ts DESC, m.id DESC LIMIT @limit`,
+      { client: c.id, ts: src.at, id: src.id, limit: PICTURE_BEFORE, ...floor },
+    )
+    : [];
+  const after = sourceShows
+    ? await db.all<RawMessage>(
+      `${SELECT} WHERE m.client_id = @client AND (m.ts > @ts OR (m.ts = @ts AND m.id > @id)) AND ${AFTER_MARK} ORDER BY m.ts, m.id LIMIT @limit`,
+      { client: c.id, ts: src.at, id: src.id, limit: PICTURE_AFTER, ...floor },
+    )
+    : [];
   const shown = [...before.reverse(), src, ...after].map((r) => {
     const m = toMessage(r);
     // senderLabel's "Someone" (no name, or a name that is really a number) reads as a member of the group here.

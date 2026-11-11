@@ -128,8 +128,21 @@ export function roundRect(
   }
 }
 
-/** The picture of a window (pictureWindow) as a PNG. */
-export async function drawChatPicture(w: PictureWindow): Promise<Buffer> {
+/**
+ * The drawing in progress, for the whole process. Every customer's runtime runs in this one process, each with its own
+ * SourcePictures, and a drawing holds a full-size canvas (1440 pixels wide, four bytes each) and keeps sharp's threads
+ * busy. One at a time keeps the Mac's memory and CPU flat however many customers' runs start together.
+ */
+let drawing: Promise<unknown> = Promise.resolve();
+
+/** The picture of a window (pictureWindow) as a PNG. Waits for any other drawing in the process to end first. */
+export function drawChatPicture(w: PictureWindow): Promise<Buffer> {
+  const next = drawing.then(() => draw(w));
+  drawing = next.catch(() => undefined); // a failed drawing never holds up the next
+  return next;
+}
+
+async function draw(w: PictureWindow): Promise<Buffer> {
   const source = w.messages.find((m) => m.source) ?? w.messages[0];
   const sub = `${w.client.code}${source ? ` · ${istShortDate(new Date(source.at))}` : ''}`;
   const head = await words(`${span(C.headText, markup(oneLine(w.client.name, 80)), ' weight="bold"')}\n${span(C.headSub, markup(oneLine(sub, 80)), ' size="small"')}`, PICTURE_WIDTH - 2 * PAD);

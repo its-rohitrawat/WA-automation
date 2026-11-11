@@ -508,6 +508,12 @@ async function main() {
         await p.waitForTimeout(500); // the sheet comes in
         await p.screenshot({ path: join(OUT, `chat-link-${tag}.png`) });
         await p.keyboard.press('Escape');
+        // A Chat link to a client that is not in this workspace: a notice, no chat, and the address cleaned.
+        where = `chat link elsewhere ${tag}`;
+        await p.goto(`${base}/dashboard/clients?client=ZZZ&chat=1`);
+        await p.locator('.toast', { hasText: "That chat isn't in this workspace." }).waitFor();
+        if ((await p.locator('.chat-sheet').count()) !== 0) fail(where, 'a chat opened for a client not in the list');
+        if (new URL(p.url()).search !== '') fail(where, 'the address keeps the link after it was used');
 
         // Settings: switching sending on asks first, with the ban risk.
         where = `settings, sending ${tag}`;

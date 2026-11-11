@@ -48,6 +48,17 @@ describe('drawChatPicture (11 Nov 2026)', () => {
     const { height } = await size(await drawChatPicture(win([msg({ source: true, text: 'word '.repeat(2000) })])));
     expect(height).toBeLessThan(2600);
   });
+
+  it('draws one picture at a time in the process: a big one asked for first is finished before a small one starts', async () => {
+    // Drawn side by side, the small picture (two text renders) would be done long before the big one (eight). One at a
+    // time, in the order asked, the big one always ends first.
+    const done: string[] = [];
+    const big = drawChatPicture(win(Array.from({ length: 7 }, (_, i) => msg({ source: i === 3, text: 'word '.repeat(120) }))))
+      .then(() => done.push('big'));
+    const small = drawChatPicture(win([msg({ source: true, text: 'ok' })])).then(() => done.push('small'));
+    await Promise.all([big, small]);
+    expect(done).toEqual(['big', 'small']);
+  });
 });
 
 describe('roundRect', () => {

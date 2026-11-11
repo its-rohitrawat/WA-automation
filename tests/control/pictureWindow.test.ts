@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { pictureWindow, withTagNames } from '../../src/control/chatQueries.ts';
+import { chatHiddenKey, chatPage, pictureWindow, withTagNames, type ChatHidden } from '../../src/control/chatQueries.ts';
 import { getClientByCode } from '../../src/store/clients.ts';
+import { setKv } from '../../src/store/kv.ts';
 import { applyRevoke, insertMessage, type NewMessage } from '../../src/store/messages.ts';
 import { upsertPerson } from '../../src/store/people.ts';
 import { seeded, SHARMA } from '../helpers/db.ts';
@@ -61,6 +62,21 @@ describe('pictureWindow (a chat picture as each task’s source, 11 Nov 2026)', 
     expect(w.messages.at(-2)!.sender).toBe('Member');
     expect(w.messages.at(-1)!.quote).toMatchObject({ sender: 'Member', text: 'no row' });
     expect(JSON.stringify(w)).not.toContain('9800000088');
+  });
+
+  it('after Delete chat, shows around the source only what Open chat shows; a source the mark hides is shown alone', async () => {
+    const { db, c, id } = await chat();
+    // Delete chat pressed when message 4 was the newest: messages 1 to 4 are hidden, 5 to 9 came after.
+    const mark: ChatHidden = { uptoTs: at(4), uptoId: await id('w4'), uptoRow: await id('w4'), floorTs: at(1), at: at(4), state: 'deleted', code: null };
+    await setKv(db, chatHiddenKey(c.id), JSON.stringify(mark));
+    const w = (await pictureWindow(db, c, await id('w6')))!;
+    expect(w.messages.map((m) => m.text)).toEqual(['message 5', 'message 6', 'message 7', 'message 8']);
+    expect(w.messages.map((m) => m.source)).toEqual([false, true, false, false]);
+    // Open chat agrees: the same messages show there, and none of the hidden ones.
+    const page = await chatPage(db, c, new Date(at(30)));
+    expect(page.messages.map((m) => m.text).reverse()).toEqual(['message 5', 'message 6', 'message 7', 'message 8', 'message 9']);
+    const hiddenSource = (await pictureWindow(db, c, await id('w3')))!;
+    expect(hiddenSource.messages.map((m) => [m.text, m.source])).toEqual([['message 3', true]]);
   });
 
   it('messages at the same time as the source come before and after it by row', async () => {
