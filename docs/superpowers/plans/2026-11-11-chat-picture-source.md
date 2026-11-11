@@ -22,6 +22,11 @@
 6. Sign-in returns to the Chat link: `safeReturnPath` accepts exactly `/dashboard/clients?client=<CODE>&chat=<digits>`.
 7. Pictures run after each tracker upload, the way file uploads do, not inside the workbook build. The first upload is what makes the Drive root.
 
+**Revised in review.** The code in the branch is the reference wherever it differs from this plan's code blocks for these tasks:
+- **Task 3** (43cc84a): the quote's sender reads "Member", and the number guard uses `LOOKS_LIKE_NUMBER`.
+- **Task 4** (e48ab08): lines are capped (12 for text, 6 for transcripts), the header is cleaned with `oneLine`, it uses `formatDuration`, and a reply to a deleted message reads "deleted message".
+- **Task 6** (320045f): unsaved Drive ids are held (`#unsaved`), runs pause when the database can't write, the Drive root is checked before any drawing, and logs carry `{ taskId, code }`.
+
 **House rules for every task:**
 - Match the code around you: comments say *why*, in full sentences, and use the same density as the file.
 - On this low-memory PC:
