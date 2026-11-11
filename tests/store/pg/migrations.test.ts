@@ -69,7 +69,7 @@ const pgIndexes = (sql: string) =>
   [...sql.matchAll(/CREATE INDEX (\w+) ON (\w+) \(([^)]*)\);/g)].map((m) => ({ name: m[1]!, table: m[2]!, cols: m[3]!.split(',').map((c) => c.trim()) }));
 
 const P1 = pgTables(P1_SQL);
-/** Every customer table as the migrations create it: P1's, then the assistant's chats (P6, November release). */
+/** Every customer table as the migrations create it: P1's, then the assistant's chats (P6, November release), then the chat pictures (P8). */
 const CUSTOMER_SQL = `${P1_SQL}\n${P6_SQL}\n${P8_SQL}`;
 const CUST = pgTables(CUSTOMER_SQL);
 const WEB = pgTables(WEB_SESSIONS_PG_SQL);
@@ -275,7 +275,7 @@ describe('the Postgres schema (P1 to P6) against the SQLite schema', () => {
     expect(P8_SQL).toContain('ALTER TABLE source_pictures ENABLE ROW LEVEL SECURITY;\nALTER TABLE source_pictures FORCE ROW LEVEL SECURITY;');
     expect(P8_SQL).toContain('UNIQUE (tenant_id, task_id)');
     expect([...P8_SQL.matchAll(/ENABLE ROW LEVEL SECURITY/g)]).toHaveLength(1);
-    expect(P8_SQL).not.toMatch(/(DROP|GRANT|DELETE|UPDATE|INSERT)|ALTER TABLE (?!source_pictures)/);
+    expect(P8_SQL).not.toMatch(/\b(DROP|GRANT|DELETE|UPDATE|INSERT)\b|ALTER TABLE (?!source_pictures)/);
   });
 
   it('P3 ends by taking the platform tables back from wa_app and granting wa_platform and wa_backup (A4)', () => {
