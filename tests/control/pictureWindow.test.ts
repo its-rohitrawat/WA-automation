@@ -44,11 +44,31 @@ describe('pictureWindow (a chat picture as each task’s source, 11 Nov 2026)', 
   });
 
   it('names people only: someone with no name is Member, never a number', async () => {
-    const { db, c, put, id } = await chat();
-    await put({ waId: 'u1', ts: at(30), senderJid: '919800000099@s.whatsapp.net', senderNumber: '919800000099', senderName: '+91 98000 00099', text: 'who am I' });
+    const { db, c, ids, put, id } = await chat();
+    // A person whose saved name is a number: senderLabel turns it into "Someone", which a picture shows as "Member".
+    await upsertPerson(db, { clientId: ids.sharma, jid: '919800000099@s.whatsapp.net', number: '919800000099', name: '+91 98000 00099', fromMe: false });
+    await put({ waId: 'u1', ts: at(30), senderJid: '919800000099@s.whatsapp.net', senderNumber: '919800000099', text: 'who am I' });
     const w = (await pictureWindow(db, c, await id('u1')))!;
     expect(w.messages.at(-1)!.sender).toBe('Member');
     expect(JSON.stringify(w)).not.toMatch(/9800000099|98000 00099/);
+  });
+
+  it('a sender with no people row, and the sender of a quoted message, are Member too', async () => {
+    const { db, c, put, id } = await chat();
+    await put({ waId: 'n1', ts: at(30), senderJid: '919800000088@s.whatsapp.net', senderNumber: '919800000088', senderName: null, text: 'no row' });
+    await put({ waId: 'n2', ts: at(31), text: 'reply', quotedWaId: 'n1' });
+    const w = (await pictureWindow(db, c, await id('n2')))!;
+    expect(w.messages.at(-2)!.sender).toBe('Member');
+    expect(w.messages.at(-1)!.quote).toMatchObject({ sender: 'Member', text: 'no row' });
+    expect(JSON.stringify(w)).not.toContain('9800000088');
+  });
+
+  it('messages at the same time as the source come before and after it by row', async () => {
+    const { db, c, put, id } = await chat();
+    for (const t of ['tie a', 'tie src', 'tie b', 'tie c']) await put({ waId: t, ts: at(50), text: t });
+    const w = (await pictureWindow(db, c, await id('tie src')))!;
+    expect(w.messages.map((m) => m.text)).toEqual(['message 7', 'message 8', 'message 9', 'tie a', 'tie src', 'tie b', 'tie c']);
+    expect(w.messages.map((m) => m.source)).toEqual([false, false, false, false, true, false, false]);
   });
 
   it('shows a tag as the person’s name, or @member, never the digits; in a reply’s quote too', async () => {
@@ -74,5 +94,17 @@ describe('withTagNames', () => {
   it('names each tag, or @member; never a number, even one WhatsApp gives', async () => {
     const { db, c } = await chat();
     expect(await withTagNames(db, c, ['hi @919800000002', '@919800000055 hello', 'no tags'])).toEqual(['hi @Rahul', '@member hello', 'no tags']);
+  });
+
+  it('a group member with no name is @member even when WhatsApp gives their number', async () => {
+    const { db, c } = await chat();
+    const members = async () => [{ id: '919800000055@s.whatsapp.net', phoneNumber: '919800000055@s.whatsapp.net', lid: null, admin: false }];
+    expect(await withTagNames(db, c, ['@919800000055 hello'], members)).toEqual(['@member hello']);
+  });
+
+  it('a person whose saved name is a number is @member', async () => {
+    const { db, c, ids } = await chat();
+    await upsertPerson(db, { clientId: ids.sharma, jid: '919800000077@s.whatsapp.net', number: '919800000077', name: '+91 98000 00077', fromMe: false });
+    expect(await withTagNames(db, c, ['hi @919800000077'])).toEqual(['hi @member']);
   });
 });

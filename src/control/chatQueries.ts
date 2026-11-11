@@ -276,7 +276,8 @@ export async function withTagNames(db: Db, c: ClientRow, texts: readonly string[
   const names = await tagNames(db, c, texts, members);
   return texts.map((t) => replaceTags(t, (tag) => {
     const n = names[tag];
-    return `@${n !== undefined && !n.startsWith('+') ? n : 'member'}`; // tagNames gives a number as shownNumber, "+…"
+    // tagNames gives a group member's number, shown as "+91 …", when it has no name, so a name that looks like a number is not shown.
+    return `@${n !== undefined && !LOOKS_LIKE_NUMBER.test(n) ? n : 'member'}`;
   }));
 }
 
@@ -318,7 +319,7 @@ export async function pictureWindow(db: Db, c: ClientRow, messageId: number, mem
   const named = await withTagNames(db, c, shown.flatMap((m) => [m.text, m.quote?.text ?? '']), members);
   return {
     client: { code: c.code, name: c.name },
-    messages: shown.map((m, i) => ({ ...m, text: named[2 * i]!, quote: m.quote ? { ...m.quote, text: named[2 * i + 1]! } : null })),
+    messages: shown.map((m, i) => ({ ...m, text: named[2 * i]!, quote: m.quote ? { ...m.quote, sender: m.quote.sender === 'Someone' ? 'Member' : m.quote.sender, text: named[2 * i + 1]! } : null })),
   };
 }
 
