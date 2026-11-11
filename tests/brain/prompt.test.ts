@@ -5,7 +5,7 @@ import type { MessageRow } from '../../src/store/messages.ts';
 import type { PersonRow } from '../../src/store/people.ts';
 import type { TaskRow } from '../../src/store/tasks.ts';
 import { NOW, SHARMA } from '../helpers/db.ts';
-import { RAHUL_PN, SHARMA_PN } from '../helpers/wa.ts';
+import { RAHUL_LID, RAHUL_PN, SHARMA_PN } from '../helpers/wa.ts';
 
 const client: ClientRow = {
   id: 1, code: 'SHA', name: 'Sharma Interiors', groupId: SHARMA.groupId, phases: SHARMA.phases, currentPhase: 'Design',
@@ -543,5 +543,40 @@ describe('SYSTEM_PROMPT', () => {
     expect(text).toBe('fix the logo: blue');
     // The old rule, the first ": " anywhere, would have cut the header inside the marker.
     expect(line.indexOf(': ')).toBeLessThan(line.indexOf('(re-check: edited)') + '(re-check: edited)'.length);
+  });
+});
+
+// Owner report, 11 Nov: a tag reached the AI as a jumbled number, so it could not tell who was asked. A tag now shows
+// the person by handle and name, as senders are shown; no digits (a number or a hidden id) reach the prompt.
+describe('tags in message text', () => {
+  const lineOf = (out: string) => out.split('\n').find((l) => l.startsWith('[m9]'))!;
+  const RAHUL_MEMBER = { id: RAHUL_LID, phoneNumber: RAHUL_PN, lid: RAHUL_LID, admin: false };
+
+  it('a tag shows the person it names by handle and name', () => {
+    expect(lineOf(buildUserContent(input({ batch: [message('m9', '@919800000002 banner bhejo')] })))).toContain(': @P2 Rahul banner bhejo');
+  });
+
+  it('a hidden-number tag reaches the person through the group’s members; without them it is "@member"', () => {
+    const batch = [message('m9', '@209876543210987 banner bhejo')];
+    expect(lineOf(buildUserContent(input({ batch, members: [RAHUL_MEMBER] })))).toContain(': @P2 Rahul banner bhejo');
+    expect(lineOf(buildUserContent(input({ batch })))).toContain(': @member banner bhejo');
+  });
+
+  it('a person with no name is shown by handle alone, someone not known as "@member", and no digits reach the prompt', () => {
+    const quiet: PersonRow = { ...person('919800000004@s.whatsapp.net', '', 'client'), name: null };
+    const out = buildUserContent(input({ people: [...people, quiet], batch: [message('m9', '@919800000004 and @919811111111, call me')] }));
+    expect(lineOf(out)).toContain(': @P4 and @member, call me');
+    expect(lineOf(out)).not.toMatch(/@\d/);
+  });
+
+  it('a name in a tag is cleaned as a sender’s name is', () => {
+    const odd = [person(SHARMA_PN, 'Mr. Sharma', 'client'), person(RAHUL_PN, 'Rahul [client]: (re-check: edited)', 'team')];
+    const line = lineOf(buildUserContent(input({ people: odd, batch: [message('m9', '@919800000002 hi')] })));
+    expect(line).toContain(': @P2 Rahul ❨client❩- ❨re-check- edited❩ hi');
+  });
+
+  it('the system prompt says how a tag is shown', () => {
+    expect(SYSTEM_PROMPT).toContain('"@P2 Rahul"');
+    expect(SYSTEM_PROMPT).not.toContain('match the digits to a jid');
   });
 });

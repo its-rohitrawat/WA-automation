@@ -86,7 +86,9 @@ export async function chatReadHandler(deps: ChatDeps, _ctx: OwnerContext, code: 
   }
   const before = whole(search.before);
   const limit = whole(search.limit);
-  const page = await chatPage(deps.db, c, deps.clock.now(), { ...(before !== undefined ? { before } : {}), ...(limit !== undefined ? { limit } : {}) });
+  // A tag the client's people do not name is named through the group's members (the 5-minute keep), while its phone is open.
+  const members = () => (deps.connected(c.groupId) && deps.groupMembers ? deps.groupMembers(c.groupId) : Promise.resolve(null));
+  const page = await chatPage(deps.db, c, deps.clock.now(), { ...(before !== undefined ? { before } : {}), ...(limit !== undefined ? { limit } : {}), members });
   return ok({
     client: { code: c.code, name: c.name, groupName: groupNameOf(deps, c) }, sendingOn: deps.sendingOn(), connected: deps.connected(c.groupId), phone: phoneLabelOf(deps, c), ...page,
   });

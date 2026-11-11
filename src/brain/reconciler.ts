@@ -29,6 +29,7 @@ import { keywordMatcher, NO_KEYWORDS, type KeywordMatch } from './priorityKeywor
 import { buildUserContent, systemPromptFor } from './prompt.ts';
 import type { AiOp, AiOutput } from './schema.ts';
 import { validateOps, type Rejection, type ValidationState } from './validator.ts';
+import { mentionTags, type GroupMember } from '../wa/groupMembers.ts';
 
 /**
  * noop: nothing to do. waiting: messages are queued, but the first one's file is still being read (no AI call, no spend);
@@ -75,6 +76,12 @@ export interface ReconcilerOptions {
    * run so a change from the dashboard applies to the next batch. Default: no keywords, sentiment off.
    */
   priority?: () => PriorityConfig;
+  /**
+   * The members of a client's group (the gateway's 5-minute keep; null when it cannot ask), read only for a run whose
+   * messages tag someone: a tag uses the id the group uses, often not the one a person writes from, and only this list
+   * links the two (owner report, 11 Nov). Default: none, so a tag names only by a person's own id or number.
+   */
+  groupMembers?: (groupId: string) => Promise<readonly GroupMember[] | null>;
 }
 
 /** What one run applies with: the keyword matcher and whether this read asked for sentiment. */
@@ -261,8 +268,11 @@ export class Reconciler {
     const reactions = await reactionsFor(db, clientId, [...recent, ...batch].map((m) => m.waId));
     const media = await mediaForPrompt(db, batch, recent);
     const mediaText = mediaPromptTexts(media, batch, recent);
+    // A members read that fails names no one by the list: never a failed run.
+    const tagged = [...recent, ...batch].some((m) => m.text !== null && mentionTags(m.text).size > 0);
+    const members = tagged && this.#o.groupMembers ? await this.#o.groupMembers(client.groupId).catch(() => null) : null;
     const user = buildUserContent({
-      client, people, openTasks, decisions, recent, batch, reactions, today: istDate(now), mediaText, fileRechecks,
+      client, people, openTasks, decisions, recent, batch, reactions, today: istDate(now), mediaText, fileRechecks, members,
     });
     const rules = this.#rules({ meeting: false });
     const system = systemPromptFor({ sentiment: rules.sentiment });

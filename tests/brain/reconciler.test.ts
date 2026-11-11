@@ -1,7 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { describe, expect, it, vi } from 'vitest';
 import { AiInvalidOutputError, AiRefusalError, MAX_OUTPUT_TOKENS, SDK_MAX_RETRIES } from '../../src/brain/claudeClient.ts';
-import { Reconciler } from '../../src/brain/reconciler.ts';
+import { Reconciler, type ReconcilerOptions } from '../../src/brain/reconciler.ts';
 import { closeTask, reopenTask, requestReprocess } from '../../src/cli/corrections.ts';
 import { estimateCostUsd, type Prices } from '../../src/spend/pricing.ts';
 import { SpendGuard } from '../../src/spend/spendGuard.ts';
@@ -16,7 +16,7 @@ import { createTask, getTaskByCode, listDecisions, listTasks, logReminder, setTa
 import { manualClock } from '../../src/util/clock.ts';
 import { silentLogger, type Logger } from '../../src/util/logger.ts';
 import { FAKE_USAGE, FakeAi, op, type FakeResponse } from '../helpers/ai.ts';
-import { LATER, NOW, row, seeded } from '../helpers/db.ts';
+import { LATER, NOW, row, seeded, SHARMA } from '../helpers/db.ts';
 import { SHARMA_PN } from '../helpers/wa.ts';
 
 const P: Prices = { inputPerMTok: 4, outputPerMTok: 20, cacheWritePerMTok: 5, cacheReadPerMTok: 0.2 };
@@ -28,7 +28,7 @@ let sharma = 0;
 let mehta = 0;
 
 /** `wrap`: what the Reconciler gets in place of the store (refusingDecisions, to make an apply fail part-way). */
-async function setup(responses: FakeResponse[], capUsd = 15, log: Logger = silentLogger(), wrap: (db: Db) => Db = (db) => db) {
+async function setup(responses: FakeResponse[], capUsd = 15, log: Logger = silentLogger(), wrap: (db: Db) => Db = (db) => db, extra: Partial<ReconcilerOptions> = {}) {
   const { db, ids } = await seeded();
   sharma = ids.sharma;
   mehta = ids.mehta;
@@ -36,7 +36,7 @@ async function setup(responses: FakeResponse[], capUsd = 15, log: Logger = silen
   const spend = new SpendGuard({ db, clock, capUsd });
   const ai = new FakeAi(responses);
   const onChanged = vi.fn();
-  const r = new Reconciler({ db: wrap(db), ai, spend, prices: P, clock, log, onChanged });
+  const r = new Reconciler({ db: wrap(db), ai, spend, prices: P, clock, log, onChanged, ...extra });
   return { db, spend, ai, onChanged, r };
 }
 
@@ -799,5 +799,34 @@ describe('Reconciler', () => {
     expect(await requestReprocess(db, 'SHA', '2026-10-19', new Date('2026-10-19T08:31:00Z'))).toBe(2);
     expect(await r.run(sharma)).toMatchObject({ status: 'ok', accepted: 0, rejected: 1 });
     expect(await getTaskByCode(db, 'SHA-002')).toBeUndefined();
+  });
+});
+
+// Owner report, 11 Nov: a tag reached the AI as a jumbled number. The tag uses Rahul's hidden-number id, while he is known
+// by the number he writes from: the group's members link the two. Made-up ids.
+describe('tags in a batch', () => {
+  const RAHUL = '919800000002@s.whatsapp.net';
+  const RAHUL_HIDDEN = '209876543210987@lid';
+
+  it('reads the group’s members only when a message tags someone, and the AI sees the person, not the digits', async () => {
+    const members = vi.fn(async (_groupId: string) => [{ id: RAHUL_HIDDEN, phoneNumber: RAHUL, lid: RAHUL_HIDDEN, admin: false }]);
+    const { db, ai, r } = await setup([{ ops: [] }, { ops: [] }], 15, silentLogger(), (d) => d, { groupMembers: members });
+    await upsertPerson(db, { clientId: sharma, jid: RAHUL, number: '919800000002', name: 'Rahul', fromMe: false });
+    await store(db, 'm1', 'banner thoda bright karo');
+    expect(await r.run(sharma)).toMatchObject({ status: 'ok' });
+    expect(members).not.toHaveBeenCalled();
+    await store(db, 'm2', '@209876543210987 banner bhejo', '2026-10-19T07:30:00.000Z');
+    expect(await r.run(sharma)).toMatchObject({ status: 'ok' });
+    expect(members).toHaveBeenCalledWith(SHARMA.groupId);
+    expect(ai.calls[1]!.user).toMatch(/: @P\d Rahul banner bhejo/);
+    expect(ai.calls[1]!.user).not.toContain('209876543210987');
+  });
+
+  it('members that cannot be read leave the tag as "@member", never a failed run', async () => {
+    const members = vi.fn(async (_groupId: string): Promise<null> => { throw new Error('socket closed'); });
+    const { db, ai, r } = await setup([{ ops: [] }], 15, silentLogger(), (d) => d, { groupMembers: members });
+    await store(db, 'm1', '@209876543210987 banner bhejo');
+    expect(await r.run(sharma)).toMatchObject({ status: 'ok' });
+    expect(ai.calls[0]!.user).toContain(': @member banner bhejo');
   });
 });
