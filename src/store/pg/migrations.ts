@@ -33,11 +33,14 @@ const P1_TABLES = [
 /** The assistant's chats (P6, November release lane A). */
 const P6_TABLES = ['assistant_chats', 'assistant_messages'] as const;
 
+/** The chat pictures (P8, 11 Nov 2026). */
+const P8_TABLES = ['source_pictures'] as const;
+
 /**
  * Every customer table, in creation order (parents first): each has tenant_id and forced row-level security, and the
  * access check (accessRules.ts) covers each one on the live database.
  */
-export const CUSTOMER_TABLES = [...P1_TABLES, ...P6_TABLES] as const;
+export const CUSTOMER_TABLES = [...P1_TABLES, ...P6_TABLES, ...P8_TABLES] as const;
 export type CustomerTable = (typeof CUSTOMER_TABLES)[number];
 
 const TENANT = `tenant_id uuid NOT NULL DEFAULT current_setting('app.tenant_id')::uuid REFERENCES tenants (id)`;
@@ -555,6 +558,32 @@ ALTER TABLE wa_auth DROP CONSTRAINT wa_auth_phone_check;
 ALTER TABLE wa_auth ADD CONSTRAINT wa_auth_phone_check CHECK (phone IN ('founder', 'phone2', 'phone3', 'phone4', 'phone5', 'spare'));
 `;
 
+/**
+ * P8 (owner request, 11 Nov 2026): the chat pictures, per customer as SQLite's v14, with row-level security as P6 gives
+ * its tables. The default privileges give wa_app their rows (and, after P5, no SELECT on the id sequence); wa_backup
+ * reads them.
+ */
+export const P8_SQL = `
+CREATE TABLE source_pictures (
+  ${TENANT},
+  ${ID},
+  task_id bigint NOT NULL,
+  client_id bigint NOT NULL,
+  message_id bigint NOT NULL,
+  drive_file_id text CHECK (drive_file_id IS NULL OR length(drive_file_id) BETWEEN 1 AND 200),
+  error_code text CHECK (error_code IS NULL OR length(error_code) BETWEEN 1 AND 60),
+  attempts integer NOT NULL DEFAULT 0,
+  made_at text,
+  tried_at text NOT NULL,
+  UNIQUE (tenant_id, id),
+  UNIQUE (tenant_id, task_id),
+  FOREIGN KEY (tenant_id, task_id) REFERENCES tasks (tenant_id, id),
+  FOREIGN KEY (tenant_id, client_id) REFERENCES clients (tenant_id, id),
+  FOREIGN KEY (tenant_id, message_id) REFERENCES messages (tenant_id, id)
+);
+CREATE INDEX source_pictures_client ON source_pictures (tenant_id, client_id);
+${rlsSql(P8_TABLES)}`;
+
 /** In order; recorded in pg_schema_version by the runner (S2.4). Never edited once applied: a change is a new entry. */
 export const PG_MIGRATIONS: readonly { version: number; sql: string }[] = [
   { version: 1, sql: P1_SQL },
@@ -564,6 +593,7 @@ export const PG_MIGRATIONS: readonly { version: number; sql: string }[] = [
   { version: 5, sql: P5_SQL },
   { version: 6, sql: P6_SQL },
   { version: 7, sql: P7_SQL },
+  { version: 8, sql: P8_SQL },
 ];
 
 /** The version this code needs: openStore refuses a database at any other one (run db-migrate first). */

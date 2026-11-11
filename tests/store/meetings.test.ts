@@ -511,7 +511,7 @@ describe.runIf(onSqlite)('migration 7', () => {
   it('a fresh database has migration 7, with its indexes, and the table refuses unknown statuses and stages', async () => {
     const db = await seededDb();
     expect(rawOf(db).prepare('SELECT version FROM schema_version WHERE version = 7').get()).toEqual({ version: 7 });
-    expect((rawOf(db).prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(13); // the latest: v13 is the assistant's chats, after v12 (Open chat's outbox)
+    expect((rawOf(db).prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(14); // the latest: v14 is the chat pictures, after v13 (the assistant's chats)
     const idx = (rawOf(db).prepare("SELECT tbl_name || '.' || name AS n FROM sqlite_master WHERE type = 'index'").all() as { n: string }[]).map((i) => i.n);
     expect(idx).toEqual(expect.arrayContaining([
       'meetings.meetings_due', 'meetings.meetings_conference', 'meetings.meetings_client', 'tasks.tasks_meeting', 'decisions.decisions_meeting',
