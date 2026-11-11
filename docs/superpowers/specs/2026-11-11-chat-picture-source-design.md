@@ -9,7 +9,7 @@
 ## What the owner sees
 
 **Tracker.xlsx, each task row:**
-- **Source message** keeps the short quote, as today. The cell becomes a link to the task's picture.
+- **Source message** keeps the short quote, as today, with its tags as names too (the quote is stored as the raw message text, so today a tag in it still shows as raw digits). The cell becomes a link to the task's picture.
 - **Chat**, a new column added at the end of the row (after Sentiment, so no existing column moves), says "Open". It links to that message in the dashboard: `<DASHBOARD_PUBLIC_URL>/dashboard/clients?client=<code>&chat=<message id>` (the Clients screen already takes its filters from the address).
   - Without `DASHBOARD_PUBLIC_URL` the column is still there, but empty.
 - With no picture yet, or when it failed, the Source cell is the plain quote, exactly as today.
