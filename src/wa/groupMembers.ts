@@ -73,3 +73,42 @@ const TAG = /(?<![\p{L}\p{N}_])@(\d{5,20})(?!\d)/gu;
 export function mentionTags(text: string): Set<string> {
   return new Set([...text.matchAll(TAG)].map((m) => m[1]!));
 }
+
+/** The text with each tag ("@<digits>", as mentionTags finds them) replaced by what `by` gives for its digits. */
+export function replaceTags(text: string, by: (tag: string) => string): string {
+  return text.replace(TAG, (_whole, digits: string) => by(digits));
+}
+
+/** A person as the agent's people rows hold them: the id they wrote from, and their number when WhatsApp gave one. */
+export interface KnownPerson {
+  jid: string;
+  number: string | null;
+}
+
+/** The group member a tag names, by any of the member's ids; null when the list has none (or there is no list). */
+export function memberTagged(tag: string, members: readonly GroupMember[] | null): GroupMember | null {
+  return members?.find((m) => [m.id, m.phoneNumber, m.lid].some((id) => id !== null && tagOf(id) === tag)) ?? null;
+}
+
+/** A member's people among the agent's: by the id the group uses, its phone-number id, its hidden-number id, then its number. */
+export function peopleOfMember<P extends KnownPerson>(m: GroupMember, people: readonly P[]): P[] {
+  const ids = [m.id, m.phoneNumber, m.lid].filter((id): id is string => id !== null);
+  const number = m.phoneNumber ? tagOf(m.phoneNumber) : null;
+  return [...new Set([...ids.flatMap((id) => people.filter((p) => p.jid === id)), ...(number ? people.filter((p) => p.number === number) : [])])];
+}
+
+/**
+ * The agent's people a tag names, best first: the person whose own id has those digits, then the people of the member
+ * the digits name, then the person with that number. A tag uses the id the group uses, often not the one the person
+ * wrote from (a hidden-number tag for someone who writes from their number, or the other way round): only the member
+ * list links the two (owner report, 11 Nov: tags showed as jumbled numbers). Without it, only the person's own id or
+ * number matches.
+ */
+export function peopleTagged<P extends KnownPerson>(tag: string, people: readonly P[], members: readonly GroupMember[] | null): P[] {
+  const member = memberTagged(tag, members);
+  return [...new Set([
+    ...people.filter((p) => tagOf(p.jid) === tag),
+    ...(member ? peopleOfMember(member, people) : []),
+    ...people.filter((p) => p.number === tag),
+  ])];
+}

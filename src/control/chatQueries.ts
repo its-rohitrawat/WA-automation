@@ -2,12 +2,13 @@ import type { ClientRow } from '../store/clients.ts';
 import type { Db, Sql } from '../store/db.ts';
 import { getKv, setKv } from '../store/kv.ts';
 import { outboxToShow, type OutboxRow, type OutboxState } from '../store/outbox.ts';
-import { mentionTags, tagOf, type GroupMember } from '../wa/groupMembers.ts';
+import { memberTagged, mentionTags, peopleOfMember, peopleTagged, tagOf, type GroupMember } from '../wa/groupMembers.ts';
 import { messageKind, oneLine, senderLabel, type ClientMessage } from './clientQueries.ts';
 
 // Open chat (owner request, 29 Oct 2026): a client's group as stored, a page at a time, newest first. Least data: a
 // message is its row number (the cursor, and what Reply names), time, side, the sender's shown name, text and kind.
-// Never a phone number, a WhatsApp id or a JID. Text is untrusted: the browser shows it as text only.
+// Never a WhatsApp id or a JID; a phone number only for a group member the agent has no name for (the group info panel
+// and a tag naming them, as WhatsApp itself shows them). Text is untrusted: the browser shows it as text only.
 
 export const CHAT_PAGE = 50;
 export const CHAT_PAGE_MAX = 100;
@@ -51,8 +52,9 @@ export interface ChatPage {
   hasOlder: boolean;
   outbox: ChatOutboxItem[];
   /**
-   * The agent's name for each tag ("@<digits>") the page's texts hold, when it knows one (November release). The digits
-   * are the text's own; no number is added.
+   * The agent's name for each tag ("@<digits>") the page's texts hold, when it knows one (November release): the
+   * person's name, else the number WhatsApp gives for that group member (owner report, 11 Nov). A tag it cannot name
+   * is left out.
    */
   names: Record<string, string>;
   /** The owner deleted this chat (Delete chat) and nothing has come since: the newest page is empty for that reason. */
@@ -128,9 +130,12 @@ async function messageQuote(db: Db, clientId: number, id: number): Promise<ChatO
 
 /**
  * A page of the chat: the `limit` messages before the message `before` (by time, then row), newest first, or the newest
- * when `before` is not given; and the dashboard's own messages still to show. Parameterised reads only.
+ * when `before` is not given; and the dashboard's own messages still to show. Parameterised reads only. `members`: the
+ * group's members, asked for only when the client's people alone do not name every tag on the page.
  */
-export async function chatPage(db: Db, c: ClientRow, now: Date, o: { before?: number; limit?: number } = {}): Promise<ChatPage> {
+export async function chatPage(
+  db: Db, c: ClientRow, now: Date, o: { before?: number; limit?: number; members?: () => Promise<readonly GroupMember[] | null> } = {},
+): Promise<ChatPage> {
   const limit = Math.max(1, Math.min(CHAT_PAGE_MAX, Math.floor(o.limit ?? CHAT_PAGE)));
   let rows: RawMessage[];
   // After Delete chat, only what came after its mark (by time, then row); with no mark, everything.
@@ -155,7 +160,7 @@ export async function chatPage(db: Db, c: ClientRow, now: Date, o: { before?: nu
   const messages = rows.slice(0, limit).map(toMessage);
   const texts = [...messages, ...outbox].flatMap((x) => [x.text, x.quote?.text ?? '']);
   return {
-    messages, hasOlder: rows.length > limit, outbox, names: await tagNames(db, c, texts),
+    messages, hasOlder: rows.length > limit, outbox, names: await tagNames(db, c, texts, o.members),
     cleared: hidden !== null && o.before === undefined && messages.length === 0 && outbox.length === 0,
   };
 }
@@ -235,18 +240,29 @@ export async function readingPhoneFrom(db: Sql, clientId: number): Promise<numbe
 }
 
 /**
- * The names of the tags in some texts: for each "@<digits>", this client's person whose id or number has those digits,
- * named as the chat would name it. Only names the agent knows. Parameterised reads only, and only this client's rows.
+ * The names of the tags in some texts: for each "@<digits>", the first of this client's people it names (peopleTagged)
+ * that has a name, as the chat would name them; else, for a group member, the number WhatsApp gives. The members are
+ * asked for only when the people alone leave a tag unnamed. Parameterised reads only, and only this client's rows.
  */
-async function tagNames(db: Db, c: ClientRow, texts: readonly string[]): Promise<Record<string, string>> {
+async function tagNames(db: Db, c: ClientRow, texts: readonly string[], members?: () => Promise<readonly GroupMember[] | null>): Promise<Record<string, string>> {
   const tags = new Set(texts.flatMap((t) => [...mentionTags(t)]));
   const names: Record<string, string> = {};
   if (tags.size === 0) return names;
   const people = await db.all<{ jid: string; number: string | null; name: string | null }>('SELECT jid, number, name FROM people WHERE client_id = ?', [c.id]);
-  for (const p of people) {
-    const name = memberName(p.name);
-    if (!name) continue;
-    for (const key of [tagOf(p.jid), p.number]) if (key && tags.has(key) && !Object.hasOwn(names, key)) names[key] = name;
+  const nameOf = (tag: string, list: readonly GroupMember[] | null): string | null => {
+    const name = peopleTagged(tag, people, list).map((p) => memberName(p.name)).find((n) => n !== null) ?? null;
+    const number = memberTagged(tag, list)?.phoneNumber ?? null;
+    return name ?? (number ? shownNumber(number) : null);
+  };
+  for (const tag of tags) {
+    const name = nameOf(tag, null);
+    if (name) names[tag] = name;
+  }
+  const unnamed = [...tags].filter((tag) => !Object.hasOwn(names, tag));
+  const list = unnamed.length > 0 && members ? await members().catch(() => null) : null;
+  for (const tag of list ? unnamed : []) {
+    const name = nameOf(tag, list);
+    if (name) names[tag] = name;
   }
   return names;
 }
@@ -290,13 +306,9 @@ export function shownNumber(phoneNumberId: string): string {
  */
 export async function chatMembers(db: Db, c: ClientRow, members: readonly GroupMember[]): Promise<ChatMember[]> {
   const people = await db.all<{ jid: string; number: string | null; name: string | null }>('SELECT jid, number, name FROM people WHERE client_id = ?', [c.id]);
-  const byJid = new Map(people.map((p) => [p.jid, p]));
-  const byNumber = new Map(people.filter((p) => p.number).map((p) => [p.number!, p]));
   const out = members.map((m): ChatMember => {
-    const digits = m.phoneNumber ? m.phoneNumber.split('@')[0]! : null;
-    const p = byJid.get(m.id) ?? (m.phoneNumber ? byJid.get(m.phoneNumber) : undefined) ?? (m.lid ? byJid.get(m.lid) : undefined) ?? (digits ? byNumber.get(digits) : undefined);
     // A number only for a member the agent has no name for (final review, item 3): least data, and as the owner was told.
-    const name = memberName(p?.name ?? null);
+    const name = peopleOfMember(m, people).map((p) => memberName(p.name)).find((n) => n !== null) ?? null;
     return { name, number: !name && m.phoneNumber ? shownNumber(m.phoneNumber) : null, tag: tagOf(m.id), admin: m.admin };
   });
   const rank = (x: ChatMember) => (x.admin ? 0 : 3) + (x.name ? 0 : x.number ? 1 : 2);

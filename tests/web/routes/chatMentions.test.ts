@@ -8,7 +8,7 @@ import { manualClock } from '../../../src/util/clock.ts';
 import { createLogger } from '../../../src/util/logger.ts';
 import type { GroupMember } from '../../../src/wa/groupMembers.ts';
 import type { GroupSendSocket, QuotedMessage } from '../../../src/wa/groupSend.ts';
-import { chatSendHandler, type ChatDeps } from '../../../src/web/routes/chat.ts';
+import { chatReadHandler, chatSendHandler, type ChatDeps } from '../../../src/web/routes/chat.ts';
 import type { AuditFn, OwnerContext } from '../../../src/web/routes/context.ts';
 import { MEHTA, NOW, rows, seeded, SHARMA } from '../../helpers/db.ts';
 
@@ -157,5 +157,52 @@ describe('tags shown in the chat', () => {
     });
     const page = await chatPage(db, (await getClientByCode(db, 'SHA'))!, new Date(NOW));
     expect(page.names).toEqual({});
+  });
+});
+
+// Owner report, 11 Nov: tags showed as jumbled numbers. A tag uses the id the group uses (here the hidden-number one),
+// while Rahul is known by the number he writes from: the group's member list links the two.
+describe('tags named through the group’s members', () => {
+  const RAHUL_HIDDEN = '201111111111111@lid';
+  const NEW_HIDDEN = '207777777777777@lid';
+  const tagged = async (text: string) => {
+    await insertMessage(db, {
+      waId: 'M9', clientId: sharma, senderJid: '919800000009@s.whatsapp.net', senderNumber: '919800000009', senderName: null, fromMe: false,
+      ts: '2026-10-19T07:00:00.000Z', text, quotedWaId: null, mediaType: null,
+    });
+  };
+  beforeEach(async () => {
+    await upsertPerson(db, { clientId: sharma, jid: PN1, number: '919800000001', name: 'Rahul', fromMe: false });
+    members = [
+      { id: RAHUL_HIDDEN, phoneNumber: PN1, lid: RAHUL_HIDDEN, admin: false },
+      { id: NEW_HIDDEN, phoneNumber: '919800000007@s.whatsapp.net', lid: NEW_HIDDEN, admin: false }, // has never written
+      { id: HIDDEN, phoneNumber: null, lid: HIDDEN, admin: false }, // hidden number, never wrote
+    ];
+  });
+  const sha = async () => (await getClientByCode(db, 'SHA'))!;
+
+  it('a hidden-number tag names the person who writes from their number; a member never seen shows the number WhatsApp gives', async () => {
+    await tagged('@201111111111111 @207777777777777 @203333333333333 @209999999999999 please check');
+    const page = await chatPage(db, await sha(), new Date(NOW), { members: () => source(SHARMA.groupId) });
+    // Sana's number is hidden and someone not in the group is not known: both are left out (the chat says "@member").
+    expect(page.names).toEqual({ '201111111111111': 'Rahul', '207777777777777': '+91 98000 00007' });
+  });
+
+  it('asks WhatsApp only when the agent’s people do not name every tag', async () => {
+    await tagged('@919800000001 hi');
+    expect((await chatPage(db, await sha(), new Date(NOW), { members: () => source(SHARMA.groupId) })).names).toEqual({ '919800000001': 'Rahul' });
+    expect(source).not.toHaveBeenCalled();
+  });
+
+  it('the chat page reads the members while the group’s phone is open, and names by its people alone otherwise', async () => {
+    await tagged('@201111111111111 please check');
+    const read = await chatReadHandler(deps, CTX, 'SHA', {});
+    expect((read.body as { names: Record<string, string> }).names).toEqual({ '201111111111111': 'Rahul' });
+    expect(source).toHaveBeenCalledWith(SHARMA.groupId);
+    source.mockClear();
+    deps.connected = () => false;
+    const offline = await chatReadHandler(deps, CTX, 'SHA', {});
+    expect((offline.body as { names: Record<string, string> }).names).toEqual({});
+    expect(source).not.toHaveBeenCalled();
   });
 });

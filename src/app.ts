@@ -319,6 +319,8 @@ export async function createApp(d: AppDeps): Promise<App> {
     // A meeting's tracker step holds the client's run flag, so it never interleaves with a WhatsApp run (Task 9).
     exclusive: (clientId, fn) => debouncer.runExclusive(clientId, fn),
     ...(d.priority ? { priority: d.priority } : {}),
+    // A run whose messages tag someone names them through the group's members (the gateway's 5-minute keep).
+    ...(d.gateway.groupMembers ? { groupMembers: (groupId: string) => d.gateway.groupMembers!(groupId) } : {}),
   });
   /** Reads a newly approved group's last 7 days (src/wa/historyBackfill.ts); only with a gateway that can ask. */
   let backfill: HistoryBackfill | undefined;

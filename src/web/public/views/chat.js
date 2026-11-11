@@ -87,16 +87,17 @@ function kindTag(kind, seconds) {
 /** @param {{ sender: string, text: string, kind: string } | null} q */
 function quoteBlock(q) {
   if (!q) return '';
-  const text = q.text || (q.kind !== 'text' ? KIND_LABEL[q.kind] ?? 'Message' : '');
-  return `<div class="ch-quote"><b class="${tone(q.sender)}">${esc(q.sender)}</b><span>${esc(text)}</span></div>`;
+  const text = q.text ? richText(q.text) : esc(q.kind !== 'text' ? KIND_LABEL[q.kind] ?? 'Message' : '');
+  return `<div class="ch-quote"><b class="${tone(q.sender)}">${esc(q.sender)}</b><span>${text}</span></div>`;
 }
 
 /** A tag in a message's text, as the agent finds it (src/wa/groupMembers.ts mentionTags). */
 const TAG = /(?<![\p{L}\p{N}_])@(\d{5,20})(?!\d)/gu;
 
 /**
- * A message's text, its tags ("@<digits>") highlighted: as "@Name" when the agent knows the member, else as the text has
- * it (the bubble adds no number). Every piece goes through esc(). @param {string} text
+ * A message's text, its tags ("@<digits>") highlighted: as "@Name" (or the number WhatsApp gives for an unnamed member)
+ * when the agent knows the member, else as "@member": the digits are usually a hidden id that reads as a jumbled number
+ * (owner report, 11 Nov). Every piece goes through esc(). @param {string} text
  */
 function richText(text) {
   const names = chat?.names ?? {};
@@ -105,7 +106,7 @@ function richText(text) {
   for (const m of text.matchAll(TAG)) {
     const at = m.index ?? 0;
     const tag = m[1] ?? '';
-    out += `${esc(text.slice(last, at))}<span class="ch-at">@${esc(Object.hasOwn(names, tag) ? names[tag] : tag)}</span>`;
+    out += `${esc(text.slice(last, at))}<span class="ch-at">@${esc(Object.hasOwn(names, tag) ? names[tag] : 'member')}</span>`;
     last = at + m[0].length;
   }
   return out + esc(text.slice(last));
