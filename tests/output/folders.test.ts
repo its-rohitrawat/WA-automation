@@ -124,3 +124,12 @@ describe('two customers (Phase B): folder ids are kept per database, never share
     expect(b.drive.folders).toHaveLength(3);
   });
 });
+
+it('keeps a Sources folder per client, next to Files and Meetings (chat pictures, 11 Nov 2026)', async () => {
+  const { db, drive } = await setup();
+  const sources = await folderOf(db, drive, SHARMA, 'Sources');
+  expect(await folderOf(db, drive, SHARMA, 'Sources')).toBe(sources); // made once, then saved
+  expect(await folderOf(db, drive, SHARMA, 'Files')).not.toBe(sources);
+  expect(drive.folders).toEqual(['Clients', 'Sharma Interiors', 'Sources', 'Files']);
+  expect(await getKv(db, 'drive_sources_folder:1')).toBe(sources);
+});

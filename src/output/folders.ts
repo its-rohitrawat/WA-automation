@@ -3,8 +3,8 @@ import type { Db } from '../store/db.ts';
 import { getKv, setKv } from '../store/kv.ts';
 import { DriveNotFoundError, type DriveApi } from './drive.ts';
 
-/** The folders kept for each client in WA Agent/Clients/<Client>/: shared files, and meeting Docs (team only). */
-export type ClientSubfolder = 'Files' | 'Meetings';
+/** The folders kept for each client in WA Agent/Clients/<Client>/: shared files, meeting Docs (team only), and the tasks' chat pictures. */
+export type ClientSubfolder = 'Files' | 'Meetings' | 'Sources';
 
 export interface FolderClient {
   clientId: number;
@@ -21,11 +21,11 @@ export class DriveRootMissingError extends Error {
 
 const CLIENTS_KEY = 'drive_clients_folder';
 const clientKey = (clientId: number): string => `drive_client_folder:${clientId}`;
-const subfolderKey = (kind: ClientSubfolder, clientId: number): string =>
-  kind === 'Files' ? `drive_files_folder:${clientId}` : `drive_meetings_folder:${clientId}`;
+const SUBFOLDER_KEYS: Record<ClientSubfolder, string> = { Files: 'drive_files_folder', Meetings: 'drive_meetings_folder', Sources: 'drive_sources_folder' };
+const subfolderKey = (kind: ClientSubfolder, clientId: number): string => `${SUBFOLDER_KEYS[kind]}:${clientId}`;
 
 /**
- * The client's Files or Meetings folder, made (with any folder above it that is not saved) when no id is saved. Folders
+ * The client's Files, Meetings or Sources folder, made (with any folder above it that is not saved) when no id is saved. Folders
  * are never searched for: a missing id means make one. Each new folder's id is saved right after Drive makes it.
  * created: the subfolder was made just now. Throws DriveRootMissingError when the WA Agent folder is not made yet.
  */
@@ -51,7 +51,7 @@ async function subfolder(db: Db, api: DriveApi, c: FolderClient, kind: ClientSub
 }
 
 /**
- * Runs put(folderId) in the client's Files or Meetings folder, WA Agent/Clients/<Client>/<kind>/, made once and saved in
+ * Runs put(folderId) in the client's Files, Meetings or Sources folder, WA Agent/Clients/<Client>/<kind>/, made once and saved in
  * kv (see subfolder). When Drive says a folder is gone (DriveNotFoundError), a
  * folder was removed in Drive: one more level is rebuilt per retry, the subfolder first, then the client folder, then
  * Clients, and put runs again. Creating a folder inside a removed one fails the same way, so a level above the subfolder
