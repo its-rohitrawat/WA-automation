@@ -12,7 +12,7 @@ import { finishMeeting } from '../store/meetings.ts';
 import {
   clearTouches, flagRevokedSources, listRecentProcessed, listUnprocessed, markProcessedIfUnchanged, reactionsFor, type MessageRow, type StoredReactionRow,
 } from '../store/messages.ts';
-import { listPeople, setRole } from '../store/people.ts';
+import { listPeople, setRole, type PersonRow } from '../store/people.ts';
 import {
   addDecision, createTask, decisionSourceIds, getTaskByCode, listDecisions, listTasks, logReminder, PRIORITIES, recordEvent, reminderSourceIds, setTaskSentiment,
   setTaskStatus, taskSourceIds, TASK_FIELDS, updateTaskFields, type Priority, type TaskField, type TaskRow,
@@ -26,7 +26,7 @@ import type { MeetingSummary } from './meetingSchema.ts';
 import { MEETING_ITEM_MAX_QUOTE, MEETING_TRACKER_PROMPT, meetingItemLines, meetingItems, type MeetingItem } from './meetingTracker.ts';
 import { SpendCapReachedError, settleFailedCall } from './paidCall.ts';
 import { keywordMatcher, NO_KEYWORDS, type KeywordMatch } from './priorityKeywords.ts';
-import { buildUserContent, systemPromptFor } from './prompt.ts';
+import { buildUserContent, handleJids, systemPromptFor } from './prompt.ts';
 import type { AiOp, AiOutput } from './schema.ts';
 import { validateOps, type Rejection, type ValidationState } from './validator.ts';
 import { mentionTags, type GroupMember } from '../wa/groupMembers.ts';
@@ -147,6 +147,17 @@ interface MeetingEvidence extends EvidenceTimes {
 
 /** What an op cites, for #apply and the validator. Shared by WhatsApp and meeting runs; a WhatsApp run only ever has messages. */
 type Evidence = MessageEvidence | MeetingEvidence;
+
+/**
+ * The ops with each set_person_role's person turned from the handle the prompt showed (P2) back into that person's id:
+ * the prompt sends no WhatsApp id or number (owner decision, 11 Nov). `people` is the list the prompt was built from, so
+ * the handles match it even if someone new wrote during the call. Anything that is not one of its handles is left as
+ * it is, and the validator refuses it as an unknown person.
+ */
+function byHandle(ops: readonly AiOp[], people: readonly PersonRow[]): AiOp[] {
+  const jids = handleJids(people);
+  return ops.map((op) => (op.op === 'set_person_role' && op.personJid && jids.has(op.personJid) ? { ...op, personJid: jids.get(op.personJid)! } : op));
+}
 
 /**
  * Longest source quote a task keeps from a WhatsApp message (code points), as before meetings. A meeting item keeps up
@@ -318,7 +329,7 @@ export class Reconciler {
         // client, tasks and people as they are now. Nothing else runs on the database inside this transaction.
         const fresh = await getClient(q, clientId);
         const state = await this.#validationState(q, fresh, clientId, { batchIds, contextIds, messageTs, editedIds, source: 'whatsapp' });
-        const { accepted, rejected } = validateOps(result.output.ops, state);
+        const { accepted, rejected } = validateOps(byHandle(result.output.ops, people), state);
         for (const op of accepted) await this.#apply(q, fresh, op, evidence, appliedAt, rules);
         // fileUnread: the prompt showed the file as still being read. If it was read during the call, the message stays
         // queued as a "file now read" re-check. fileShown: the prompt showed the file's text as a "file now read"

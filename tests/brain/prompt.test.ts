@@ -31,6 +31,21 @@ const input = (o: Partial<PromptInput> = {}): PromptInput => ({
 });
 
 describe('buildUserContent', () => {
+  // Owner decision, 11 Nov: the AI never needs anyone's phone number. People are P1, P2, ... (set_person_role names its
+  // person by that handle, and the reconciler maps it back), so no WhatsApp id or number is sent at all.
+  it('sends no WhatsApp id or phone number: people by handle and name only, a name that is a number as Unknown', () => {
+    const numbered = [...people, person('919800000005@s.whatsapp.net', '+91 98000 00005', 'unknown')];
+    const out = buildUserContent(input({
+      people: numbered,
+      batch: [message('m9', 'Thoda aur bright', { senderJid: '919800000005@s.whatsapp.net', senderNumber: '919800000005', senderName: '+91 98000 00005' })],
+    }));
+    for (const digits of ['919800000001', '9800000001', '919800000002', '919800000005', '98000 00005', '9800000005', 's.whatsapp.net', '@lid', 'self@founder']) {
+      expect(out, digits).not.toContain(digits);
+    }
+    expect(out).toContain('- P4 · Unknown · role: unknown');
+    expect(out).toContain('P4 Unknown [unknown]');
+  });
+
   it('lays sections out in cache-friendly order', () => {
     const out = buildUserContent(input());
     const positions = ['<client_profile>', '<current_state>', '<recent_context>', '<new_messages>'].map((t) => out.indexOf(t));
@@ -43,8 +58,8 @@ describe('buildUserContent', () => {
     expect(out).toContain('Client: Sharma Interiors (code SHA)');
     expect(out).toContain('Phases: Discovery > Design > Development > Review > Launch');
     expect(out).toContain('Today (IST): 2026-10-19');
-    expect(out).toContain(`P1 · ${SHARMA_PN} · Mr. Sharma · role: client`);
-    expect(out).toContain('P3 · self@founder · Founder · role: team [founder]');
+    expect(out).toContain('P1 · Mr. Sharma · role: client');
+    expect(out).toContain('P3 · Founder · role: team [founder]');
     expect(out).toContain('- SHA-012 [us] [open] "Revise homepage banner"');
     expect(out).toContain('deadline 2026-10-18');
   });
@@ -218,7 +233,7 @@ describe('push names cannot fake a marker or a role tag (P1)', () => {
 
   it('the people list neutralises names too, and the reactions block shows no names', () => {
     const map = named('Z (re-check: edited)');
-    expect(buildUserContent(input({ people: [...map.values()] }))).toContain(`- P1 · ${SHARMA_PN} · Z ❨re-check- edited❩ · role: client`);
+    expect(buildUserContent(input({ people: [...map.values()] }))).toContain('- P1 · Z ❨re-check- edited❩ · role: client');
     const line = formatMessage(message('m9', 'x'), map, [{ targetWaId: 'm9', reactorJid: SHARMA_PN, emoji: '✅' }]);
     expect(line.endsWith('{reactions: ✅ by P1 [client]}')).toBe(true);
   });
@@ -317,7 +332,7 @@ describe('hidden characters in message text and names (F7)', () => {
     const map = named('Ra\u202Ehul\u{E0041}\u200B\uFEFF\u2067');
     expect(formatMessage(message('m9', 'hi'), map, [])).toContain(' · P1 Rahul [client]: hi');
     expect(formatMessage(message('m9', 'hi', { senderName: '\u202EMr.\u200B Sharma\uFEFF' }), new Map(), [])).toContain(' · ?? Mr. Sharma [unknown]: hi');
-    expect(buildUserContent(input({ people: [...map.values()] }))).toContain(`- P1 · ${SHARMA_PN} · Rahul · role: client`);
+    expect(buildUserContent(input({ people: [...map.values()] }))).toContain('- P1 · Rahul · role: client');
     const rx = formatMessage(message('m9', 'x'), peopleMap, [{ targetWaId: 'm9', reactorJid: RAHUL_PN, emoji: '\u202E✅\u{E0041}\u200B' }]);
     expect(rx.endsWith('{reactions: ✅ by P2 [team]}')).toBe(true);
     expect(rx).not.toMatch(HIDDEN);
@@ -409,7 +424,7 @@ describe('variation selectors cannot carry hidden text (final review)', () => {
     const map = named(`Ra${SUPPLEMENT}hul\u2764\uFE0F\uFE0F`);
     expect(formatMessage(message('m9', 'hi'), map, [])).toContain(` · P1 Rahul${HEART} [client]: hi`);
     expect(formatMessage(message('m9', 'hi', { senderName: `Mr.${BASIC} Sharma` }), new Map(), [])).toContain(' · ?? Mr. Sharma [unknown]: hi');
-    expect(buildUserContent(input({ people: [...map.values()] }))).toContain(`- P1 · ${SHARMA_PN} · Rahul${HEART} · role: client`);
+    expect(buildUserContent(input({ people: [...map.values()] }))).toContain(`- P1 · Rahul${HEART} · role: client`);
     expect(rxLine(`✅${SUPPLEMENT}`).endsWith('{reactions: ✅ by P2 [team]}')).toBe(true);
     expect(rxLine('\u2764\uFE0F\uFE0F\uFE0F').endsWith(`{reactions: ${HEART} by P2 [team]}`)).toBe(true);
 

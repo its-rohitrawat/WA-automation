@@ -607,6 +607,21 @@ describe('Reconciler', () => {
       expect(await getTaskByCode(db, 'SHA-001')).toMatchObject({ title: 'Human title', lockedFields: ['title'] });
     });
 
+    // Owner decision, 11 Nov: the prompt lists people by handle only, so the AI names a person by handle (P1), and the
+    // run maps it back to the person the prompt meant.
+    it('sets a role named by the person’s handle on the person the prompt meant', async () => {
+      const { db, r } = await setup([{ ops: [op({ op: 'set_person_role', personJid: 'P1', role: 'client', sourceMessageIds: ['m1'] })] }]);
+      await store(db, 'm1', 'hello');
+      expect(await r.run(sharma)).toEqual({ status: 'ok', accepted: 1, rejected: 0 });
+      expect((await listPeople(db, sharma)).find((p) => p.jid === SHARMA_PN)).toMatchObject({ role: 'client', roleSetBy: 'ai' });
+    });
+
+    it('rejects a role for a handle the prompt never listed', async () => {
+      const { db, r } = await setup([{ ops: [op({ op: 'set_person_role', personJid: 'P9', role: 'client', sourceMessageIds: ['m1'] })] }]);
+      await store(db, 'm1', 'hello');
+      expect(await r.run(sharma)).toEqual({ status: 'ok', accepted: 0, rejected: 1 });
+    });
+
     it('keeps a role a human set during the call', async () => {
       const { db, ai, r } = await setup([{ ops: [op({ op: 'set_person_role', personJid: SHARMA_PN, role: 'team', sourceMessageIds: ['m1'] })] }]);
       await store(db, 'm1', 'hello');
