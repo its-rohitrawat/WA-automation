@@ -639,7 +639,7 @@ button[disabled] { cursor: not-allowed; opacity: .55; }
   position: fixed; inset: 16px; margin: auto; z-index: 61; width: min(440px, calc(100vw - 32px)); height: min(900px, calc(100dvh - 32px)); display: flex; flex-direction: column;
   border-radius: 22px; overflow: hidden; background: var(--ch-wall); color: var(--ch-ink); border: 1px solid var(--line-2); box-shadow: 0 30px 80px -30px rgba(0,0,0,.8); }
 :root[data-theme="light"] .chat-sheet { --ch-wall: #EFEAE2; --ch-in: #FFFFFF; --ch-out: #D9FDD3; --ch-ink: #111B21; --ch-meta: #667781; --ch-bar: #F0F2F5; --ch-quote: rgba(11,20,26,.06);
-  --ch-pill: #FFFFFF; --ch-field: #FFFFFF; --ch-dots: rgba(11,20,26,.05); --ch-thumb: rgba(11,20,26,.2); --ch-focus: rgba(0,128,105,.5); --ch-hit: rgba(245,166,35,.9); }
+  --ch-pill: #FFFFFF; --ch-field: #FFFFFF; --ch-dots: rgba(11,20,26,.05); --ch-thumb: rgba(11,20,26,.2); --ch-focus: rgba(0,128,105,.5); --ch-hit: #B26A00; }
 /* Thin, see-through scrollbars inside the chat, not the dashboard's green ones */
 .chat-sheet * { scrollbar-width: thin; scrollbar-color: var(--ch-thumb) transparent; }
 .chat-sheet ::-webkit-scrollbar { width: 6px; height: 6px; }
@@ -669,6 +669,8 @@ button[disabled] { cursor: not-allowed; opacity: .55; }
 .ch-row.out .ch-bub { background: var(--ch-out); }
 /* A tracker Chat link's message (11 Nov 2026): lit for a few seconds, a still ring (no motion), cleared by chat.js */
 .ch-row.ch-hit .ch-bub { box-shadow: 0 0 0 3px var(--ch-hit); }
+/* Forced colours drop box-shadow: the ring is an outline there */
+@media (forced-colors: active) { .ch-row.ch-hit .ch-bub { outline: 3px solid Highlight; } }
 .ch-row.first .ch-bub::before { content: ""; position: absolute; top: 0; width: 8px; height: 13px; background: inherit; }
 .ch-row.in.first .ch-bub { border-top-left-radius: 0; } .ch-row.in.first .ch-bub::before { left: -8px; clip-path: polygon(0 0, 100% 0, 100% 100%); }
 .ch-row.out.first .ch-bub { border-top-right-radius: 0; } .ch-row.out.first .ch-bub::before { right: -8px; clip-path: polygon(0 0, 100% 0, 0 100%); }

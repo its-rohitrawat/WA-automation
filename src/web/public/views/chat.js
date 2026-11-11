@@ -331,16 +331,25 @@ async function loadOlder() {
 
 /**
  * Shows the message `id` (a tracker Chat link): reads older pages, up to JUMP_PAGES, until it is in the chat, then
- * scrolls to it and lights it up for HIT_MS. Further back than that, it says so and stays at the newest.
+ * scrolls to it and lights it up for HIT_MS. Further back than that, or not in the chat at all, it says so and stays at
+ * the newest. A page that does not load stops it quietly: loadOlder has already said why.
  * @param {number} id
  */
 async function jumpTo(id) {
   const c = chat;
   // Not armed: the first page did not load, and the chat already says so.
   if (!c || !c.armed) return;
-  for (let i = 0; i < JUMP_PAGES && !c.messages.has(id) && c.hasOlder && chat === c; i++) await loadOlder();
+  for (let i = 0; i < JUMP_PAGES && !c.messages.has(id) && c.hasOlder && chat === c; i++) {
+    const n = c.messages.size;
+    await loadOlder();
+    // Nothing came (the agent or the network is down): one toast from loadOlder, not one per page.
+    if (c.messages.size === n) return;
+  }
   if (chat !== c) return;
-  if (!c.messages.has(id)) return void toast('That message is too far back to show here.', false);
+  if (!c.messages.has(id)) {
+    // No older pages left: a wrong id, or a chat emptied with Delete chat.
+    return void toast(c.hasOlder ? 'That message is too far back to show here.' : 'That message isn’t in this chat any more.', false);
+  }
   c.hit = id;
   draw();
   // The lit row, found by its class: a deleted message's row has no data-msg.
