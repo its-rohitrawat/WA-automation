@@ -6,8 +6,9 @@ import { istShortDate, istTime } from '../util/time.ts';
 
 // A task's chat picture (owner request, 11 Nov 2026): a WhatsApp-style picture of its source message and the few around
 // it, drawn with sharp, which the agent already has. Each bubble's words come from sharp's text renderer (Pango: it
-// wraps lines and draws Hindi and emoji with the machine's fonts); the wall, the header and the bubbles are an SVG
-// underneath, holding no words. Every word from WhatsApp is escaped for Pango markup first (markup()), so a message can
+// wraps lines and draws Hindi and emoji with the machine's fonts); the wall, the header and the bubbles are raw
+// pixels underneath, holding no words. They are not an SVG because the service process blocks sharp's SVG loader
+// (src/media/image.ts: untrusted images must never reach librsvg), and drawing needs no loader. Every word from WhatsApp is escaped for Pango markup first (markup()), so a message can
 // never change how the picture looks. No I/O: the caller uploads the PNG.
 
 /** Drawn at twice the size it is shown at, so it stays sharp on a phone. */
@@ -83,13 +84,47 @@ async function words(text: string, width: number): Promise<{ png: Buffer; width:
   return { png: data, width: info.width, height: info.height };
 }
 
+const rgb = (hex: string): [number, number, number] => [parseInt(hex.slice(1, 3), 16), parseInt(hex.slice(3, 5), 16), parseInt(hex.slice(5, 7), 16)];
+
+/** An RGBA canvas, filled with one colour. */
+function canvas(width: number, height: number, color: string): Buffer {
+  const buf = Buffer.alloc(width * height * 4);
+  const [r, g, b] = rgb(color);
+  for (let i = 0; i < buf.length; i += 4) {
+    buf[i] = r;
+    buf[i + 1] = g;
+    buf[i + 2] = b;
+    buf[i + 3] = 255;
+  }
+  return buf;
+}
+
+/** A rounded rectangle painted over the canvas; a corner pixel is blended by how much of it lies inside the curve. */
+function roundRect(buf: Buffer, x: number, y: number, w: number, h: number, radius: number, color: string): void {
+  const [cr, cg, cb] = rgb(color);
+  const r = Math.min(radius, w / 2, h / 2);
+  for (let py = y; py < y + h; py++) {
+    for (let px = x; px < x + w; px++) {
+      // Distance past the nearest corner's centre, when the pixel is in a corner square.
+      const dx = Math.max(x + r - (px + 0.5), px + 0.5 - (x + w - r), 0);
+      const dy = Math.max(y + r - (py + 0.5), py + 0.5 - (y + h - r), 0);
+      const a = Math.min(1, Math.max(0, r + 0.5 - Math.hypot(dx, dy)));
+      if (a === 0) continue;
+      const i = (py * PICTURE_WIDTH + px) * 4;
+      buf[i] = Math.round(buf[i]! + (cr - buf[i]!) * a);
+      buf[i + 1] = Math.round(buf[i + 1]! + (cg - buf[i + 1]!) * a);
+      buf[i + 2] = Math.round(buf[i + 2]! + (cb - buf[i + 2]!) * a);
+    }
+  }
+}
+
 /** The picture of a window (pictureWindow) as a PNG. */
 export async function drawChatPicture(w: PictureWindow): Promise<Buffer> {
   const source = w.messages.find((m) => m.source) ?? w.messages[0];
   const sub = `${w.client.code}${source ? ` · ${istShortDate(new Date(source.at))}` : ''}`;
   const head = await words(`${span(C.headText, markup(oneLine(w.client.name, 80)), ' weight="bold"')}\n${span(C.headSub, markup(oneLine(sub, 80)), ' size="small"')}`, PICTURE_WIDTH - 2 * PAD);
   const layers: OverlayOptions[] = [{ input: head.png, top: Math.max(0, Math.round((HEADER - head.height) / 2)), left: PAD }];
-  const rects: string[] = [];
+  const boxes: { x: number; y: number; w: number; h: number; fill: string; hit: boolean }[] = [];
   let y = HEADER + PAD;
   for (const m of w.messages) {
     const t = await words(bubbleMarkup(m), BUBBLE_MAX - 2 * PAD_X);
@@ -97,11 +132,26 @@ export async function drawChatPicture(w: PictureWindow): Promise<Buffer> {
     const bh = t.height + 2 * PAD_Y;
     const x = m.mine ? PICTURE_WIDTH - PAD - bw : PAD;
     const fill = m.source ? C.hit : m.mine ? C.out : C.in;
-    rects.push(`<rect x="${x}" y="${y}" width="${bw}" height="${bh}" rx="${RADIUS}" fill="${fill}"${m.source ? ` stroke="${C.hitEdge}" stroke-width="${EDGE}"` : ''}/>`);
+    boxes.push({ x, y, w: bw, h: bh, fill, hit: m.source });
     layers.push({ input: t.png, top: y + PAD_Y, left: x + PAD_X });
     y += bh + GAP;
   }
   const height = y - GAP + PAD;
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${PICTURE_WIDTH}" height="${height}"><rect width="100%" height="100%" fill="${C.wall}"/><rect width="100%" height="${HEADER}" fill="${C.head}"/>${rects.join('')}</svg>`;
-  return sharp(Buffer.from(svg)).composite(layers).png({ compressionLevel: 9 }).toBuffer();
+  const back = canvas(PICTURE_WIDTH, height, C.wall);
+  const [hr, hg, hb] = rgb(C.head);
+  for (let i = 0; i < PICTURE_WIDTH * HEADER * 4; i += 4) {
+    back[i] = hr;
+    back[i + 1] = hg;
+    back[i + 2] = hb;
+  }
+  for (const b of boxes) {
+    // The source's border is a rounded rectangle in the edge colour with the fill drawn inside it.
+    if (b.hit) {
+      roundRect(back, b.x, b.y, b.w, b.h, RADIUS, C.hitEdge);
+      roundRect(back, b.x + EDGE, b.y + EDGE, b.w - 2 * EDGE, b.h - 2 * EDGE, RADIUS - EDGE, b.fill);
+    } else {
+      roundRect(back, b.x, b.y, b.w, b.h, RADIUS, b.fill);
+    }
+  }
+  return sharp(back, { raw: { width: PICTURE_WIDTH, height, channels: 4 } }).composite(layers).png({ compressionLevel: 9 }).toBuffer();
 }

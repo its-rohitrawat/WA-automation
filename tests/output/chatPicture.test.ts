@@ -1,3 +1,4 @@
+import '../../src/media/image.ts'; // the app blocks sharp's SVG loader this way: the picture must draw under it
 import sharp from 'sharp';
 import { describe, expect, it } from 'vitest';
 import type { PictureMessage, PictureWindow } from '../../src/control/chatQueries.ts';
