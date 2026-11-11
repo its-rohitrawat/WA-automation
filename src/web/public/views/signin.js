@@ -21,9 +21,12 @@ export function showSignin(opts = {}) {
   $('#si-denied').hidden = params.get('denied') !== '1';
   $('#si-error').hidden = params.get('error') !== 'signin';
   $('#si-out').hidden = !opts.signedOut;
-  const back = location.pathname.startsWith('/dashboard/') && location.pathname !== '/dashboard/' ? location.pathname : '/dashboard';
+  // A tracker Chat link keeps its message through sign-in (the agent accepts exactly that shape, oidc.ts CHAT_LINK).
+  const chatLink = location.pathname === '/dashboard/clients' && /^\?client=[A-Z]{3,4}&chat=\d{1,9}$/.test(location.search);
+  const back = chatLink ? `${location.pathname}${location.search}`
+    : location.pathname.startsWith('/dashboard/') && location.pathname !== '/dashboard/' ? location.pathname : '/dashboard';
   /** @type {HTMLAnchorElement} */ ($('#gbtn')).href = `/dashboard/auth/login?return=${encodeURIComponent(back)}`;
-  // The query was only for the notes; keep the address clean.
+  // The query was for the notes, or is a Chat link now kept in `back`; keep the address clean.
   if (location.search) history.replaceState(null, '', location.pathname);
   const btn = /** @type {HTMLAnchorElement} */ ($('#gbtn'));
   btn.removeAttribute('aria-busy');

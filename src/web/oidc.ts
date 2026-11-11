@@ -111,12 +111,17 @@ function sameText(a: string, b: string): boolean {
   return x.length === y.length && timingSafeEqual(x, y);
 }
 
+/** A tracker Chat link (11 Nov 2026): a client code as the chat routes take it, and a message row. Nothing else. */
+const CHAT_LINK = /^\/dashboard\/clients\?client=[A-Z]{3,4}&chat=\d{1,9}$/;
+
 /**
- * Where to go after signing in: `/dashboard`, `/dashboard/<known screen>` or `/dashboard/clients/groups`, exactly.
- * Anything else (another site, `//host`, dot segments, unknown screens, a search string) becomes `/dashboard`.
+ * Where to go after signing in: `/dashboard`, `/dashboard/<known screen>`, `/dashboard/clients/groups` or a tracker
+ * Chat link (`CHAT_LINK`), exactly. Anything else (another site, `//host`, dot segments, unknown screens, any other
+ * search string) becomes `/dashboard`.
  */
 export function safeReturnPath(raw: string | null | undefined): string {
   if (raw === '/dashboard/clients/groups') return raw;
+  if (typeof raw === 'string' && CHAT_LINK.test(raw)) return raw;
   const m = raw === null || raw === undefined ? null : /^\/dashboard\/([a-z]+)$/.exec(raw);
   if (m !== null && DASHBOARD_SCREENS.includes(m[1]!)) return raw!;
   return '/dashboard';

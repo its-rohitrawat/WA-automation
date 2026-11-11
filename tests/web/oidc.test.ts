@@ -53,6 +53,15 @@ describe('safeReturnPath', () => {
   ])('anything else becomes /dashboard: %s', (raw) => {
     expect(safeReturnPath(raw)).toBe('/dashboard');
   });
+
+  it('returns to a tracker Chat link, exactly that shape and nothing else (11 Nov 2026)', () => {
+    expect(safeReturnPath('/dashboard/clients?client=SHA&chat=1234')).toBe('/dashboard/clients?client=SHA&chat=1234');
+    for (const bad of [
+      '/dashboard/clients?client=SHA&chat=1234&x=1', '/dashboard/clients?client=sha&chat=1', '/dashboard/clients?client=SHA&chat=',
+      '/dashboard/clients?chat=1&client=SHA', '//evil.example/dashboard/clients?client=SHA&chat=1', '/dashboard/clients?client=SHAAA&chat=1',
+      '/dashboard/clients?client=SHA&chat=1234567890',
+    ]) expect(safeReturnPath(bad), bad).toBe('/dashboard');
+  });
 });
 
 describe('PendingSignIns', () => {
