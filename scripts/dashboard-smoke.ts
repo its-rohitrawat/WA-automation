@@ -489,6 +489,31 @@ async function main() {
         await p.locator('.drawer h2', { hasText: 'Acme Traders' }).waitFor();
         await p.keyboard.press('Escape');
         await p.locator('.drawer').waitFor({ state: 'detached' });
+        // The tracker's Chat link (11 Nov 2026): the chat opens at that message, even one a page back, and lights it up.
+        where = `chat link ${tag}`;
+        await openAcmeChat();
+        const code = ((await p.locator('.chat-sheet .ch-sub').textContent()) ?? '').split(' ')[0]!;
+        const newestPage = await p.locator('.chat-sheet .ch-row[data-msg]').count();
+        await p.locator('.chat-sheet .ch-body').hover();
+        for (let i = 0; i < 12; i++) {
+          await p.mouse.wheel(0, -800);
+          await p.waitForTimeout(80);
+        }
+        // The message to link to is on the page before, so the link has to read back to it.
+        await p.waitForFunction((n) => document.querySelectorAll('.chat-sheet .ch-row[data-msg]').length > n, newestPage);
+        const oldest = await p.locator('.chat-sheet .ch-row[data-msg]').first().getAttribute('data-msg');
+        await p.goto(`${base}/dashboard/clients?client=${code}&chat=${oldest}`);
+        await p.locator(`.chat-sheet .ch-row.ch-hit[data-msg="${oldest}"]`).waitFor();
+        if (new URL(p.url()).search !== '') fail(where, 'the address keeps the link after it was used');
+        await p.waitForTimeout(500); // the sheet comes in
+        await p.screenshot({ path: join(OUT, `chat-link-${tag}.png`) });
+        await p.keyboard.press('Escape');
+        // A Chat link to a client that is not in this workspace: a notice, no chat, and the address cleaned.
+        where = `chat link elsewhere ${tag}`;
+        await p.goto(`${base}/dashboard/clients?client=ZZZ&chat=1`);
+        await p.locator('.toast', { hasText: "That chat isn't in this workspace." }).waitFor();
+        if ((await p.locator('.chat-sheet').count()) !== 0) fail(where, 'a chat opened for a client not in the list');
+        if (new URL(p.url()).search !== '') fail(where, 'the address keeps the link after it was used');
 
         // Settings: switching sending on asks first, with the ban risk.
         where = `settings, sending ${tag}`;

@@ -22,6 +22,16 @@ const TASK_HEADERS = ['ID', 'Task', 'Category', 'Priority', 'Assigned to', 'Aske
  * old high, medium or low.
  */
 const ADDED_TASK_HEADERS = ['Priority level', 'Sentiment'];
+/** Appended last (11 Nov 2026), after Priority level and Sentiment: a link to the task's source in the dashboard. */
+const CHAT_HEADER = 'Chat';
+/** The Source message column (M): its quote links to the task's chat picture when there is one. */
+const SOURCE_COLUMN = TASK_HEADERS.length;
+
+/** A task's two links (11 Nov 2026): its chat picture on Drive, and its source message in the dashboard. */
+interface TaskLinks {
+  picture(t: TaskRow): string | null;
+  chat(t: TaskRow): string | null;
+}
 const STATUS_TEXT: Record<TaskRow['status'], string> = { open: 'Open', maybe_done: 'Maybe done (please check)', done: 'Done' };
 
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
@@ -96,18 +106,22 @@ export function addedTaskCells(t: TaskRow, sentiment: boolean): Cell[] {
 }
 
 function addTaskTable(
-  ws: ExcelJS.Worksheet, title: string, tasks: TaskRow[], today: string, opts: { closedOn?: boolean; autoFilter?: boolean; sentiment?: boolean } = {},
+  ws: ExcelJS.Worksheet, title: string, tasks: TaskRow[], today: string, opts: { closedOn?: boolean; autoFilter?: boolean; sentiment?: boolean; links?: TaskLinks } = {},
 ): void {
   sectionTitle(ws, title);
-  const headers = [...TASK_HEADERS, ...(opts.closedOn ? ['Closed on'] : []), ...ADDED_TASK_HEADERS];
+  const headers = [...TASK_HEADERS, ...(opts.closedOn ? ['Closed on'] : []), ...ADDED_TASK_HEADERS, CHAT_HEADER];
   const header = ws.addRow(headers);
   styleHeader(header);
   if (tasks.length === 0) noneRow(ws);
   for (const t of tasks) {
     const cells = taskCells(t, today);
     if (opts.closedOn) cells.push(t.closedOn ? isoToDate(t.closedOn) : '');
-    cells.push(...addedTaskCells(t, opts.sentiment === true));
+    cells.push(...addedTaskCells(t, opts.sentiment === true), '');
     const row = ws.addRow(cells);
+    const picture = opts.links?.picture(t) ?? null;
+    if (picture) setLink(row.getCell(SOURCE_COLUMN), String(cells[SOURCE_COLUMN - 1] || 'Picture'), picture);
+    const chat = opts.links?.chat(t) ?? null;
+    if (chat) setLink(row.getCell(headers.length), 'Open', chat);
     formatDates(row);
     row.alignment = { vertical: 'top', wrapText: true };
     if (t.status === 'done') fillRow(row, FILL_DONE, headers.length);
@@ -124,10 +138,21 @@ const DRIVE_ID = /^[A-Za-z0-9_-]{1,200}$/;
 const driveUrl = (id: string | null): string | null => (id !== null && DRIVE_ID.test(id) ? `https://drive.google.com/file/d/${id}/view` : null);
 const docUrl = (id: string | null): string | null => (id !== null && DRIVE_ID.test(id) ? `https://docs.google.com/document/d/${id}/edit` : null);
 /**
- * Client tab column widths, A to P. Excel counts a width in characters: the width of the digit 0 in the default 11 pt Calibri.
- * O and P hold the appended Priority level and Sentiment (N of an open task table holds Priority level, of Done its Closed on).
+ * Client tab column widths, A to Q. Excel counts a width in characters: the width of the digit 0 in the default 11 pt Calibri.
+ * O and P hold the appended Priority level and Sentiment (N of an open task table holds Priority level, of Done its Closed on);
+ * Q (P in the open tables) holds Chat.
  */
-const CLIENT_COLUMN_WIDTHS = [14, 38, 13, 10, 14, 16, 10, 10, 10, 32, 16, 22, 44, 13, 13, 12];
+const CLIENT_COLUMN_WIDTHS = [14, 38, 13, 10, 14, 16, 10, 10, 10, 32, 16, 22, 44, 13, 13, 12, 10];
+/** A client's task links from the view: the picture when it shows the task's current source, and the dashboard's chat. */
+function taskLinks(view: TrackerView, code: string): TaskLinks {
+  return {
+    picture: (t) => driveUrl(view.sources?.get(t.id)?.driveFileId ?? null),
+    chat: (t) => {
+      const s = view.sources?.get(t.id);
+      return s && view.dashboardUrl ? `${view.dashboardUrl}/dashboard/clients?client=${encodeURIComponent(code)}&chat=${s.messageId}` : null;
+    },
+  };
+}
 /**
  * Files received columns. Column D alone is narrow (it is the tasks' Priority column), so the description spans D to L and long
  * descriptions stay a few lines tall instead of a very tall row. The Drive link is in M.
@@ -305,7 +330,7 @@ function addToday(wb: ExcelJS.Workbook, view: TrackerView): void {
   total.border = { top: { style: 'thin' } };
 }
 
-function addClientSheet(wb: ExcelJS.Workbook, c: ClientView, today: string, sentiment: boolean): void {
+function addClientSheet(wb: ExcelJS.Workbook, c: ClientView, today: string, sentiment: boolean, links: TaskLinks): void {
   const ws = wb.addWorksheet(c.sheetName, { views: [{ state: 'frozen', ySplit: 1 }] });
   ws.columns = CLIENT_COLUMN_WIDTHS.map((width) => ({ width }));
   ws.addRow([`${c.client.name}${c.client.active ? '' : ' (inactive)'} (${c.client.code})`]).font = { bold: true, size: 16 };
@@ -325,8 +350,8 @@ function addClientSheet(wb: ExcelJS.Workbook, c: ClientView, today: string, sent
   c.client.phases.forEach((p, i) => ws.addRow([p, i < current ? '✅ Done' : i === current ? '🔄 Current' : '⏳ Upcoming']));
   ws.addRow([]);
 
-  addTaskTable(ws, 'Our pending tasks', c.usOpen, today, { autoFilter: true, sentiment });
-  addTaskTable(ws, 'Waiting on client', c.clientOpen, today, { sentiment });
+  addTaskTable(ws, 'Our pending tasks', c.usOpen, today, { autoFilter: true, sentiment, links });
+  addTaskTable(ws, 'Waiting on client', c.clientOpen, today, { sentiment, links });
 
   sectionTitle(ws, 'Decisions');
   styleHeader(ws.addRow(['Date', 'Decision', 'Source']));
@@ -341,7 +366,7 @@ function addClientSheet(wb: ExcelJS.Workbook, c: ClientView, today: string, sent
   ws.addRow([]);
 
   addFilesTable(ws, c.files);
-  addTaskTable(ws, 'Done', c.done, today, { closedOn: true, sentiment });
+  addTaskTable(ws, 'Done', c.done, today, { closedOn: true, sentiment, links });
   addMeetingsTable(ws, c.meetings);
 
   sectionTitle(ws, 'People');
@@ -388,7 +413,7 @@ export async function buildWorkbook(view: TrackerView): Promise<Buffer> {
   wb.created = view.generatedAt;
   addToday(wb, view);
   addOverview(wb, view);
-  for (const c of view.clients) addClientSheet(wb, c, view.today, view.sentiment === true);
+  for (const c of view.clients) addClientSheet(wb, c, view.today, view.sentiment === true, taskLinks(view, c.client.code));
   cleanText(wb);
   return Buffer.from((await wb.xlsx.writeBuffer()) as unknown as ArrayBuffer);
 }

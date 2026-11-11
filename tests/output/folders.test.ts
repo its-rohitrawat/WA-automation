@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { DriveNotFoundError } from '../../src/output/drive.ts';
 import { DriveRootMissingError, withClientSubfolder, type ClientSubfolder, type FolderClient } from '../../src/output/folders.ts';
 import type { Db } from '../../src/store/db.ts';
@@ -123,4 +123,30 @@ describe('two customers (Phase B): folder ids are kept per database, never share
     expect(await folderOf(b.db, b.drive, SHARMA, 'Files')).toBe(idB); // B's cache, read again: still B's
     expect(b.drive.folders).toHaveLength(3);
   });
+});
+
+it('keeps a Sources folder per client, next to Files and Meetings (chat pictures, 11 Nov 2026)', async () => {
+  const { db, drive } = await setup();
+  const sources = await folderOf(db, drive, SHARMA, 'Sources');
+  expect(await folderOf(db, drive, SHARMA, 'Sources')).toBe(sources); // made once, then saved
+  expect(await folderOf(db, drive, SHARMA, 'Files')).not.toBe(sources);
+  expect(drive.folders).toEqual(['Clients', 'Sharma Interiors', 'Sources', 'Files']);
+  expect(await getKv(db, 'drive_sources_folder:1')).toBe(sources);
+});
+
+it('makes one Clients and one client folder when Files and Sources are asked for at once for a new client, and still uploads side by side', async () => {
+  const { db, drive } = await setup();
+  // Both uploads wait at the gate: if the folder lock held put too, the second upload would never start.
+  let open!: () => void;
+  drive.gate = new Promise<void>((r) => (open = r));
+  const put = (name: string) => (folderId: string) => drive.createFile(name, 'application/octet-stream', Buffer.from('x'), folderId);
+  const files = withClientSubfolder(db, drive, SHARMA, 'Files', put('quote.pdf'));
+  const sources = withClientSubfolder(db, drive, SHARMA, 'Sources', put('SHA-001.png'));
+  await vi.waitFor(() => expect(drive.createFileCalls).toBe(2));
+  expect(drive.created).toEqual([]);
+  open();
+  await Promise.all([files, sources]);
+  expect(drive.folders).toEqual(['Clients', 'Sharma Interiors', 'Files', 'Sources']);
+  expect(drive.folderParents).toEqual(['root-1', 'folder-1', 'folder-2', 'folder-2']);
+  expect(drive.created.map((f) => [f.name, f.parentId])).toEqual([['quote.pdf', 'folder-3'], ['SHA-001.png', 'folder-4']]);
 });

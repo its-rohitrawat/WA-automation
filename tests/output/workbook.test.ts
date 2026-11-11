@@ -100,8 +100,8 @@ describe('buildWorkbook', () => {
     const sheet = async () => (await load(await buildWorkbook(await loadTrackerView(db, now, healthy)))).getWorksheet('Sharma Interiors')!;
     const headerAbove = (ws: ExcelJS.Worksheet, title: string) => (ws.getRow(findRow(ws, title).number + 1).values as unknown[]).slice(1);
     let ws = await sheet();
-    expect(headerAbove(ws, 'Our pending tasks')).toEqual(['ID', 'Task', 'Category', 'Priority', 'Assigned to', 'Asked by', 'Raised', 'Deadline', 'Age (days)', 'Latest progress', 'Reminders', 'Status', 'Source message', 'Priority level', 'Sentiment']);
-    expect(headerAbove(ws, 'Done').slice(12)).toEqual(['Source message', 'Closed on', 'Priority level', 'Sentiment']);
+    expect(headerAbove(ws, 'Our pending tasks')).toEqual(['ID', 'Task', 'Category', 'Priority', 'Assigned to', 'Asked by', 'Raised', 'Deadline', 'Age (days)', 'Latest progress', 'Reminders', 'Status', 'Source message', 'Priority level', 'Sentiment', 'Chat']);
+    expect(headerAbove(ws, 'Done').slice(12)).toEqual(['Source message', 'Closed on', 'Priority level', 'Sentiment', 'Chat']);
     // Sentiment off: the column is there and empty.
     expect([4, 14, 15].map((c) => findRow(ws, 'SHA-001').getCell(c).value)).toEqual(['High', 'Critical', '']);
     expect([4, 14, 15].map((c) => findRow(ws, 'SHA-002').getCell(c).value)).toEqual(['High', '—', '']);

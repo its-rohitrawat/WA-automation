@@ -1,3 +1,4 @@
+import { withTagNames } from '../control/chatQueries.ts';
 import { displayName, fileDescription } from '../media/labels.ts';
 import { listClients, type ClientRow } from '../store/clients.ts';
 import type { Db } from '../store/db.ts';
@@ -5,9 +6,11 @@ import { listClientFiles } from '../store/media.ts';
 import { lastMeetingByClient, listClientMeetings, listUnassigned, meetingStats } from '../store/meetings.ts';
 import { lastActivity } from '../store/messages.ts';
 import { listPeople, type PersonRow } from '../store/people.ts';
+import { sourceLinks, type SourceLink } from '../store/sourcePictures.ts';
 import { readSentimentEnabled } from '../config/prioritySettings.ts';
 import { listDecisions, listTasks, priorityRank, type DecisionRow, type TaskRow } from '../store/tasks.ts';
 import { istDate } from '../util/time.ts';
+import { mentionTags } from '../wa/groupMembers.ts';
 import { uniqueSheetNames } from './sheetNames.ts';
 
 export interface HealthLine {
@@ -80,6 +83,10 @@ export interface TrackerView {
   clients: ClientView[];
   /** Sentiment is switched on: the tracker shows each task's mood. Off or absent: the Sentiment column stays empty. */
   sentiment?: boolean;
+  /** Each task's source message and current chat picture (sourceLinks): the Source and Chat links (11 Nov 2026). */
+  sources?: Map<number, SourceLink>;
+  /** The dashboard's public address, for the Chat column; absent: the column stays empty. */
+  dashboardUrl?: string;
 }
 
 export function isOverdue(t: TaskRow, today: string): boolean {
@@ -100,8 +107,17 @@ function byClosed(a: TaskRow, b: TaskRow): number {
   return (b.closedOn ?? '').localeCompare(a.closedOn ?? '') || a.id - b.id;
 }
 
+/** The tasks with each tag in a source quote as the person's name, or @member: never the digits (11 Nov 2026). */
+async function namedQuotes(db: Db, c: ClientRow, tasks: TaskRow[]): Promise<TaskRow[]> {
+  const tagged = tasks.filter((t) => t.sourceQuote !== null && mentionTags(t.sourceQuote).size > 0);
+  if (tagged.length === 0) return tasks;
+  const named = await withTagNames(db, c, tagged.map((t) => t.sourceQuote!));
+  const byId = new Map(tagged.map((t, i) => [t.id, named[i]!]));
+  return tasks.map((t) => (byId.has(t.id) ? { ...t, sourceQuote: byId.get(t.id)! } : t));
+}
+
 /** Inactive clients stay in the workbook, marked "(inactive)". Tabs are in name order. */
-export async function loadTrackerView(db: Db, now: Date, health: HealthLine): Promise<TrackerView> {
+export async function loadTrackerView(db: Db, now: Date, health: HealthLine, o: { dashboardUrl?: string } = {}): Promise<TrackerView> {
   const today = istDate(now);
   const clients = await listClients(db, false);
   // Sheet names are assigned in id (creation) order so a new client never changes an existing suffix.
@@ -113,12 +129,14 @@ export async function loadTrackerView(db: Db, now: Date, health: HealthLine): Pr
   return {
     generatedAt: now,
     sentiment: await readSentimentEnabled(db),
+    sources: await sourceLinks(db),
+    ...(o.dashboardUrl ? { dashboardUrl: o.dashboardUrl } : {}),
     today,
     health,
     unassigned: (await listUnassigned(db, UNASSIGNED_LIMIT)).map((m) => ({ id: m.id, date: istDate(new Date(m.startedAt)), seconds: m.seconds })),
     unassignedTotal: (await meetingStats(db, now.toISOString())).unassigned,
     clients: await Promise.all(ordered.map(async (client) => {
-      const all = await listTasks(db, client.id);
+      const all = await namedQuotes(db, client, await listTasks(db, client.id));
       const notDone = all.filter((t) => t.status !== 'done');
       const last = lastMeetings.get(client.id);
       const deadlines = notDone.map((t) => t.deadline).filter((d): d is string => d !== null).sort();

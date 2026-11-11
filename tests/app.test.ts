@@ -166,14 +166,17 @@ const stopApp = (app: { stop(): Promise<void> }) => finish(stopping(app));
 const advanceCapped = (ms: number, label: string, realCapMs: number) =>
   work.until(advance(ms), { fakeMs: 0, stepMs: 1_000, realCapMs, label });
 
-/** Every row of the Sharma tab as cell texts. Call with real timers. */
+/** Every row of the Sharma tab as cell texts; a link's text (a Source quote linked to its chat picture). Call with real timers. */
 async function sharmaRows(buf: Buffer): Promise<string[][]> {
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.load(buf as unknown as ExcelJS.Buffer);
   const rows: string[][] = [];
   wb.getWorksheet('Sharma Interiors')!.eachRow((row) => {
     const cells: string[] = [];
-    row.eachCell((c) => cells.push(String(c.value ?? '')));
+    row.eachCell((c) => {
+      const v = c.value;
+      cells.push(typeof v === 'object' && v !== null && 'hyperlink' in v ? String(v.text) : String(v ?? ''));
+    });
     rows.push(cells);
   });
   return rows;
@@ -181,6 +184,17 @@ async function sharmaRows(buf: Buffer): Promise<string[][]> {
 
 const bannerTask = () =>
   op({ op: 'add_task', side: 'us', title: 'Revise homepage banner', category: 'design', priority: 'major', deadline: '2026-10-18', sourceMessageIds: ['m1'] });
+
+/**
+ * The files created in Drive, without the tasks' chat pictures (11 Nov 2026): a task whose source is stored gets one in
+ * Clients/<Client>/Sources after an upload. Drawing it is real work, so whether it is there yet depends on real time.
+ */
+function notPictures(drive: FakeDrive): FakeDrive['created'] {
+  const sources = drive.folderIds.filter((_, i) => drive.folders[i] === 'Sources');
+  return drive.created.filter((f) => !sources.includes(f.parentId));
+}
+/** Drawing a chat picture is real work (sharp), not fake time: a wait for it gets more than the default 1 s under load. */
+const SLOW_IO = { timeout: 10_000 };
 
 describe('app end to end', () => {
   beforeEach(() => {
@@ -209,7 +223,10 @@ describe('app end to end', () => {
     expect((await listTasks(db, await idOf(db, 'SHA'))).map((t) => t.code)).toEqual(['SHA-001']);
 
     await advance(60_000);
-    expect(drive.created.map((f) => f.name)).toEqual(['Tracker.xlsx']);
+    // That upload makes SHA-001's chat picture: waited for here, as in the deletion test, so none lands after the checks.
+    // The tracker is then the one file of the agent's own.
+    await vi.waitFor(() => expect(drive.created.map((f) => f.name)).toContain('SHA-001.png'), SLOW_IO);
+    expect(notPictures(drive).map((f) => f.name)).toEqual(['Tracker.xlsx']);
     expect(drive.updated.length).toBeGreaterThanOrEqual(1);
     for (const name of SEND_METHODS) expect(sock[name]).not.toHaveBeenCalled();
     await stopApp(app);
@@ -705,6 +722,10 @@ describe('app health and publishing', () => {
     await settled();
     await advance(300_000); // reconciled at 240 s and uploaded
     expect((await listTasks(db, await idOf(db, 'SHA'))).map((t) => t.code)).toEqual(['SHA-001']);
+    // That upload makes SHA-001's chat picture, which asks for another upload: both are done before the count, so the
+    // upload counted below is the deletion's alone and drive.last is a workbook, not the picture.
+    await vi.waitFor(() => expect(drive.created.map((f) => f.name)).toContain('SHA-001.png'), SLOW_IO);
+    await advance(60_000);
     const before = drive.uploads;
 
     sock.emit('messages.update', [{ key: { remoteJid: SHARMA.groupId, id: 'm1' }, update: { messageStubType: WAMessageStubType.REVOKE } } as WAMessageUpdate]);

@@ -3,8 +3,8 @@ import type { Db } from '../store/db.ts';
 import { getKv, setKv } from '../store/kv.ts';
 import { DriveNotFoundError, type DriveApi } from './drive.ts';
 
-/** The folders kept for each client in WA Agent/Clients/<Client>/: shared files, and meeting Docs (team only). */
-export type ClientSubfolder = 'Files' | 'Meetings';
+/** The folders kept for each client in WA Agent/Clients/<Client>/: shared files, meeting Docs (team only), and the tasks' chat pictures. */
+export type ClientSubfolder = 'Files' | 'Meetings' | 'Sources';
 
 export interface FolderClient {
   clientId: number;
@@ -21,11 +21,26 @@ export class DriveRootMissingError extends Error {
 
 const CLIENTS_KEY = 'drive_clients_folder';
 const clientKey = (clientId: number): string => `drive_client_folder:${clientId}`;
-const subfolderKey = (kind: ClientSubfolder, clientId: number): string =>
-  kind === 'Files' ? `drive_files_folder:${clientId}` : `drive_meetings_folder:${clientId}`;
+const SUBFOLDER_KEYS: Record<ClientSubfolder, string> = { Files: 'drive_files_folder', Meetings: 'drive_meetings_folder', Sources: 'drive_sources_folder' };
+const subfolderKey = (kind: ClientSubfolder, clientId: number): string => `${SUBFOLDER_KEYS[kind]}:${clientId}`;
 
 /**
- * The client's Files or Meetings folder, made (with any folder above it that is not saved) when no id is saved. Folders
+ * The folders being found or made, one call at a time per database. The file uploader (Files), the meetings (Meetings)
+ * and the chat pictures (Sources) can run at once, and for a client with no saved folder each would otherwise make its
+ * own Clients or Clients/<Client> folder. Only the finding or making waits its turn: put, the upload, runs outside it,
+ * so uploads still go side by side. Per database, so one customer never waits for another customer's Drive.
+ */
+const folderTurns = new WeakMap<Db, Promise<void>>();
+
+/** Runs fn once every earlier call for this database has settled. A failure does not hold up the next call. */
+function inTurn<T>(db: Db, fn: () => Promise<T>): Promise<T> {
+  const run = (folderTurns.get(db) ?? Promise.resolve()).then(fn);
+  folderTurns.set(db, run.then(() => undefined, () => undefined));
+  return run;
+}
+
+/**
+ * The client's Files, Meetings or Sources folder, made (with any folder above it that is not saved) when no id is saved. Folders
  * are never searched for: a missing id means make one. Each new folder's id is saved right after Drive makes it.
  * created: the subfolder was made just now. Throws DriveRootMissingError when the WA Agent folder is not made yet.
  */
@@ -51,7 +66,7 @@ async function subfolder(db: Db, api: DriveApi, c: FolderClient, kind: ClientSub
 }
 
 /**
- * Runs put(folderId) in the client's Files or Meetings folder, WA Agent/Clients/<Client>/<kind>/, made once and saved in
+ * Runs put(folderId) in the client's Files, Meetings or Sources folder, WA Agent/Clients/<Client>/<kind>/, made once and saved in
  * kv (see subfolder). When Drive says a folder is gone (DriveNotFoundError), a
  * folder was removed in Drive: one more level is rebuilt per retry, the subfolder first, then the client folder, then
  * Clients, and put runs again. Creating a folder inside a removed one fails the same way, so a level above the subfolder
@@ -64,6 +79,9 @@ async function subfolder(db: Db, api: DriveApi, c: FolderClient, kind: ClientSub
  *
  * Another client's folders, or this client's other subfolder, that sat in a rebuilt folder are not cleared here: their
  * own next call finds them gone and rebuilds them the same way.
+ *
+ * Finding or making the folders takes its turn per database (inTurn), so two calls at once for a new client make one
+ * client folder; put does not wait for other calls.
  */
 export async function withClientSubfolder<T>(
   db: Db,
@@ -77,7 +95,7 @@ export async function withClientSubfolder<T>(
   for (let step = 0; ; step++) {
     let fresh = false;
     try {
-      const f = await subfolder(db, api, client, kind);
+      const f = await inTurn(db, () => subfolder(db, api, client, kind));
       fresh = f.created;
       return await put(f.id);
     } catch (e) {

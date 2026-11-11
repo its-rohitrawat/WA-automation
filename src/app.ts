@@ -25,6 +25,7 @@ import type { MeetingTranscriber } from './meetings/transcribe.ts';
 import type { ClientConfigLike } from './meetings/watcher.ts';
 import { DrivePublisher, type DriveApi } from './output/drive.ts';
 import { meetingsReady } from './output/googleAuth.ts';
+import { SourcePictures } from './output/sourcePictures.ts';
 import { loadTrackerView } from './output/view.ts';
 import { buildWorkbook } from './output/workbook.ts';
 import { ReportScheduler } from './report/scheduler.ts';
@@ -153,6 +154,8 @@ export interface AppDeps {
   publishHooks?: { onPublished(): void; onFailure(f: { step: 'build' | 'drive'; auth: boolean }): void; onNewFile?(): void };
   /** With the dashboard: a newly approved group's earlier messages were read (the Activity row). A throw is logged. */
   onHistoryRead?: (r: { clientId: number; found: number }) => void;
+  /** The dashboard's public address (DASHBOARD_PUBLIC_URL, when the dashboard is on): the tracker's Chat links. */
+  dashboardUrl?: string;
 }
 
 export interface App {
@@ -163,10 +166,11 @@ export interface App {
    */
   start(): void;
   /**
-   * Starts no new AI run, file read or file upload, and stops a local speech engine run in flight (free: the voice note
-   * is tried again after the restart). Waits for AI calls and file reads in flight (up to drainMs) and
+   * Starts no new AI run, file read, file upload or chat picture, and stops a local speech engine run in flight (free:
+   * the voice note is tried again after the restart). Waits for AI calls and file reads in flight (up to drainMs) and
    * books any paid call still running at its estimate. Then flushes the publisher (the upload in flight plus one more
-   * if anything changed) and waits for the file upload in flight, up to 10 s each in parallel. Leaves no timers.
+   * if anything changed) and waits for the file upload and the chat picture in flight, up to 10 s each in parallel.
+   * Leaves no timers.
    */
   stop(): Promise<void>;
   /** Applies a new allow-list. Throws, leaving the old allow-list in place, if the config conflicts with the DB. */
@@ -250,7 +254,7 @@ export async function createApp(d: AppDeps): Promise<App> {
       buildingLine = line.text;
       const now = d.clock.now();
       buildingDay = istDate(now); // the date the Today tab is worked out for
-      return buildWorkbook(await loadTrackerView(d.db, now, line));
+      return buildWorkbook(await loadTrackerView(d.db, now, line, d.dashboardUrl ? { dashboardUrl: d.dashboardUrl } : {}));
     },
     onPublished: () => {
       publishedLine = buildingLine; // one publish runs at a time, so this is the line of the upload that just succeeded
@@ -258,6 +262,7 @@ export async function createApp(d: AppDeps): Promise<App> {
       // The first publish creates the Drive root the file uploads need. A publish also follows every role change
       // (the reconciler's, and the CLI's through its rebuild request), which can make a sender's files due.
       runUploads();
+      void pictures.run(); // the chat pictures need the WA Agent folder the first upload makes, as the files do
       health.markPublished();
       hook((h) => h.onPublished());
     },
@@ -370,6 +375,12 @@ export async function createApp(d: AppDeps): Promise<App> {
   // connections could otherwise read before the reset commits (SQLite's one connection kept them in order).
   let uploadsReady: Promise<unknown> = Promise.resolve();
   const runUploads = (): void => void uploadsReady.then(() => uploader?.run());
+  // A chat picture for each open task's source (owner request, 11 Nov 2026): after each upload and on the tick, as the
+  // files are. A new picture asks for another upload, so the tracker links it.
+  const pictures = new SourcePictures({
+    db: d.db, api: d.drive, clock: d.clock, log: d.log, onMade: () => publisher.schedule(),
+    ...(d.gateway.groupMembers ? { members: (groupId: string) => d.gateway.groupMembers!(groupId) } : {}),
+  });
   const mediaQueue = m
     ? new MediaQueue({
         db: d.db,
@@ -599,6 +610,7 @@ export async function createApp(d: AppDeps): Promise<App> {
       const unprocessed = handled(clientIdsWithUnprocessed(d.db));
       mediaQueue?.kick(); // retries that are due, and files saved by cli link
       runUploads(); // retries that are due
+      void pictures.run(); // pictures that are due again
       meetings?.tick(); // discovery when due (MEETING_POLL_MINUTES), then the next due meeting
       backfill?.tick(); // a group waiting for WhatsApp, the spend cap or its first message
       for (const clientId of await unprocessed) debouncer.ensure(clientId);
@@ -710,6 +722,7 @@ export async function createApp(d: AppDeps): Promise<App> {
       // No new upload pass or file during the drain: a file still uploading when the database closes would reach Drive
       // with no saved id and be uploaded again after the restart. The pass in flight stops before its next file.
       void uploader?.stop(0);
+      void pictures.stop(0);
       // A result we already paid for is applied, not thrown away and paid for again after a restart.
       const drainMs = d.drainMs ?? 120_000;
       await Promise.all([debouncer.drain(drainMs), mediaQueue?.drain(drainMs), meetings?.drain(drainMs)]);
@@ -721,14 +734,16 @@ export async function createApp(d: AppDeps): Promise<App> {
       } catch (err) {
         d.log.error({ err }, 'booking unfinished AI calls failed');
       }
-      // The upload in flight, then one more if results were applied during the drain; and the file upload still in
-      // flight, so its Drive id is saved before the database closes. Bounded to 10 s, in parallel.
+      // The upload in flight, then one more if results were applied during the drain; and the file upload and the chat
+      // picture still in flight, so their Drive ids are saved before the database closes. Bounded to 10 s, in parallel.
       // A morning report still sending gets the same 10 s, then up to 3 s to close its socket, then up to 2 s to record
       // its outcome (a report in its linger is still 'sent'); one cut off is marked unknown at the next start. main.ts
       // closes the databases only after stop() resolves, so after the scheduler's stop() has returned
       // (tests/appReport.test.ts). A voice-copy deletion in flight (the sweep's, or one a finished note started during
       // the drain) gets up to 5 s alongside, so the database is not closed under it.
-      await Promise.all([publisher.flush(10_000), uploader?.stop(10_000), reportRunner?.stop(10_000), waitForForgets(5_000)]);
+      await Promise.all([
+        publisher.flush(10_000), uploader?.stop(10_000), pictures.stop(10_000), reportRunner?.stop(10_000), waitForForgets(5_000),
+      ]);
       // A socket that never closes must not eat the rest of WinSW's 150 s: 120 s drain + 15 s (the morning report's
       // 10 + 3 + 2; the uploads take at most 10; the copy deletions at most 5) + 5 s here = 140 s, plus margin.
       let timer: NodeJS.Timeout | undefined;

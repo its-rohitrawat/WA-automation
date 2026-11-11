@@ -84,8 +84,8 @@ describe.runIf(onPg)('db-migrate to P7 (reading phones 2 to 5) on a real Postgre
       const owner = await db.owner();
       try {
         const lines: string[] = [];
-        expect(await migrate(owner, { now, out: (l) => lines.push(l) })).toEqual([1, 2, 3, 4, 5, 6, 7]);
-        expect(lines).toEqual(['Applied P1', 'Applied P2', 'Applied P3', 'Applied P4', 'Applied P5', 'Applied P6', 'Applied P7', CHECKED]);
+        expect(await migrate(owner, { now, out: (l) => lines.push(l) })).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+        expect(lines).toEqual(['Applied P1', 'Applied P2', 'Applied P3', 'Applied P4', 'Applied P5', 'Applied P6', 'Applied P7', 'Applied P8', CHECKED]);
         const checks = await phoneChecks(owner);
         expect(checks.map((c) => c.name)).toEqual(['wa_auth_phone_check']);
         expect(checks[0]!.def).toMatch(/phone2.*phone3.*phone4.*phone5/);
@@ -121,13 +121,13 @@ describe.runIf(onPg)('db-migrate to P7 (reading phones 2 to 5) on a real Postgre
         expect(before).toHaveLength(4);
 
         const lines: string[] = [];
-        expect(await migrate(owner, { now, out: (l) => lines.push(l) })).toEqual([6, 7]);
-        expect(lines).toEqual(['Applied P6', 'Applied P7', CHECKED]);
+        expect(await migrate(owner, { now, out: (l) => lines.push(l) })).toEqual([6, 7, 8]);
+        expect(lines).toEqual(['Applied P6', 'Applied P7', 'Applied P8', CHECKED]);
         expect((await phoneChecks(owner)).map((c) => c.name)).toEqual(['wa_auth_phone_check']);
         // Run again: nothing to apply, and the check still passes.
         const again: string[] = [];
         expect(await migrate(owner, { now, out: (l) => again.push(l) })).toEqual([]);
-        expect(again).toEqual(['Already at P7: nothing to apply', CHECKED]);
+        expect(again).toEqual(['Already at P8: nothing to apply', CHECKED]);
       } finally {
         await owner.end();
       }

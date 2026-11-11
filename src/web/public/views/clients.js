@@ -2,7 +2,7 @@
 // groups tab (/dashboard/clients/groups) is views/groups.js.
 import { ApiError, get } from '../api.js';
 import { readClientDetail, readClients } from '../contract.js';
-import { esc, icon } from '../dom.js';
+import { esc, icon, toast } from '../dom.js';
 import { ago, clock, when } from '../format.js';
 import { chatOpen, openChat, refreshChat } from './chat.js';
 import { CONNECTIONS_CHANGED, quickButton } from './connect.js';
@@ -239,6 +239,15 @@ export function mountClients(ctx) {
     };
   }
 
+  // A tracker Chat link (11 Nov 2026): ?client=<code>&chat=<message> opens that client's chat at the message, once,
+  // when the client is in the list, and says so when it is not. The address is cleaned at once, so a reload or Back
+  // does not open it again. Read after the groups tab, which keeps its own search and filters in the address.
+  const link = new URLSearchParams(location.search);
+  const linkAt = link.get('chat');
+  /** @type {{ code: string, at: number } | null} */
+  let jump = link.get('client') && linkAt !== null && /^\d{1,9}$/.test(linkAt) ? { code: link.get('client') ?? '', at: Number(linkAt) } : null;
+  if (link.has('client') || link.has('chat')) history.replaceState(null, '', location.pathname);
+
   /** @type {ReturnType<typeof readClients> | null} */
   let clients = null;
   /** @type {unknown} */
@@ -287,6 +296,14 @@ export function mountClients(ctx) {
       if (!ctx.live()) return;
       clients = next;
       error = null;
+      // The first list decides the link: its client's chat opens, or, when the client is not in this workspace (another
+      // workspace's link, or a client no longer tracked), a notice says so and the link is dropped.
+      if (jump) {
+        const { code, at } = jump;
+        jump = null;
+        if (next.some((c) => c.code === code)) openChat(code, () => void clientDrawer(code), at);
+        else toast("That chat isn't in this workspace.", false);
+      }
     } catch (e) {
       if (!ctx.live() || clients) return;
       error = e;

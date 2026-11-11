@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { PLATFORM_TABLES } from '../../../src/platform/pgSchema.ts';
 import { openDb, type Db } from '../../../src/store/db.ts';
 import {
-  CUSTOMER_TABLES, FOUNDER_TENANT_ID, P1_SQL, P2_SQL, P3_GRANTS_SQL, P3_SQL, P6_SQL, P7_SQL, PG_LATEST, PG_MIGRATIONS, SCHEMA_VERSION_FN_SQL, WEB_SESSIONS_PG_SQL,
+  CUSTOMER_TABLES, FOUNDER_TENANT_ID, P1_SQL, P2_SQL, P3_GRANTS_SQL, P3_SQL, P6_SQL, P7_SQL, P8_SQL, PG_LATEST, PG_MIGRATIONS, SCHEMA_VERSION_FN_SQL, WEB_SESSIONS_PG_SQL,
 } from '../../../src/store/pg/migrations.ts';
 
 // Until S2's test server exists (S2.7), the Postgres schema is checked against the migrated SQLite schema by reading
@@ -69,8 +69,8 @@ const pgIndexes = (sql: string) =>
   [...sql.matchAll(/CREATE INDEX (\w+) ON (\w+) \(([^)]*)\);/g)].map((m) => ({ name: m[1]!, table: m[2]!, cols: m[3]!.split(',').map((c) => c.trim()) }));
 
 const P1 = pgTables(P1_SQL);
-/** Every customer table as the migrations create it: P1's, then the assistant's chats (P6, November release). */
-const CUSTOMER_SQL = `${P1_SQL}\n${P6_SQL}`;
+/** Every customer table as the migrations create it: P1's, then the assistant's chats (P6, November release), then the chat pictures (P8). */
+const CUSTOMER_SQL = `${P1_SQL}\n${P6_SQL}\n${P8_SQL}`;
 const CUST = pgTables(CUSTOMER_SQL);
 const WEB = pgTables(WEB_SESSIONS_PG_SQL);
 
@@ -203,7 +203,7 @@ describe('the Postgres schema (P1 to P6) against the SQLite schema', () => {
     expect(SCHEMA_VERSION_FN_SQL).toContain('REVOKE ALL ON FUNCTION wa_schema_version() FROM PUBLIC;');
     expect(SCHEMA_VERSION_FN_SQL).toContain('GRANT EXECUTE ON FUNCTION wa_schema_version() TO wa_app, wa_platform;');
     expect(SCHEMA_VERSION_FN_SQL).not.toMatch(/\b(INSERT|UPDATE|DELETE)\b/);
-    expect(PG_LATEST).toBe(7);
+    expect(PG_LATEST).toBe(8);
   });
 
   it('P4 drops the founder default from web_sessions.tenant_id, and only that (P3 is never edited)', () => {
@@ -242,7 +242,7 @@ describe('the Postgres schema (P1 to P6) against the SQLite schema', () => {
   });
 
   it('P7 only widens wa_auth’s phone check to phones 2 to 5: nothing dropped but that check, no table, no grant (lane C)', () => {
-    expect(PG_MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(PG_MIGRATIONS.map((m) => m.version).slice(0, 7)).toEqual([1, 2, 3, 4, 5, 6, 7]);
     expect(PG_MIGRATIONS[6]!.sql).toBe(P7_SQL);
     expect(P7_SQL.trim().split('\n')).toEqual([
       'ALTER TABLE wa_auth DROP CONSTRAINT wa_auth_phone_check;',
@@ -256,7 +256,7 @@ describe('the Postgres schema (P1 to P6) against the SQLite schema', () => {
   it('P6 makes the assistant chats per customer, with forced row-level security on them only (November release)', () => {
     expect(PG_MIGRATIONS.map((m) => m.version).slice(0, 6)).toEqual([1, 2, 3, 4, 5, 6]);
     expect(PG_MIGRATIONS[5]!.sql).toBe(P6_SQL);
-    expect(CUSTOMER_TABLES.slice(-2)).toEqual(['assistant_chats', 'assistant_messages']);
+    expect(CUSTOMER_TABLES.slice(-3, -1)).toEqual(['assistant_chats', 'assistant_messages']);
     for (const t of ['assistant_chats', 'assistant_messages']) {
       expect(P6_SQL, t).toContain(`ALTER TABLE ${t} ENABLE ROW LEVEL SECURITY;\nALTER TABLE ${t} FORCE ROW LEVEL SECURITY;`);
       expect(P6_SQL, t).toContain(`CREATE POLICY ${t}_tenant ON ${t}\n  USING (tenant_id = current_setting('app.tenant_id', true)::uuid)\n  WITH CHECK (tenant_id = current_setting('app.tenant_id', true)::uuid);`);
@@ -265,6 +265,17 @@ describe('the Postgres schema (P1 to P6) against the SQLite schema', () => {
     // The tables come before their row security; nothing is dropped, granted or changed elsewhere.
     expect(P6_SQL.indexOf('CREATE TABLE assistant_messages')).toBeLessThan(P6_SQL.indexOf('ALTER TABLE assistant_chats ENABLE'));
     expect(P6_SQL).not.toMatch(/\b(DROP|GRANT|DELETE|UPDATE|INSERT)\b|ALTER TABLE (?!assistant_)/);
+  });
+
+  it('P8 makes the chat pictures per customer, with forced row-level security on that table only (11 Nov 2026)', () => {
+    expect(PG_MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(PG_MIGRATIONS[7]!.sql).toBe(P8_SQL);
+    expect(CUSTOMER_TABLES.at(-1)).toBe('source_pictures');
+    expect([...pgTables(P8_SQL).keys()]).toEqual(['source_pictures']);
+    expect(P8_SQL).toContain('ALTER TABLE source_pictures ENABLE ROW LEVEL SECURITY;\nALTER TABLE source_pictures FORCE ROW LEVEL SECURITY;');
+    expect(P8_SQL).toContain('UNIQUE (tenant_id, task_id)');
+    expect([...P8_SQL.matchAll(/ENABLE ROW LEVEL SECURITY/g)]).toHaveLength(1);
+    expect(P8_SQL).not.toMatch(/\b(DROP|GRANT|DELETE|UPDATE|INSERT)\b|ALTER TABLE (?!source_pictures)/);
   });
 
   it('P3 ends by taking the platform tables back from wa_app and granting wa_platform and wa_backup (A4)', () => {

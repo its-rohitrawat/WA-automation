@@ -408,4 +408,27 @@ CREATE TABLE assistant_messages (
 CREATE INDEX assistant_messages_chat ON assistant_messages(chat_id, id);
 `,
   },
+  {
+    // A chat picture for each task's source message (owner request, 11 Nov 2026): the WhatsApp-style picture in the
+    // client's Drive Sources folder that the tracker's Source cell links to. One row per task. message_id is the source
+    // message the picture shows, so a task whose source changed gets a new one. drive_file_id is set once Drive has the
+    // picture; a failure keeps its code and is tried again from next_at, later after each failed try (attempts,
+    // tried_at, next_at). Additive only.
+    version: 14,
+    sql: `
+CREATE TABLE source_pictures (
+  id INTEGER PRIMARY KEY,
+  task_id INTEGER NOT NULL UNIQUE REFERENCES tasks(id),
+  client_id INTEGER NOT NULL REFERENCES clients(id),
+  message_id INTEGER NOT NULL REFERENCES messages(id),
+  drive_file_id TEXT CHECK (drive_file_id IS NULL OR length(drive_file_id) BETWEEN 1 AND 200),
+  error_code TEXT CHECK (error_code IS NULL OR length(error_code) BETWEEN 1 AND 60),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  made_at TEXT,
+  tried_at TEXT NOT NULL,
+  next_at TEXT
+);
+CREATE INDEX source_pictures_client ON source_pictures(client_id);
+`,
+  },
 ];

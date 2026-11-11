@@ -26,15 +26,15 @@ describe.runIf(onSqlite)('openDb', () => {
     expect(idx).toEqual(expect.arrayContaining(['tasks_client_status', 'task_events_client_at', 'media_due', 'media_client', 'meetings_due', 'meetings_conference']));
   });
 
-  it('is at schema version 13 straight after openDb', () => {
+  it('is at schema version 14 straight after openDb', () => {
     const db = openDb(':memory:');
-    expect((rawOf(db).prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(13);
+    expect((rawOf(db).prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(14);
   });
 
   it('is safe to migrate twice', () => {
     const db = openDb(':memory:');
     migrate(rawOf(db));
-    expect((rawOf(db).prepare('SELECT COUNT(*) AS n FROM schema_version').get() as { n: number }).n).toBe(13);
+    expect((rawOf(db).prepare('SELECT COUNT(*) AS n FROM schema_version').get() as { n: number }).n).toBe(14);
   });
 
   it('overwrites deleted content, so wiped download details do not stay in free pages', () => {
@@ -62,7 +62,7 @@ describe.runIf(onSqlite)('migrate: a skipped migration', () => {
     const db = new Database(':memory:');
     migrate(db, withoutV6);
     expect(versions(db)).toEqual(ALL_VERSIONS.filter((v) => v !== 6));
-    expect(() => migrate(db)).toThrow('database is at v13 but v6 was never applied; restore a backup or contact the developer');
+    expect(() => migrate(db)).toThrow('database is at v14 but v6 was never applied; restore a backup or contact the developer');
     expect(versions(db)).toEqual(ALL_VERSIONS.filter((v) => v !== 6));
     expect(db.prepare("SELECT name FROM sqlite_master WHERE name = 'reports'").get()).toBeUndefined();
   });
@@ -71,7 +71,7 @@ describe.runIf(onSqlite)('migrate: a skipped migration', () => {
     const db = new Database(':memory:');
     migrate(db);
     db.prepare('DELETE FROM schema_version WHERE version IN (2, 6)').run();
-    expect(() => migrate(db)).toThrow('database is at v13 but v2, v6 were never applied');
+    expect(() => migrate(db)).toThrow('database is at v14 but v2, v6 were never applied');
   });
 
   it('applies every version in order on a fresh database, a later one after them, and a database with every version recorded migrates as before', () => {
@@ -491,6 +491,15 @@ describe.runIf(onSqlite)('migration v13 (November release: the assistant chats)'
     expect(() => msg(db, { body: 'x'.repeat(16_001) })).toThrowError(/CHECK/);
     expect(() => msg(db, { chat: 99 })).toThrowError(/FOREIGN KEY/);
     expect(db.prepare("SELECT cost_usd, cards, links, note FROM assistant_messages WHERE role = 'assistant'").get()).toEqual({ cost_usd: 0, cards: '[]', links: '[]', note: null });
+  });
+});
+
+describe.runIf(onSqlite)('migration v14 (a chat picture as each task’s source, 11 Nov 2026)', () => {
+  it('adds source_pictures only, one row per task', () => {
+    const v14 = MIGRATIONS.find((m) => m.version === 14)!;
+    expect(v14.sql).not.toMatch(/\b(DROP|DELETE|UPDATE|INSERT|RENAME|ALTER)\b/i);
+    expect(v14.sql.match(/\bCREATE TABLE (\w+)/g)).toEqual(['CREATE TABLE source_pictures']);
+    expect(v14.sql).toContain('task_id INTEGER NOT NULL UNIQUE REFERENCES tasks(id)');
   });
 });
 

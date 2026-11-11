@@ -2,7 +2,7 @@ import type { ClientRow } from '../store/clients.ts';
 import type { Db, Sql } from '../store/db.ts';
 import { getKv, setKv } from '../store/kv.ts';
 import { outboxToShow, type OutboxRow, type OutboxState } from '../store/outbox.ts';
-import { memberTagged, mentionTags, peopleOfMember, peopleTagged, tagOf, type GroupMember } from '../wa/groupMembers.ts';
+import { memberTagged, mentionTags, peopleOfMember, peopleTagged, replaceTags, tagOf, type GroupMember } from '../wa/groupMembers.ts';
 import { messageKind, oneLine, senderLabel, type ClientMessage } from './clientQueries.ts';
 
 // Open chat (owner request, 29 Oct 2026): a client's group as stored, a page at a time, newest first. Least data: a
@@ -265,6 +265,74 @@ async function tagNames(db: Db, c: ClientRow, texts: readonly string[], members?
     if (name) names[tag] = name;
   }
   return names;
+}
+
+/**
+ * The texts with every tag ("@<digits>") as the person's name, or "@member" when the agent has none: never a number,
+ * not even the one WhatsApp gives for a group member. A chat picture and the tracker go beyond the dashboard (owner
+ * decision, 11 Nov 2026). The members are asked for only when this client's people leave a tag unnamed, as tagNames does.
+ */
+export async function withTagNames(db: Db, c: ClientRow, texts: readonly string[], members?: () => Promise<readonly GroupMember[] | null>): Promise<string[]> {
+  const names = await tagNames(db, c, texts, members);
+  return texts.map((t) => replaceTags(t, (tag) => {
+    const n = names[tag];
+    // tagNames gives a group member's number, shown as "+91 …", when it has no name, so a name that looks like a number is not shown.
+    return `@${n !== undefined && !LOOKS_LIKE_NUMBER.test(n) ? n : 'member'}`;
+  }));
+}
+
+/** How many messages a chat picture shows before and after its source (owner decision, 11 Nov 2026). */
+export const PICTURE_BEFORE = 4;
+export const PICTURE_AFTER = 2;
+
+/** A message in a chat picture: as Open chat shows it, and whether it is the task's source (the highlighted one). */
+export type PictureMessage = ChatMessage & { source: boolean };
+
+export interface PictureWindow {
+  client: { code: string; name: string };
+  /** Oldest first. */
+  messages: PictureMessage[];
+}
+
+/**
+ * The messages a task's chat picture shows (owner request, 11 Nov 2026): this client's message `messageId`, the
+ * PICTURE_BEFORE before it and the PICTURE_AFTER after it (by time, then row), oldest first, as Open chat shows them.
+ * Senders and tags are by name only: someone with no name is "Member", a tag with no name "@member", never a number. A
+ * reply's quote comes with its message. Null when the message is not this client's. Parameterised reads only.
+ *
+ * After Delete chat, the messages around the source are only those its mark leaves showing, as in Open chat (chatPage).
+ * The source itself is always shown. When the mark hides the source too, it is shown alone: what Open chat shows next
+ * came after the delete, not around the source.
+ */
+export async function pictureWindow(db: Db, c: ClientRow, messageId: number, members?: () => Promise<readonly GroupMember[] | null>): Promise<PictureWindow | null> {
+  const src = await db.get<RawMessage>(`${SELECT} WHERE m.client_id = ? AND m.id = ?`, [c.id, messageId]);
+  if (!src) return null;
+  const hidden = await chatHidden(db, c.id);
+  const floor = markParams(hidden);
+  const sourceShows = hidden === null
+    || (await db.get<{ one: number }>(`SELECT 1 AS one FROM messages m WHERE m.client_id = @client AND m.id = @id AND ${AFTER_MARK}`, { client: c.id, id: src.id, ...floor })) !== undefined;
+  const before = sourceShows
+    ? await db.all<RawMessage>(
+      `${SELECT} WHERE m.client_id = @client AND (m.ts < @ts OR (m.ts = @ts AND m.id < @id)) AND ${AFTER_MARK} ORDER BY m.ts DESC, m.id DESC LIMIT @limit`,
+      { client: c.id, ts: src.at, id: src.id, limit: PICTURE_BEFORE, ...floor },
+    )
+    : [];
+  const after = sourceShows
+    ? await db.all<RawMessage>(
+      `${SELECT} WHERE m.client_id = @client AND (m.ts > @ts OR (m.ts = @ts AND m.id > @id)) AND ${AFTER_MARK} ORDER BY m.ts, m.id LIMIT @limit`,
+      { client: c.id, ts: src.at, id: src.id, limit: PICTURE_AFTER, ...floor },
+    )
+    : [];
+  const shown = [...before.reverse(), src, ...after].map((r) => {
+    const m = toMessage(r);
+    // senderLabel's "Someone" (no name, or a name that is really a number) reads as a member of the group here.
+    return { ...m, sender: !m.mine && m.sender === 'Someone' ? 'Member' : m.sender, source: r.id === src.id };
+  });
+  const named = await withTagNames(db, c, shown.flatMap((m) => [m.text, m.quote?.text ?? '']), members);
+  return {
+    client: { code: c.code, name: c.name },
+    messages: shown.map((m, i) => ({ ...m, text: named[2 * i]!, quote: m.quote ? { ...m.quote, sender: m.quote.sender === 'Someone' ? 'Member' : m.quote.sender, text: named[2 * i + 1]! } : null })),
+  };
 }
 
 /** A dashboard message as the chat shows it. */

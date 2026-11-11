@@ -184,7 +184,9 @@ describe('Phase 2a golden cases (16a and the media follow-ups)', () => {
 
   it('(e) shows the team member\'s ✅ on the client\'s delivery by handle and role only', () => {
     expect(lineOf(reaction, 'g15').endsWith(': About page ka content aapko email kar diya hai. Mil jaye to ✅ kar dena. {reactions: ✅ by P2 [team]}')).toBe(true);
-    expect(buildUserContent(reaction.input)).toContain('- P2 · 919800000002@s.whatsapp.net · Rahul · role: team [confirmed]');
+    // The people list has no WhatsApp id or number (owner decision, 11 Nov 2026, PR #19): handle, name and role only.
+    expect(buildUserContent(reaction.input)).toContain('- P2 · Rahul · role: team [confirmed]');
+    expect(buildUserContent(reaction.input)).not.toContain('919800000002');
   });
 
   it('(a) is scored on a close of the payment task citing the image', () => {

@@ -103,8 +103,8 @@ describe('GO-LIVE-postgres.md', () => {
 
   it('locks the data-folder zip to its owner: it holds the WhatsApp logins and the keys', () => {
     const zips = [...guide.matchAll(/sudo ditto -c -k --sequesterRsrc --keepParent \/opt\/wa-agent\/data "\$Z"\n\s*sudo chmod 600 "\$Z"/g)];
-    expect(zips).toHaveLength(2); // 4.3, and part 9
-    expect(guide.match(/sudo ditto /g)).toHaveLength(2);
+    expect(zips).toHaveLength(3); // 4.3, part 9 and part 11
+    expect(guide.match(/sudo ditto /g)).toHaveLength(3);
   });
 
   it('carries every phone’s session file (session-2 to session-5) in the copies and in rollback B', () => {
@@ -134,10 +134,38 @@ describe('GO-LIVE-postgres.md', () => {
     expect(part9).toContain('restore `before-november.dump` into a fresh database');
     expect(read('src/store/pg/migrations.ts')).toMatch(/\{ version: 7, sql: P7_SQL \}/);
     // The phones part: the limits as the code sets them.
-    const part10 = guide.slice(guide.indexOf('## Part 10.'));
+    const part10 = guide.slice(guide.indexOf('## Part 10.'), guide.indexOf('## Part 11.'));
     expect(part10).toContain('up to **5 reading phones**');
     expect(part10).toContain('**One link at a time.**');
     expect(read('src/wa/authState.ts')).toContain('export const MAX_PHONES = 5;');
+  });
+
+  it('updates to the chat-picture release (P8) with Part 9’s commands, in the same order (11 Nov 2026)', () => {
+    const part9 = guide.slice(guide.indexOf('## Part 9.'), guide.indexOf('## Part 10.'));
+    const part11 = guide.slice(guide.indexOf('## Part 11.'));
+    expect(guide.indexOf('## Part 10.')).toBeLessThan(guide.indexOf('## Part 11.'));
+    // Every command block is Part 9's, word for word, with only the dump's name changed; then step 7's sample picture,
+    // made in the waagent window from the code folder and opened in the normal window.
+    const blocks = (part: string) => [...part.matchAll(/```sh\n([\s\S]*?)```/g)].map((m) => m[1]!.replace(/^ +/gm, ''));
+    expect(blocks(part9).length).toBeGreaterThan(5);
+    const sample = ['cd /opt/wa-agent\nnode scripts/picture-sample.ts --out ~/picture-sample.png\n', 'open ~waagent/picture-sample.png\n'];
+    expect(blocks(part11)).toEqual([...blocks(part9).map((b) => b.replaceAll('before-november', 'before-pictures')), ...sample]);
+    const at = (s: string) => {
+      expect(part11, s).toContain(s);
+      return part11.indexOf(s);
+    };
+    // The sample comes after the new version is in (the script is part of it), and the script takes --out as written.
+    expect(at('npm ci')).toBeLessThan(at('node scripts/picture-sample.ts --out ~/picture-sample.png'));
+    expect(read('scripts/picture-sample.ts')).toContain("process.argv.indexOf('--out')");
+    expect(part11).toContain('a run makes up to 20, newest tasks first');
+    expect(part11).not.toContain('20 per update');
+    expect(at('**Do steps 1 and 2 before anything is merged.**')).toBeLessThan(at('sudo launchctl bootout system/com.wa-agent'));
+    expect(at('pg_restore -l /opt/wa-agent-db/before-pictures.dump')).toBeLessThan(at('git pull --ff-only'));
+    expect(at('`Applied P8`, then `Access rules checked: …`')).toBeLessThan(at('sudo launchctl bootstrap system /Library/LaunchDaemons/com.wa-agent.plist'));
+    expect(part11).toContain('putting the old version back is **not** enough by itself');
+    expect(part11).toContain('restore `before-pictures.dump` into a fresh database');
+    expect(read('src/store/pg/migrations.ts')).toMatch(/\{ version: 8, sql: P8_SQL \}/);
+    expect(guide).toContain('applies the migrations P1 to P8');
   });
 
   it('says when to use each way back, and never sends a secret to Claude', () => {
