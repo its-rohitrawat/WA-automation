@@ -85,6 +85,8 @@ export interface DashboardTaskDetail extends DashboardTaskRow {
   sourceMessageId: number | null;
   /** The meeting's title, for a task made from a meeting. */
   meetingTitle: string | null;
+  /** Whether the client is still active. A removed client's chat cannot be opened, so the panel offers no Open in chat. */
+  clientActive: boolean;
   /** The sender deleted the message the task came from (the quote is what was read before that). */
   sourceRevoked: boolean;
   latestProgress: string | null;
@@ -166,7 +168,7 @@ const SELECT_SQL = `SELECT t.code, t.title, c.code AS clientCode, c.name AS clie
     t.sentiment, t.category, ${SOURCE_SQL} AS source, t.updated_at AS updatedAt,
     t.id, t.source_quote AS sourceQuote, t.source_date AS sourceDate, t.source_revoked AS sourceRevoked, t.latest_progress AS latestProgress,
     t.reminder_count AS remindedCount, t.client_id AS clientId, t.meeting_id AS meetingId, t.source_wa_id AS sourceWaId,
-    ${ASKED_SQL} AS askedAt, t.created_at AS createdAt
+    ${ASKED_SQL} AS askedAt, t.created_at AS createdAt, c.active AS clientActive
   FROM tasks t JOIN clients c ON c.id = t.client_id`;
 
 interface RawRow {
@@ -197,6 +199,7 @@ interface RawRow {
   sourceWaId: string | null;
   askedAt: string;
   createdAt: string;
+  clientActive: number;
 }
 
 /** moods: sentiment is switched on; off, no task's mood leaves here. */
@@ -365,6 +368,7 @@ export async function taskDetail(db: Db, rawCode: string, now: Date): Promise<Da
     sourceSender: proof.sender,
     sourceMessageId: proof.messageId,
     meetingTitle: proof.meetingTitle,
+    clientActive: r.clientActive === 1,
     sourceRevoked: r.sourceRevoked === 1,
     latestProgress: r.latestProgress,
     remindedCount: r.remindedCount,

@@ -48,6 +48,16 @@ describe('the task panel Proof block', () => {
     expect(render(task({ sourceMessageId: null, sourceDate: null }))).not.toContain('<small></small>');
   });
 
+  it("shows a removed client's message as a plain bubble, with no Open in chat", () => {
+    const html: string = render(task({ clientActive: false }));
+    expect(html).not.toContain('data-open-source');
+    expect(html).not.toContain('Open in chat');
+    expect(html).toContain('Please fix the logo @Rahul');
+    expect(html).toContain('<small>11 Nov, 18:42</small>');
+    expect(render(task({ clientActive: false, sourceQuote: null }))).not.toContain('data-open-source');
+    expect(render(task({ clientActive: true }))).toContain('data-open-source');
+  });
+
   it('draws the button only for a real id', () => {
     expect(render(task({ sourceMessageId: undefined }))).not.toContain('data-open-source');
   });

@@ -23,6 +23,7 @@ describe('task filters in the URL', () => {
 
   it('always sends the order and the limit to the API', () => {
     expect(taskApiQuery({ sort: 'asked', dir: 'asc' })).toBe('?sort=asked&dir=asc&limit=200');
+    expect(taskApiQuery({ sort: 'asked', dir: 'asc' }, 200, 400)).toBe('?sort=asked&dir=asc&limit=200&offset=400');
     expect(taskApiQuery({ status: 'open', sort: 'owner', dir: 'desc' }, 50)).toBe('?status=open&sort=owner&dir=desc&limit=50');
   });
 

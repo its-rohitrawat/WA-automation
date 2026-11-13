@@ -50,13 +50,15 @@ export function taskQueryFromSearch(search) {
 
 /**
  * The query sent to the API: the filters, and always sort, dir and limit (the server's own default order is the
- * deadline, so the order is never left to it). @param {TaskFilter} f @param {number} [limit]
+ * deadline, so the order is never left to it). `offset`: the rows already shown, for "Show more" (left out at 0).
+ * @param {TaskFilter} f @param {number} [limit] @param {number} [offset]
  */
-export function taskApiQuery(f, limit = 200) {
+export function taskApiQuery(f, limit = 200, offset = 0) {
   const p = new URLSearchParams(taskQueryToSearch(f));
   p.set('sort', f.sort);
   p.set('dir', f.dir);
   p.set('limit', String(limit));
+  if (offset > 0) p.set('offset', String(offset));
   return `?${p.toString()}`;
 }
 

@@ -5,7 +5,7 @@ import { $, esc, icon, toast } from '../dom.js';
 import { stamp } from '../format.js';
 import { openTaskDrawer } from './taskDrawer.js';
 import { chatOpen, refreshChat } from './chat.js';
-import { empty, failed, listen, loading, moodTag, pill, setQuery } from './ui.js';
+import { empty, errorText, failed, listen, loading, moodTag, pill, setQuery } from './ui.js';
 import { deadlineText, moodLabel, priorityPill, exportFilename, sourceLabel, taskApiQuery, taskPill, taskQueryFromSearch, taskQueryToSearch } from './workLib.js';
 
 /** @typedef {import('./registry.js').ScreenCtx} ScreenCtx */
@@ -15,6 +15,7 @@ import { deadlineText, moodLabel, priorityPill, exportFilename, sourceLabel, tas
  *   status: string, overdue: boolean, priority: string | null, sentiment: string | null, source: string, askedAt: string }} TaskRow
  */
 
+const PAGE = 200; // rows per page: the first, and each "Show more"
 const SORTABLE = [['code', 'Task'], ['client', 'Client'], ['owner', 'Owner'], ['deadline', 'Deadline'], ['status', 'Status']];
 
 /** @param {ScreenCtx} ctx */
@@ -45,6 +46,7 @@ export function mountTasks(ctx) {
   let exporting = false; // the Export button draws as busy while this is set, also after a redraw
   let typing = /** @type {ReturnType<typeof setTimeout> | undefined} */ (undefined);
   let asked = 0;
+  let moreBusy = false; // "Show more" is fetching
 
   const sel = (/** @type {keyof TaskFilter} */ id, /** @type {string} */ label, /** @type {string[][]} */ opts) =>
     `<select class="sel" data-f="${id}" aria-label="${esc(label)}"><option value="">${esc(label)}</option>${opts
@@ -88,7 +90,7 @@ export function mountTasks(ctx) {
         <td data-label="Asked">${esc(stamp(t.askedAt))}</td>
         <td data-label="Source"><span class="src">${icon(src.icon, 15)}${esc(src.label)}</span></td></tr>`;
     }).join('');
-    return `<div class="card flush"><div class="tbl-wrap"><table class="tbl tbl-cards"><caption class="sr-only">Tasks</caption>${head}<tbody>${rows || `<tr><td colspan="9">${empty('No tasks match these filters.')}</td></tr>`}</tbody></table></div></div>`;
+    return `<div class="card flush"><div class="tbl-wrap"><table class="tbl tbl-cards"><caption class="sr-only">Tasks</caption>${head}<tbody>${rows || `<tr><td colspan="9">${empty('No tasks match these filters.')}</td></tr>`}</tbody></table></div>${data.rows.length < data.total ? `<div class="more-row"><button type="button" class="btn btn-ghost" data-more${moreBusy ? ' aria-disabled="true"' : ''}>${moreBusy ? 'Loading…' : 'Show more'}</button></div>` : ''}</div>`;
   };
 
   const drawTable = () => {
@@ -101,10 +103,11 @@ export function mountTasks(ctx) {
 
   const drawAll = () => ctx.redraw(`${toolbar()}<div data-region="table">${table()}</div>`);
 
-  async function load() {
+  // keep: after a change made in the panel, reload as many rows as are shown (up to the API's 500), not just the first page.
+  async function load(keep = false) {
     const mine = ++asked;
     try {
-      const r = await get(`/tasks${taskApiQuery(f)}`);
+      const r = await get(`/tasks${taskApiQuery(f, keep && data ? Math.min(Math.max(PAGE, data.rows.length), 500) : PAGE)}`);
       if (!ctx.live() || mine !== asked) return;
       data = r;
       err = null;
@@ -140,6 +143,33 @@ export function mountTasks(ctx) {
     }
   }
 
+  // The next page, appended. It shares the counter with load(): a new query (a filter, a sort, a search) makes an
+  // answer still on its way for the old one draw nothing.
+  async function showMore() {
+    if (!data || moreBusy || data.rows.length >= data.total) return;
+    const mine = ++asked;
+    const before = data.rows.length;
+    moreBusy = true;
+    drawTable();
+    let fresh = false;
+    try {
+      const r = await get(`/tasks${taskApiQuery(f, PAGE, before)}`);
+      if (!ctx.live() || mine !== asked || !data) return;
+      const have = new Set(data.rows.map((t) => t.code));
+      data = { total: r.total, rows: [...data.rows, ...r.rows.filter((t) => !have.has(t.code))] };
+      fresh = true;
+    } catch (e) {
+      if (ctx.live() && mine === asked) toast(errorText(e), false);
+    } finally {
+      moreBusy = false;
+      if (ctx.live()) drawTable();
+    }
+    if (!fresh || !ctx.live() || !data) return;
+    // Focus: the button while more remain (a keyboard user can press it again), else the first new row.
+    const target = data.rows.length < data.total ? $('[data-more]', ctx.view) : ctx.view.querySelectorAll('tbody tr[data-task]')[before];
+    /** @type {HTMLElement | null} */ (target)?.focus();
+  }
+
   const changed = () => {
     setQuery(taskQueryToSearch(f));
     void load();
@@ -169,7 +199,7 @@ export function mountTasks(ctx) {
     if (chatOpen()) await refreshChat();
   }, 30_000);
 
-  const open = (/** @type {string} */ code) => openTaskDrawer(code, { onChange: () => void load() });
+  const open = (/** @type {string} */ code) => openTaskDrawer(code, { onChange: () => void load(true) });
   const stop = listen(ctx.view, {
     input: (e) => {
       const el = /** @type {HTMLInputElement} */ (e.target);
@@ -193,6 +223,7 @@ export function mountTasks(ctx) {
     },
     click: (e) => {
       const t = /** @type {Element} */ (e.target);
+      if (t.closest('[data-more]')) return void showMore();
       if (t.closest('[data-export]')) return void exportExcel();
       const sort = /** @type {HTMLElement | null} */ (t.closest('[data-sort]'));
       if (sort) {

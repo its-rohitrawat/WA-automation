@@ -445,6 +445,16 @@ describe('asked at and proof', () => {
     expect(await taskDetail(db, await task(db, { sourceQuote: 'plain words' }), now)).toMatchObject({ sourceQuote: 'plain words' });
   });
 
+  it("says whether the task's client is still active", async () => {
+    const { db } = await seeded();
+    const sha = await task(db);
+    const meh = await task(db, { client: 'MEH' });
+    expect(await taskDetail(db, sha, now)).toMatchObject({ clientActive: true });
+    await db.run("UPDATE clients SET active = 0 WHERE code = 'MEH'");
+    expect(await taskDetail(db, meh, now)).toMatchObject({ clientActive: false });
+    expect(await taskDetail(db, sha, now)).toMatchObject({ clientActive: true });
+  });
+
   it('a meeting task carries the meeting title and no message id', async () => {
     const { db, ids } = await seeded();
     const meetingId = (await insertFound(db, {

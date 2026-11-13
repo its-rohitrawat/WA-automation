@@ -11,7 +11,7 @@ import { deadlineText, moodLabel, priorityPill, prioritySourceText, sourceLabel,
  * @typedef {{ code: string, title: string, client: { code: string, name: string }, owner: string | null, askedBy: string | null,
  *   deadline: string | null, status: string, overdue: boolean, priority: string | null, prioritySource: string | null,
  *   priorityKeyword: string | null, sentiment: string | null, source: string, sourceQuote: string | null,
- *   sourceDate: string | null, sourceSender: string | null, sourceMessageId: number | null, meetingTitle: string | null,
+ *   sourceDate: string | null, sourceSender: string | null, sourceMessageId: number | null, clientActive?: boolean, meetingTitle: string | null,
  *   askedAt: string, createdAt: string, sourceRevoked: boolean, latestProgress: string | null, remindedCount: number,
  *   history: { at: string, actor: 'agent' | 'owner', what: string }[] }} TaskDetail
  */
@@ -26,6 +26,8 @@ function proof(t) {
   const found = `Found by the agent: ${esc(stamp(t.createdAt))}`;
   if (t.source === 'dashboard') return `${head}<p class="muted-p">Added by you on ${esc(stamp(t.createdAt))}</p>`;
   const stored = typeof t.sourceMessageId === 'number';
+  // A removed client's chat cannot be opened: its message shows as a plain bubble.
+  const canOpen = stored && t.clientActive !== false;
   if (t.source === 'meeting' && !stored) {
     // Said in the meeting, not by a chat member: no sender name.
     const bubble = t.sourceQuote
@@ -39,10 +41,10 @@ function proof(t) {
   const inner = `<b class="q-who">${esc(t.sourceSender ?? 'Member')}</b>${esc(t.sourceQuote)}${sent || t.sourceRevoked ? `<small>${esc(sent)}${t.sourceRevoked ? `${sent ? ' · ' : ''}the sender deleted this message` : ''}</small>` : ''}`;
   let bubble = '';
   if (t.sourceQuote) {
-    bubble = stored
+    bubble = canOpen
       ? `<button type="button" class="quote quote-btn" data-open-source>${inner}<span class="q-open">${icon('bubble', 14)}Open in chat</span></button>`
       : `<div class="quote">${inner}</div>`;
-  } else if (stored) {
+  } else if (canOpen) {
     bubble = `<p><button type="button" class="btn btn-ghost btn-sm" data-open-source>${icon('bubble', 14)}Open in chat</button></p>`;
   }
   const also = t.source === 'meeting' && t.meetingTitle ? `<p class="muted-p">Also discussed in the meeting ${esc(t.meetingTitle)}</p>` : '';
@@ -136,7 +138,7 @@ export function openTaskDrawer(code, o, focusSource = false) {
       // The chat is its own layer, so the panel is closed first (two layers would fight over Tab and Escape). Back
       // opens the panel again with the same options, and focus goes back to the row, then to the Open in chat button.
       const id = t?.sourceMessageId;
-      if (!t || typeof id !== 'number') return;
+      if (!t || typeof id !== 'number' || t.clientActive === false) return;
       closeDrawer(true);
       openChat(t.client.code, () => {
         /** @type {HTMLElement | null} */ (rowAgain())?.focus();
