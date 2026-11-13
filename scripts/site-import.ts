@@ -10,8 +10,8 @@
 // was. Otherwise site/ is replaced as a whole, so no file of an older build is left behind. It prints the inline-script
 // hashes the site's CSP will carry (the agent works them out itself when it starts).
 //
-// Due on or after 6 Nov 2026: upgrade the website's Next.js (16.4.0 to 16.4.3; owner decision, see docs/GO-LIVE.md
-// step 5), rebuild it there with `npm run build`, then run this again.
+// Done 13 Nov 2026: the website's Next.js is on 16.4.3 (from 16.4.0; owner decision, see docs/GO-LIVE.md step 5), and
+// site/ was rebuilt and imported with it. After a later upgrade, rebuild there with `npm run build`, then run this again.
 import { lstat, readdir, readFile, rename, rm, cp, stat } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { extname, join, relative, resolve, sep } from 'node:path';
