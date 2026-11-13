@@ -175,6 +175,24 @@ async function tasksProof(p: Page, where: string, tag: string, phone: boolean) {
   for (const want of [`Asked: ${istStamp(detail.askedAt)}`, `Found by the agent: ${istStamp(detail.createdAt)}`]) if (!body.includes(want)) fail(where, `the Proof lacks "${want}"`);
   await p.waitForTimeout(500); // the drawer's slide-in, so the picture shows it at rest
   await p.screenshot({ path: join(OUT, `task-proof-${tag}.png`) });
+  // The chat picture: loaded in the panel, its link opens the PNG, and the Drive copy is linked.
+  const img = p.locator('.drawer [data-src-fig] img');
+  if ((await img.count()) !== 1) fail(where, 'the chat task panel has no picture');
+  await p.waitForFunction(() => {
+    const i = document.querySelector('.drawer [data-src-fig] img') as HTMLImageElement | null;
+    return !!i && i.complete && i.naturalWidth > 0;
+  }, undefined, { timeout: 20_000 }).catch(() => fail(where, 'the picture did not load in the panel'));
+  const figLink = (await p.locator('.drawer a.src-pic').getAttribute('href')) ?? '';
+  const png = (await p.evaluate(async (u) => {
+    const r = await fetch(u);
+    return { status: r.status, type: r.headers.get('content-type') };
+  }, figLink)) as { status: number; type: string | null };
+  if (png.status !== 200 || png.type !== 'image/png') fail(where, `the picture link answers ${png.status} ${png.type}`);
+  const driveHref = await p.locator('.drawer .src-pic-fig a', { hasText: 'Open on Drive' }).getAttribute('href');
+  if (driveHref !== 'https://drive.google.com/file/d/FakePictureDriveId1234/view') fail(where, `the Drive link is "${driveHref}"`);
+  await p.locator('.drawer .src-pic-fig').scrollIntoViewIfNeeded();
+  await p.waitForTimeout(500);
+  await p.screenshot({ path: join(OUT, `task-picture-${tag}.png`) });
   await bubble.click();
   const lit = p.locator('.chat-sheet .ch-row.ch-hit');
   await lit.waitFor();
@@ -194,11 +212,22 @@ async function tasksProof(p: Page, where: string, tag: string, phone: boolean) {
   const meet = (await p.locator('.drawer .dr-body').textContent()) ?? '';
   for (const want of ['From the meeting Kickoff call', 'Found by the agent', 'Said in the meeting']) if (!meet.includes(want)) fail(where, `the meeting Proof of ${meetCode} lacks "${want}"`);
   if ((await p.locator('.drawer [data-open-source]').count()) !== 0) fail(where, 'a meeting task offers Open in chat');
+  if ((await p.locator('.drawer [data-src-fig]').count()) !== 0) fail(where, 'a meeting task shows a chat picture');
+  const notes = await p.locator('.drawer a', { hasText: 'Open the meeting notes' }).getAttribute('href');
+  if (!notes?.startsWith('https://docs.google.com/')) fail(where, `the notes link is "${notes}"`);
+  await p.locator('.drawer button', { hasText: 'See the meeting' }).click();
+  await p.waitForURL((u) => u.pathname === '/dashboard/meetings');
+  await p.locator('.drawer .dr-head h2', { hasText: 'Kickoff call' }).waitFor();
+  await p.waitForFunction(() => location.search === '').catch(() => fail(where, `the address was not cleaned: ${p.url()}`));
   await p.keyboard.press('Escape');
   await p.locator('.drawer').waitFor({ state: 'detached' });
+  await p.goBack();
+  await p.waitForURL((u) => u.pathname === '/dashboard/tasks');
+  await p.locator('#view tbody tr[data-task]').first().waitFor();
 
   await openTask('Call the printer (added on the dashboard)');
   if (!((await p.locator('.drawer .dr-body').textContent()) ?? '').includes('Added by you on')) fail(where, 'the dashboard task does not say who added it');
+  if ((await p.locator('.drawer [data-src-fig]').count()) !== 0) fail(where, 'a dashboard task shows a chat picture');
   await p.keyboard.press('Escape');
   await p.locator('.drawer').waitFor({ state: 'detached' });
 }

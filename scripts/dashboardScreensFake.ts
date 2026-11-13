@@ -208,7 +208,13 @@ async function seedProofTasks(db: Db): Promise<void> {
     recording: 'conferenceRecords/p/recordings/q', conference: 'conferenceRecords/p', driveFileId: 'd2', meetingCode: null, title: 'Kickoff call',
     startedAt: started, endedAt: null, attendees: [], participants: [], clientId: 1, matchKind: null, status: 'done', driveSeconds: 1800, createdAt: started,
   });
+  // The saved chat picture of the footer task: a current row (its message is the task's source) with a fake Drive id.
+  const footer = await db.get<{ id: number }>("SELECT id FROM tasks WHERE title = 'Fix the footer on mobile (from the chat)'");
+  const footerMsg = await db.get<{ id: number }>("SELECT id FROM messages WHERE wa_id = 'FAKEMSG0000000000009'");
+  if (!footer || !footerMsg) throw new Error('the footer task or its message is missing');
+  await db.run('INSERT INTO source_pictures (task_id, client_id, message_id, drive_file_id, attempts, made_at, tried_at) VALUES (?, 1, ?, ?, 1, ?, ?)', [footer.id, footerMsg.id, 'FakePictureDriveId1234', foundAt, foundAt]);
   await createTask(db, { ...base, title: 'Redo the logo (from the meeting)', raisedOn: istDay(started), sourceQuote: 'We agreed to redo the logo this week', sourceDate: istDay(started), sourceWaId: null, origin: 'meeting', meetingId }, day(1.1));
+  await db.run('UPDATE meetings SET doc_file_id = ? WHERE id = ?', ['FakeKickoffDocId1234', meetingId]);
   await createTask(db, { ...base, title: 'Call the printer (added on the dashboard)', raisedOn: istDay(day(0.5)), sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'dashboard' }, day(0.5));
 }
 
