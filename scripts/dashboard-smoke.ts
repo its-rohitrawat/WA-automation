@@ -173,6 +173,7 @@ async function tasksProof(p: Page, where: string, tag: string, phone: boolean) {
   for (const want of ['Ajay Jain', 'Please check the footer on mobile', istStamp(detail.askedAt), 'Open in chat']) if (!text.includes(want)) fail(where, `the bubble lacks "${want}": ${text}`);
   const body = (await p.locator('.drawer .dr-body').textContent()) ?? '';
   for (const want of [`Asked: ${istStamp(detail.askedAt)}`, `Found by the agent: ${istStamp(detail.createdAt)}`]) if (!body.includes(want)) fail(where, `the Proof lacks "${want}"`);
+  await p.waitForTimeout(500); // the drawer's slide-in, so the picture shows it at rest
   await p.screenshot({ path: join(OUT, `task-proof-${tag}.png`) });
   await bubble.click();
   const lit = p.locator('.chat-sheet .ch-row.ch-hit');
