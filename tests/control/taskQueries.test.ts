@@ -7,6 +7,7 @@ import type { Db } from '../../src/store/db.ts';
 import { insertMedia, messageRowId } from '../../src/store/media.ts';
 import { insertFound } from '../../src/store/meetings.ts';
 import { insertMessage } from '../../src/store/messages.ts';
+import { upsertPerson } from '../../src/store/people.ts';
 import { createTask, recordEvent, type NewTask } from '../../src/store/tasks.ts';
 import { idOf, NOW, row, seeded, seededDb } from '../helpers/db.ts';
 
@@ -66,7 +67,7 @@ describe('listDashboardTasks', () => {
       total: 1,
       rows: [{
         code: 'SHA-001', title: 'Logo', client: { code: 'SHA', name: 'Sharma Interiors' }, side: 'us', owner: 'Rahul', askedBy: 'Mr Sharma',
-        deadline: '2026-10-25', status: 'open', overdue: false, priority: 'major', prioritySource: 'ai', sentiment: null, category: 'design', source: 'whatsapp', updatedAt: NOW,
+        deadline: '2026-10-25', status: 'open', overdue: false, priority: 'major', prioritySource: 'ai', sentiment: null, category: 'design', source: 'whatsapp', askedAt: NOW, createdAt: NOW, updatedAt: NOW,
       }],
     });
   });
@@ -362,5 +363,85 @@ describe('listDashboardTasks: priority levels and sentiment', () => {
     await sentimentOn(db);
     expect((await listDashboardTasks(db, q({}), now)).rows[0]).toMatchObject({ sentiment: 'frustrated' });
     expect(await taskDetail(db, code, now)).toMatchObject({ sentiment: 'frustrated' });
+  });
+});
+
+describe('asked at and proof', () => {
+  const msg = (db: Db, clientId: number, waId: string, ts: string, over: { jid?: string; fromMe?: boolean; text?: string } = {}) =>
+    insertMessage(db, { waId, clientId, senderJid: over.jid ?? 'j1', senderNumber: null, senderName: null, fromMe: over.fromMe ?? false, ts, text: over.text ?? 'hi', quotedWaId: null, mediaType: null });
+  const setCreated = (db: Db, code: string, at: string) => db.run('UPDATE tasks SET created_at = ? WHERE code = ?', [at, code]);
+  const rowOf = async (db: Db, code: string) => (await listDashboardTasks(db, q({ client: code.slice(0, 3) }), now)).rows.find((r) => r.code === code)!;
+
+  it('askedAt is the message time, the meeting start, or the creation time; createdAt is always the creation time', async () => {
+    const { db, ids } = await seeded();
+    await msg(db, ids.sharma, 'A1', '2026-10-05T04:00:00.000Z');
+    const fromMessage = await task(db, { sourceWaId: 'A1' });
+    const meetingId = (await insertFound(db, {
+      recording: 'conferenceRecords/a/recordings/b', conference: 'conferenceRecords/a', driveFileId: 'd1', meetingCode: null, title: 'Sync call',
+      startedAt: '2026-10-06T05:00:00.000Z', endedAt: null, attendees: [], participants: [], clientId: ids.sharma, matchKind: 'title', status: 'done', driveSeconds: 60, createdAt: NOW,
+    }))!;
+    const fromMeeting = await task(db, { origin: 'meeting', meetingId });
+    const fromDashboard = await task(db, { origin: 'dashboard' });
+    const gone = await task(db, { sourceWaId: 'NOT-STORED' });
+    for (const c of [fromMessage, fromMeeting, fromDashboard, gone]) await setCreated(db, c, '2026-10-12T06:00:00.000Z');
+    expect(await rowOf(db, fromMessage)).toMatchObject({ askedAt: '2026-10-05T04:00:00.000Z', createdAt: '2026-10-12T06:00:00.000Z' });
+    expect(await rowOf(db, fromMeeting)).toMatchObject({ askedAt: '2026-10-06T05:00:00.000Z', createdAt: '2026-10-12T06:00:00.000Z' });
+    expect(await rowOf(db, fromDashboard)).toMatchObject({ askedAt: '2026-10-12T06:00:00.000Z' });
+    expect(await rowOf(db, gone)).toMatchObject({ askedAt: '2026-10-12T06:00:00.000Z' });
+  });
+
+  it("another client's message with the same wa_id is not the source", async () => {
+    const { db, ids } = await seeded();
+    await msg(db, ids.mehta, 'SAME', '2026-10-01T04:00:00.000Z');
+    const code = await task(db, { sourceWaId: 'SAME' });
+    await setCreated(db, code, '2026-10-12T06:00:00.000Z');
+    expect((await rowOf(db, code)).askedAt).toBe('2026-10-12T06:00:00.000Z');
+    expect(await taskDetail(db, code, now)).toMatchObject({ sourceMessageId: null, sourceSender: null });
+  });
+
+  it('sort=asked orders by asked at in both directions, then the code', async () => {
+    const { db, ids } = await seeded();
+    await msg(db, ids.sharma, 'M1', '2026-10-08T04:00:00.000Z');
+    await msg(db, ids.sharma, 'M2', '2026-10-03T04:00:00.000Z');
+    const late = await task(db, { sourceWaId: 'M1' });
+    const early = await task(db, { sourceWaId: 'M2' });
+    const tieA = await task(db);
+    const tieB = await task(db);
+    for (const c of [tieA, tieB]) await setCreated(db, c, '2026-10-08T04:00:00.000Z');
+    const sort = async (dir: string) => codes(await listDashboardTasks(db, q({ sort: 'asked', dir }), now));
+    expect(await sort('asc')).toEqual([early, late, tieA, tieB]);
+    expect(await sort('desc')).toEqual([late, tieA, tieB, early]); // equal times keep the code order
+    expect(q({}).sort).toBe('deadline');
+  });
+
+  it('the sender is a name, Member, or null, never digits; the quote has tags as names', async () => {
+    const { db, ids } = await seeded();
+    await upsertPerson(db, { clientId: ids.sharma, jid: 'named@s.whatsapp.net', number: null, name: 'Rahul Verma', fromMe: false });
+    await upsertPerson(db, { clientId: ids.sharma, jid: 'digits@s.whatsapp.net', number: null, name: '+91 98000 00001', fromMe: false });
+    await msg(db, ids.sharma, 'N1', '2026-10-05T04:00:00.000Z', { jid: 'named@s.whatsapp.net' });
+    await msg(db, ids.sharma, 'N2', '2026-10-05T05:00:00.000Z', { jid: 'digits@s.whatsapp.net' });
+    await msg(db, ids.sharma, 'N3', '2026-10-05T06:00:00.000Z', { jid: 'nobody@s.whatsapp.net' });
+    const named = await task(db, { sourceWaId: 'N1', sourceQuote: 'please ask @919800000001 now' });
+    const digits = await task(db, { sourceWaId: 'N2' });
+    const nobody = await task(db, { sourceWaId: 'N3' });
+    const notStored = await task(db, { sourceWaId: 'GONE' });
+    const dashboard = await task(db, { origin: 'dashboard' });
+    const senders = Object.fromEntries(await Promise.all([named, digits, nobody, notStored, dashboard].map(async (c) => [c, (await taskDetail(db, c, now))!.sourceSender])));
+    expect(senders).toEqual({ [named]: 'Rahul Verma', [digits]: 'Member', [nobody]: 'Member', [notStored]: null, [dashboard]: null });
+    const d = (await taskDetail(db, named, now))!;
+    expect(d.sourceMessageId).toBe(await messageRowId(db, ids.sharma, 'N1'));
+    expect(d.sourceQuote).toBe('please ask @member now');
+    expect(d.sourceQuote).not.toMatch(/\d{7}/);
+  });
+
+  it('a meeting task carries the meeting title and no message id', async () => {
+    const { db, ids } = await seeded();
+    const meetingId = (await insertFound(db, {
+      recording: 'conferenceRecords/a/recordings/b', conference: 'conferenceRecords/a', driveFileId: 'd1', meetingCode: null, title: 'Kickoff',
+      startedAt: NOW, endedAt: null, attendees: [], participants: [], clientId: ids.sharma, matchKind: 'title', status: 'done', driveSeconds: 60, createdAt: NOW,
+    }))!;
+    const code = await task(db, { origin: 'meeting', meetingId });
+    expect(await taskDetail(db, code, now)).toMatchObject({ meetingTitle: 'Kickoff', sourceMessageId: null, sourceSender: null });
+    expect(await taskDetail(db, await task(db), now)).toMatchObject({ meetingTitle: null });
   });
 });
