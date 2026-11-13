@@ -2,11 +2,13 @@ import { readSentimentEnabled } from '../config/prioritySettings.ts';
 import type { Db } from '../store/db.ts';
 import { PRIORITIES, TASK_FIELDS, type Category, type Priority, type PrioritySource, type Sentiment, type Side, type TaskField } from '../store/tasks.ts';
 import { getClient } from '../store/clients.ts';
+import { driveUrl } from '../output/workbook.ts';
 import { istDate } from '../util/time.ts';
 import { mentionTags } from '../wa/groupMembers.ts';
 import { withTagNames } from './chatQueries.ts';
 import { senderLabel } from './clientQueries.ts';
 import { ControlError } from './errors.ts';
+import { meetingDocUrl } from './meetingQueries.ts';
 
 // The dashboard's Tasks screen (D4 Task 1): plain parameterised SQL. Titles, quotes and progress notes are untrusted
 // text: they go back as JSON strings for the browser to show as text, never as HTML. History is told in fixed words and
@@ -85,6 +87,12 @@ export interface DashboardTaskDetail extends DashboardTaskRow {
   sourceMessageId: number | null;
   /** The meeting's title, for a task made from a meeting. */
   meetingTitle: string | null;
+  /** The meeting's row number, for See the meeting; null for a task not made from a meeting. */
+  meetingId: number | null;
+  /** The meeting's Google Doc link (notes), when the meeting has a doc. */
+  meetingDocUrl: string | null;
+  /** The Drive link of the saved chat picture, only when that picture is of the task's current source message. */
+  pictureDriveUrl: string | null;
   /** Whether the client is still active. A removed client's chat cannot be opened, so the panel offers no Open in chat. */
   clientActive: boolean;
   /** The sender deleted the message the task came from (the quote is what was read before that). */
@@ -335,18 +343,25 @@ function historyWords(op: string, actor: 'agent' | 'owner', detail: string, sour
  * The proof of a task: its source message (this client's only) with the sender as the chat shows senders (the person's
  * name, else "Member", never a number), the quote with tags as names, and a meeting's title. Parameterised reads only.
  */
-async function sourceProof(db: Db, r: RawRow): Promise<{ quote: string | null; sender: string | null; messageId: number | null; meetingTitle: string | null }> {
+async function sourceProof(db: Db, r: RawRow): Promise<{ quote: string | null; sender: string | null; messageId: number | null; meetingTitle: string | null; meetingDocUrl: string | null; pictureDriveUrl: string | null }> {
   const msg = r.sourceWaId === null ? undefined : await db.get<{ id: number; fromMe: number; name: string | null }>(
     `SELECT m.id, m.from_me AS fromMe, p.name FROM messages m LEFT JOIN people p ON p.client_id = m.client_id AND p.jid = m.sender_jid
       WHERE m.client_id = @client AND m.wa_id = @waId`,
     { client: r.clientId, waId: r.sourceWaId },
   );
   const sender = msg ? senderLabel(msg.name, msg.fromMe === 1) : null;
-  const meeting = r.meetingId === null ? undefined : await db.get<{ title: string }>('SELECT title FROM meetings WHERE id = @id', { id: r.meetingId });
+  const meeting = r.meetingId === null ? undefined : await db.get<{ title: string; docFileId: string | null }>('SELECT title, doc_file_id AS docFileId FROM meetings WHERE id = @id', { id: r.meetingId });
+  // The saved picture counts only while it shows the task's current source message (the source can change).
+  const pic = msg === undefined ? undefined : await db.get<{ driveFileId: string | null; messageId: number }>(
+    'SELECT drive_file_id AS driveFileId, message_id AS messageId FROM source_pictures WHERE task_id = @task', { task: r.id });
   const quote = r.sourceQuote !== null && mentionTags(r.sourceQuote).size > 0
     ? (await withTagNames(db, await getClient(db, r.clientId), [r.sourceQuote]))[0]!
     : r.sourceQuote;
-  return { quote, sender: sender === 'Someone' ? 'Member' : sender, messageId: msg?.id ?? null, meetingTitle: meeting ? meeting.title : null };
+  return {
+    quote, sender: sender === 'Someone' ? 'Member' : sender, messageId: msg?.id ?? null, meetingTitle: meeting ? meeting.title : null,
+    meetingDocUrl: meeting ? meetingDocUrl(meeting.docFileId) : null,
+    pictureDriveUrl: pic && msg && Number(pic.messageId) === Number(msg.id) ? driveUrl(pic.driveFileId) : null,
+  };
 }
 
 /** One task with its quote, progress, reminders and history; undefined when no task has that code. */
@@ -368,6 +383,9 @@ export async function taskDetail(db: Db, rawCode: string, now: Date): Promise<Da
     sourceSender: proof.sender,
     sourceMessageId: proof.messageId,
     meetingTitle: proof.meetingTitle,
+    meetingId: r.meetingId === null ? null : Number(r.meetingId),
+    meetingDocUrl: proof.meetingDocUrl,
+    pictureDriveUrl: proof.pictureDriveUrl,
     clientActive: r.clientActive === 1,
     sourceRevoked: r.sourceRevoked === 1,
     latestProgress: r.latestProgress,

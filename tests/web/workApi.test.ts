@@ -1,19 +1,28 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import * as chatPicture from '../../src/output/chatPicture.ts';
 import type { Db } from '../../src/store/db.ts';
 import { insertFound } from '../../src/store/meetings.ts';
+import { insertMessage } from '../../src/store/messages.ts';
 import { createTask, getTaskByCode } from '../../src/store/tasks.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { AuditLog } from '../../src/web/audit.ts';
 import { registerWorkApi } from '../../src/web/routes/work.ts';
-import { NOW, row, rows, seeded } from '../helpers/db.ts';
+import { NOW, row, rows, seeded, SHARMA } from '../helpers/db.ts';
+
+const SHARMA_GROUP = SHARMA.groupId;
 import { bootDashboard, OWNER } from '../helpers/web.ts';
+
+vi.mock('../../src/output/chatPicture.ts', async (orig) => {
+  const real = await orig<typeof import('../../src/output/chatPicture.ts')>();
+  return { ...real, drawChatPicture: vi.fn(real.drawChatPicture) };
+});
 
 const closers: (() => Promise<void>)[] = [];
 afterEach(async () => {
   for (const c of closers.splice(0)) await c();
 });
 
-async function boot(o: { paused?: boolean; actionCapacity?: number; exportTimeoutMs?: number; failAudit?: { on: boolean }; book?: (() => Promise<Buffer>) | null } = {}) {
+async function boot(o: { pictureTimeoutMs?: number; groupMembers?: (g: string) => Promise<never[] | null>; connected?: (g: string) => boolean; paused?: boolean; actionCapacity?: number; exportTimeoutMs?: number; failAudit?: { on: boolean }; book?: (() => Promise<Buffer>) | null } = {}) {
   const { db, ids } = await seeded();
   const clock = manualClock(NOW);
   await createTask(db, { clientId: ids.sharma, side: 'us', title: 'Banner', category: 'design', priority: 'major', assignedTo: null, askedBy: null, raisedOn: '2026-10-10',
@@ -27,15 +36,17 @@ async function boot(o: { paused?: boolean; actionCapacity?: number; exportTimeou
     startedAt: NOW, endedAt: null, attendees: [], participants: [], clientId: ids.sharma, matchKind: 'title', status: 'failed', driveSeconds: 1800, errorCode: 'x', createdAt: NOW,
   }))!;
   const audit = new AuditLog(db, clock);
+  const warned: Record<string, unknown>[] = [];
   const h = await bootDashboard({
     db, clock, actionCapacity: o.actionCapacity, moreOwners: ['second@example.com'],
     mount: (router, x) => registerWorkApi(router, {
-      ...x, db, clock, audit: o.failAudit ? { record: async (e, q) => { if (o.failAudit!.on) throw new Error('audit down'); await audit.record(e, q); } } : audit, spend: { isPaused: () => o.paused ?? false }, ...(o.exportTimeoutMs ? { exportTimeoutMs: o.exportTimeoutMs } : {}),
+      ...x, db, clock, audit: o.failAudit ? { record: async (e, q) => { if (o.failAudit!.on) throw new Error('audit down'); await audit.record(e, q); } } : audit, spend: { isPaused: () => o.paused ?? false }, log: { warn: (f: unknown) => { warned.push(f as Record<string, unknown>); } }, ...(o.exportTimeoutMs ? { exportTimeoutMs: o.exportTimeoutMs } : {}), ...(o.pictureTimeoutMs ? { pictureTimeoutMs: o.pictureTimeoutMs } : {}),
+      ...(o.groupMembers ? { groupMembers: o.groupMembers, ...(o.connected ? { connected: o.connected } : {}) } : {}),
       ...(o.book === null ? {} : { trackerWorkbook: o.book ?? (async () => Buffer.from('PK-founder-workbook', 'latin1')) }),
     }),
   });
   closers.push(() => h.close());
-  return { db, h, m1, m2, clock };
+  return { db, h, m1, m2, clock, warned };
 }
 
 const auditRows = (db: Db) => rows<Record<string, string>>(db, 'SELECT actor, event, kind, detail, request_id AS requestId FROM audit_log ORDER BY id');
@@ -138,6 +149,113 @@ describe('work API review fixes', () => {
     const { db, h, m1 } = await boot();
     await h.post(`/dashboard/api/meetings/${m1}/assign`, { body: { client: 'SHA' } });
     expect(await auditRows(db)).toEqual([{ actor: OWNER, event: 'meeting.assign', kind: 'meeting', detail: `Meeting ${m1} assigned to SHA`, requestId: expect.stringMatching(/^[0-9a-f]{12}$/) }]);
+  });
+});
+
+describe('work API: the task picture', () => {
+  const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+  /** A chat task (with its source message and one before it), a meeting task and a dashboard task, for Sharma. */
+  async function bootPicture(over: Parameters<typeof boot>[0] = {}) {
+    const b = await boot(over);
+    const { db } = b;
+    const client = (await row<{ id: number }>(db, "SELECT id FROM clients WHERE code = 'SHA'"))!.id;
+    for (const [waId, ts, text] of [['W1', '2026-10-10T04:00:00.000Z', 'Hello there'], ['W2', '2026-10-10T04:05:00.000Z', 'Please send the banner']] as const) {
+      await insertMessage(db, { waId, clientId: client, senderJid: 'j1', senderNumber: null, senderName: null, fromMe: false, ts, text, quotedWaId: null, mediaType: null });
+    }
+    const mk = async (extra: Record<string, unknown>) => (await createTask(db, { clientId: client, side: 'us', title: 'T', category: 'design', priority: 'major', assignedTo: null, askedBy: null,
+      raisedOn: '2026-10-10', deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'whatsapp', ...extra } as never, NOW)).code;
+    const chat = await mk({ sourceWaId: 'W2' });
+    const meeting = await mk({ origin: 'meeting', meetingId: b.m2 });
+    const dash = await mk({ origin: 'dashboard' });
+    const gone = await mk({ sourceWaId: 'NOPE' });
+    return { ...b, client, chat, meeting, dash, gone };
+  }
+  const pic = async (h: Awaited<ReturnType<typeof boot>>['h'], code: string, o: { signedIn?: boolean | string; headers?: Record<string, string> } = {}) => {
+    const signedIn = o.signedIn ?? true;
+    const id = signedIn ? (await h.sessions.create(typeof signedIn === 'string' ? signedIn : OWNER)).id : null;
+    return fetch(`http://127.0.0.1:${h.port}/dashboard/api/tasks/${code}/picture`, { headers: { ...(o.headers ?? {}), ...(id ? { cookie: `wa_session=${id}` } : {}) } });
+  };
+
+  it('answers a PNG with the cache and sniffing headers', async () => {
+    const { h, chat } = await bootPicture();
+    const r = await pic(h, chat);
+    expect(r.status).toBe(200);
+    expect(r.headers.get('content-type')).toBe('image/png');
+    expect(r.headers.get('cache-control')).toBe('no-store');
+    expect(r.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(Buffer.from(await r.arrayBuffer()).subarray(0, 4).equals(PNG)).toBe(true);
+  }, 30_000);
+
+  it('answers 404 for a meeting task, a dashboard task, an unknown code and a task whose message is not stored', async () => {
+    const { h, meeting, dash, gone } = await bootPicture();
+    for (const code of [meeting, dash, gone, 'SHA-999', 'bad']) {
+      const r = await pic(h, code);
+      expect(r.status, code).toBe(404);
+      expect(((await r.json()) as { error: { code: string } }).error.code).toBe('not_found');
+    }
+  });
+
+  it('answers 404 for an inactive client', async () => {
+    const { db, h, chat } = await bootPicture();
+    await db.run("UPDATE clients SET active = 0 WHERE code = 'SHA'");
+    expect((await pic(h, chat)).status).toBe(404);
+  });
+
+  it('is closed to a signed-out visitor (401) and a cross-site request (403, before the sign-in check)', async () => {
+    const { h, chat } = await bootPicture();
+    expect((await pic(h, chat, { signedIn: false })).status).toBe(401);
+    expect((await pic(h, chat, { headers: { 'sec-fetch-site': 'cross-site' } })).status).toBe(403);
+    expect((await pic(h, chat, { signedIn: false, headers: { 'sec-fetch-site': 'cross-site' } })).status).toBe(403);
+    expect((await pic(h, chat, { headers: { 'sec-fetch-site': 'same-origin' } })).status).toBe(200);
+  }, 30_000);
+
+  it('allows 30 requests a minute per owner, then 429 with Retry-After; another owner is not held back', async () => {
+    const { h, chat } = await bootPicture();
+    for (let i = 0; i < 30; i++) expect((await pic(h, 'SHA-999')).status).toBe(404);
+    const r = await pic(h, chat);
+    expect(r.status).toBe(429);
+    expect(Number(r.headers.get('retry-after'))).toBeGreaterThanOrEqual(1);
+    expect(((await r.json()) as { error: { code: string } }).error.code).toBe('rate_limited');
+    expect((await pic(h, chat, { signedIn: 'second@example.com' })).status).toBe(200);
+  }, 60_000);
+
+  it('answers 503 with Retry-After when drawing takes too long, logs only the code, and the next picture still works', async () => {
+    const { h, chat, warned } = await bootPicture({ pictureTimeoutMs: 1000 });
+    vi.mocked(chatPicture.drawChatPicture).mockImplementationOnce(() => new Promise<Buffer>(() => undefined));
+    const r = await pic(h, chat);
+    expect(r.status).toBe(503);
+    expect(r.headers.get('retry-after')).toBe('10');
+    expect(((await r.json()) as { error: { code: string } }).error.code).toBe('busy');
+    expect(warned).toEqual([expect.objectContaining({ code: 'PictureTimeout' })]);
+    expect((await pic(h, chat)).status).toBe(200);
+  }, 30_000);
+
+  it('reads the group members only while the phone is connected', async () => {
+    const calls: string[] = [];
+    let connected = false;
+    const { db, h, client } = await bootPicture({ groupMembers: async (g) => { calls.push(g); return []; }, connected: () => connected });
+    // A message with a tag nobody in the chat is known by: naming it is what asks for the group's members.
+    await insertMessage(db, { waId: 'W3', clientId: client, senderJid: 'j1', senderNumber: null, senderName: null, fromMe: false, ts: '2026-10-10T04:06:00.000Z', text: 'ask @919800000077 please', quotedWaId: null, mediaType: null });
+    const tagged = (await createTask(db, { clientId: client, side: 'us', title: 'Tag', category: 'design', priority: 'major', assignedTo: null, askedBy: null, raisedOn: '2026-10-10',
+      deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: 'W3', origin: 'whatsapp' }, NOW)).code;
+    expect((await pic(h, tagged)).status).toBe(200);
+    expect(calls).toEqual([]); // not connected: WhatsApp is not asked
+    connected = true;
+    expect((await pic(h, tagged)).status).toBe(200);
+    expect(calls).toEqual([SHARMA_GROUP]);
+  }, 30_000);
+
+  it('answers 500 with a plain message and logs only the error name when drawing fails', async () => {
+    const { h, chat, warned } = await bootPicture();
+    vi.mocked(chatPicture.drawChatPicture).mockRejectedValueOnce(Object.assign(new Error('secret words from the chat'), { name: 'SharpFail' }));
+    const r = await pic(h, chat);
+    expect(r.status).toBe(500);
+    const text = await r.text();
+    expect(text).not.toMatch(/secret words|SharpFail/);
+    expect(JSON.parse(text).error.code).toBe('internal');
+    expect(warned).toHaveLength(1);
+    expect(warned[0]).toMatchObject({ code: 'SharpFail' });
+    expect(JSON.stringify(warned)).not.toMatch(/secret words/);
   });
 });
 

@@ -8,6 +8,7 @@ import { insertMedia, messageRowId } from '../../src/store/media.ts';
 import { insertFound } from '../../src/store/meetings.ts';
 import { insertMessage } from '../../src/store/messages.ts';
 import { upsertPerson } from '../../src/store/people.ts';
+import { recordPictureMade } from '../../src/store/sourcePictures.ts';
 import { createTask, recordEvent, type NewTask } from '../../src/store/tasks.ts';
 import { idOf, NOW, row, seeded, seededDb } from '../helpers/db.ts';
 
@@ -453,6 +454,45 @@ describe('asked at and proof', () => {
     await db.run("UPDATE clients SET active = 0 WHERE code = 'MEH'");
     expect(await taskDetail(db, meh, now)).toMatchObject({ clientActive: false });
     expect(await taskDetail(db, sha, now)).toMatchObject({ clientActive: true });
+  });
+
+  it('pictureDriveUrl: the Drive link only while the saved picture is of the current source message', async () => {
+    const { db, ids } = await seeded();
+    await msg(db, ids.sharma, 'P1', '2026-10-05T04:00:00.000Z');
+    await msg(db, ids.sharma, 'P2', '2026-10-05T05:00:00.000Z');
+    const current = await task(db, { sourceWaId: 'P1' });
+    const stale = await task(db, { sourceWaId: 'P1' });
+    const none = await task(db, { sourceWaId: 'P1' });
+    const badId = await task(db, { sourceWaId: 'P1' });
+    const meeting = await task(db);
+    const m1 = (await messageRowId(db, ids.sharma, 'P1'))!;
+    const m2 = (await messageRowId(db, ids.sharma, 'P2'))!;
+    const made = async (code: string, messageId: number, driveFileId: string) =>
+      recordPictureMade(db, { taskId: await taskId(db, code), code, clientId: ids.sharma, messageId, driveFileId, at: NOW });
+    await made(current, m1, 'abc_DEF-123');
+    await made(stale, m2, 'zzz'); // a picture of another message than the task's source
+    await made(badId, m1, 'bad id/with slash'); // an id the link builder refuses
+    expect((await taskDetail(db, current, now))!.pictureDriveUrl).toBe('https://drive.google.com/file/d/abc_DEF-123/view');
+    expect((await taskDetail(db, stale, now))!.pictureDriveUrl).toBeNull();
+    expect((await taskDetail(db, none, now))!.pictureDriveUrl).toBeNull();
+    expect((await taskDetail(db, badId, now))!.pictureDriveUrl).toBeNull();
+    expect((await taskDetail(db, meeting, now))!.pictureDriveUrl).toBeNull();
+  });
+
+  it('a meeting task carries its id and the notes link only when the meeting has a doc', async () => {
+    const { db, ids } = await seeded();
+    const found = async (rec: string) => (await insertFound(db, {
+      recording: `conferenceRecords/${rec}/recordings/b`, conference: `conferenceRecords/${rec}`, driveFileId: `d${rec}`, meetingCode: null, title: `Call ${rec}`,
+      startedAt: NOW, endedAt: null, attendees: [], participants: [], clientId: ids.sharma, matchKind: 'title', status: 'done', driveSeconds: 60, createdAt: NOW,
+    }))!;
+    const withDoc = await found('a');
+    const without = await found('c');
+    await db.run('UPDATE meetings SET doc_file_id = ? WHERE id = ?', ['doc_1-XYZ_abcdef', withDoc]);
+    const a = (await taskDetail(db, await task(db, { origin: 'meeting', meetingId: withDoc }), now))!;
+    expect(a).toMatchObject({ meetingId: withDoc, meetingDocUrl: 'https://docs.google.com/document/d/doc_1-XYZ_abcdef/edit', pictureDriveUrl: null });
+    const b = (await taskDetail(db, await task(db, { origin: 'meeting', meetingId: without }), now))!;
+    expect(b).toMatchObject({ meetingId: without, meetingDocUrl: null });
+    expect(await taskDetail(db, await task(db), now)).toMatchObject({ meetingId: null, meetingDocUrl: null });
   });
 
   it('a meeting task carries the meeting title and no message id', async () => {

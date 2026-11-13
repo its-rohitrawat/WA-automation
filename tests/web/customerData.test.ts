@@ -12,7 +12,9 @@ import { createTenant, ensureFounderTenant } from '../../src/platform/store.ts';
 import { TenantKeys } from '../../src/platform/tenantKeys.ts';
 import { buildCustomerRuntime, type CustomerRuntime } from '../../src/runtime/customerRuntime.ts';
 import { platformSupervisor, type PlatformSupervisor } from '../../src/runtime/platformSupervisor.ts';
-import { syncClients } from '../../src/store/clients.ts';
+import { getClientByCode, syncClients } from '../../src/store/clients.ts';
+import { insertMessage } from '../../src/store/messages.ts';
+import { createTask } from '../../src/store/tasks.ts';
 import { openDb, type Db } from '../../src/store/db.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { silentLogger } from '../../src/util/logger.ts';
@@ -170,6 +172,25 @@ describe('the DATA route sweep: each session reaches only its own customer (Phas
     expect(r.status).toBe(503);
     expect(r.text).not.toMatch(/Sharma|Alpha|Beta/);
   });
+
+  it('the task picture: each customer draws its own tasks only; another workspace’s task code is 404', async () => {
+    const taskIn = async (db: Db, clientCode: string) => {
+      const c = (await getClientByCode(db, clientCode))!;
+      await insertMessage(db, { waId: 'PIC1', clientId: c.id, senderJid: 'j1', senderNumber: null, senderName: null, fromMe: false, ts: AT, text: 'Please send it', quotedWaId: null, mediaType: null });
+      return (await createTask(db, { clientId: c.id, side: 'us', title: 'T', category: 'design', priority: 'major', assignedTo: null, askedBy: null, raisedOn: '2026-10-30',
+        deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: 'PIC1', origin: 'whatsapp' }, AT)).code;
+    };
+    const mine = { founder: await taskIn(founderDb, FOUNDER_CLIENT.code), a: await taskIn(dbs[ids.a]!, A_CLIENT.code), b: await taskIn(dbs[ids.b]!, B_CLIENT.code) };
+    expect(mine.founder).toMatch(/^SHI-/);
+    for (const who of ['founder', 'a', 'b'] as const) {
+      for (const [other, code] of Object.entries(mine)) {
+        const r = await fetch(`${base}/dashboard/api/tasks/${code}/picture`, { redirect: 'manual', signal: AbortSignal.timeout(20_000), headers: { cookie: `wa_session=${s[who].id}` } });
+        expect(r.status, `${who} → ${other}'s ${code}`).toBe(other === who ? 200 : 404);
+        if (other === who) expect(Buffer.from(await r.arrayBuffer()).subarray(1, 4).toString('latin1')).toBe('PNG');
+        else await r.arrayBuffer();
+      }
+    }
+  }, 60_000);
 
   it('the tracker export of A holds A’s own data only: its sheet is there, no text of the founder or B', async () => {
     const res = await fetch(`${base}/dashboard/api/tracker/export`, { redirect: 'manual', signal: AbortSignal.timeout(20_000), headers: { cookie: `wa_session=${s.a.id}` } });

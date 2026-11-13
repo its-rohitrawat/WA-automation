@@ -1,7 +1,7 @@
 // Meetings (D4 Task 6): the segmented filter kept in the address, the list, and the drawer with the summary, the action
 // items, Assign (a client select), Skip, Retry ("This costs money. Continue?") and Open summary doc. Titles and
 // summaries are meeting text: they go through esc().
-import { get, post } from '../api.js';
+import { ApiError, get, post } from '../api.js';
 import { esc, icon, toast } from '../dom.js';
 import { when } from '../format.js';
 import { confirmDialog, empty, errorText, failed, listen, loading, openDrawer, pill, refillDrawer, setQuery } from './ui.js';
@@ -20,6 +20,15 @@ const POLL_MS = 30_000;
 /** A doc link is used only when it is the Google Docs address the agent builds. */
 const DOC_URL = /^https:\/\/docs\.google\.com\/document\/d\/[A-Za-z0-9_-]{10,200}\/edit$/;
 
+/**
+ * The meeting an address names (?meeting=<digits>, from the task panel's See the meeting), or null.
+ * @param {string} search
+ */
+export function meetingLinkId(search) {
+  const v = new URLSearchParams(search).get('meeting');
+  return v !== null && /^\d{1,9}$/.test(v) ? Number(v) : null;
+}
+
 const titleOf = (/** @type {MeetingRow} */ m) => m.title || (m.status === 'internal' ? 'Internal meeting' : 'Meeting');
 
 /** @param {ScreenCtx} ctx */
@@ -31,6 +40,10 @@ export function mountMeetings(ctx) {
   let err = null;
   /** @type {{ code: string, name: string }[]} */
   let clients = [];
+  // A link from a task (?meeting=<id>) opens that meeting once, by asking for it directly (the list holds only the newest
+  // ones), and the address is cleaned at once, so a reload or Back does not open it again.
+  const jump = meetingLinkId(location.search);
+  if (new URLSearchParams(location.search).has('meeting')) setQuery(view === 'all' ? '' : `?view=${view}`);
 
   const draw = () => {
     const seg = `<div class="toolbar"><div class="seg" role="tablist">${VIEWS.map(([k, l]) => `<button type="button" role="tab" aria-selected="${view === k}" class="${view === k ? 'on' : ''}" data-mview="${k}">${esc(l)}</button>`).join('')}</div>
@@ -66,6 +79,18 @@ export function mountMeetings(ctx) {
   const clientsReady = get('/overview').then((ov) => {
     clients = (ov?.byClient ?? []).map((/** @type {{ client: { code: string, name: string } }} */ c) => c.client);
   }).catch(() => {});
+
+  if (jump !== null) {
+    get(`/meetings/${jump}`).then(
+      () => {
+        if (ctx.live()) openMeeting(jump, () => clients, clientsReady, () => void load());
+      },
+      (e) => {
+        if (!ctx.live()) return;
+        toast(e instanceof ApiError && e.status === 404 ? "That meeting isn't in this workspace." : errorText(e));
+      },
+    );
+  }
 
   return listen(ctx.view, {
     click: (e) => {
