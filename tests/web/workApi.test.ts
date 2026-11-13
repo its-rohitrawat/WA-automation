@@ -13,7 +13,7 @@ afterEach(async () => {
   for (const c of closers.splice(0)) await c();
 });
 
-async function boot(o: { paused?: boolean; actionCapacity?: number } = {}) {
+async function boot(o: { paused?: boolean; actionCapacity?: number; exportTimeoutMs?: number; failAudit?: { on: boolean }; book?: (() => Promise<Buffer>) | null } = {}) {
   const { db, ids } = await seeded();
   const clock = manualClock(NOW);
   await createTask(db, { clientId: ids.sharma, side: 'us', title: 'Banner', category: 'design', priority: 'major', assignedTo: null, askedBy: null, raisedOn: '2026-10-10',
@@ -28,11 +28,14 @@ async function boot(o: { paused?: boolean; actionCapacity?: number } = {}) {
   }))!;
   const audit = new AuditLog(db, clock);
   const h = await bootDashboard({
-    db, clock, actionCapacity: o.actionCapacity,
-    mount: (router, x) => registerWorkApi(router, { ...x, db, clock, audit, spend: { isPaused: () => o.paused ?? false } }),
+    db, clock, actionCapacity: o.actionCapacity, moreOwners: ['second@example.com'],
+    mount: (router, x) => registerWorkApi(router, {
+      ...x, db, clock, audit: o.failAudit ? { record: async (e, q) => { if (o.failAudit!.on) throw new Error('audit down'); await audit.record(e, q); } } : audit, spend: { isPaused: () => o.paused ?? false }, ...(o.exportTimeoutMs ? { exportTimeoutMs: o.exportTimeoutMs } : {}),
+      ...(o.book === null ? {} : { trackerWorkbook: o.book ?? (async () => Buffer.from('PK-founder-workbook', 'latin1')) }),
+    }),
   });
   closers.push(() => h.close());
-  return { db, h, m1, m2 };
+  return { db, h, m1, m2, clock };
 }
 
 const auditRows = (db: Db) => rows<Record<string, string>>(db, 'SELECT actor, event, kind, detail, request_id AS requestId FROM audit_log ORDER BY id');
@@ -116,7 +119,7 @@ describe('work API: changes', () => {
     expect((await h.post('/dashboard/api/tasks/SHA-001/unlock')).status).toBe(200);
     const r = await h.post('/dashboard/api/tasks/SHA-001/unlock');
     expect(r.status).toBe(429);
-    expect(r.headers['retry-after']).toBeDefined();
+    expect(r.headers['retry-after']).toBe('1');
   });
 });
 
@@ -135,5 +138,125 @@ describe('work API review fixes', () => {
     const { db, h, m1 } = await boot();
     await h.post(`/dashboard/api/meetings/${m1}/assign`, { body: { client: 'SHA' } });
     expect(await auditRows(db)).toEqual([{ actor: OWNER, event: 'meeting.assign', kind: 'meeting', detail: `Meeting ${m1} assigned to SHA`, requestId: expect.stringMatching(/^[0-9a-f]{12}$/) }]);
+  });
+});
+
+describe('work API: tracker export', () => {
+  const PATH = '/dashboard/api/tracker/export';
+  /** The raw reply: the shared helper reads bodies as text, which would damage a zip. */
+  async function download(h: Awaited<ReturnType<typeof boot>>['h'], signedIn: boolean | string = true, extra: Record<string, string> = {}) {
+    const { id } = await h.sessions.create(typeof signedIn === 'string' ? signedIn : OWNER);
+    const r = await fetch(`http://127.0.0.1:${h.port}${PATH}`, { headers: { ...extra, ...(signedIn ? { cookie: `wa_session=${id}` } : {}) } });
+    return { status: r.status, headers: r.headers, body: Buffer.from(await r.arrayBuffer()) };
+  }
+
+  it('is closed to a signed-out visitor, with no body', async () => {
+    const { h } = await boot();
+    const r = await download(h, false);
+    expect(r.status).toBe(401);
+    expect(r.body.subarray(0, 2).toString('latin1')).not.toBe('PK');
+  });
+
+  it('sends the workbook with the download headers, named by the IST date', async () => {
+    const { h } = await boot();
+    const r = await download(h);
+    expect(r.status).toBe(200);
+    expect(r.headers.get('content-type')).toBe('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    expect(r.headers.get('content-disposition')).toBe('attachment; filename="Tracker-2026-10-19.xlsx"');
+    expect(r.headers.get('cache-control')).toBe('no-store');
+    expect(r.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(r.body.subarray(0, 2).toString('latin1')).toBe('PK');
+  });
+
+  it('allows one export per 10 seconds per owner', async () => {
+    const { h } = await boot();
+    expect((await download(h)).status).toBe(200);
+    const second = await download(h);
+    expect(second.status).toBe(429);
+    expect(second.headers.get('retry-after')).toBe('10');
+    expect(second.body.toString('utf8')).toContain('rate_limited');
+  });
+
+  it('allows the next export 10 seconds on, and another owner is not held back by the first', async () => {
+    const { h, clock } = await boot();
+    expect((await download(h)).status).toBe(200);
+    expect((await download(h, 'second@example.com')).status).toBe(200);
+    expect((await download(h)).status).toBe(429);
+    clock.advance(9_000);
+    expect((await download(h)).status).toBe(429);
+    clock.advance(1_000);
+    expect((await download(h)).status).toBe(200);
+  });
+
+  it('a clock that steps back does not hold the owner', async () => {
+    const { h, clock } = await boot();
+    expect((await download(h)).status).toBe(200);
+    clock.advance(-3_600_000);
+    expect((await download(h)).status).toBe(200);
+    expect((await download(h)).status).toBe(429); // the gap counts again from that export
+  });
+
+  it('a build that never finishes ends as a 500 and frees the owner', async () => {
+    let hang = true;
+    const { h } = await boot({ exportTimeoutMs: 50, book: () => (hang ? new Promise<Buffer>(() => undefined) : Promise.resolve(Buffer.from('PK-x', 'latin1'))) });
+    expect((await download(h)).status).toBe(500);
+    hang = false;
+    expect((await download(h)).status).toBe(200);
+  });
+
+  it('an audit failure gives a 500 and no file, and an immediate retry works', async () => {
+    const failAudit = { on: true };
+    const { db, h } = await boot({ failAudit });
+    const r = await download(h);
+    expect(r.status).toBe(500);
+    expect(r.body.subarray(0, 2).toString('latin1')).not.toBe('PK');
+    failAudit.on = false;
+    expect((await download(h)).status).toBe(200);
+    expect((await auditRows(db)).filter((x) => x.event === 'tracker.export')).toHaveLength(1);
+    expect((await download(h)).status).toBe(429);
+  });
+
+  it('a failed build does not use up the limit', async () => {
+    let fail = true;
+    const { h } = await boot({ book: async () => { if (fail) throw new Error('secret failure'); return Buffer.from('PK-x', 'latin1'); } });
+    expect((await download(h)).status).toBe(500);
+    fail = false;
+    expect((await download(h)).status).toBe(200);
+    expect((await download(h)).status).toBe(429);
+  });
+
+  it('refuses a cross-site request before anything else; same-origin, same-site, none and no header are allowed', async () => {
+    const { db, h, clock } = await boot();
+    const r = await download(h, true, { 'sec-fetch-site': 'cross-site' });
+    expect(r.status).toBe(403);
+    expect(r.body.subarray(0, 2).toString('latin1')).not.toBe('PK');
+    expect(await auditRows(db)).toEqual([]);
+    for (const v of ['same-origin', 'same-site', 'none']) {
+      expect((await download(h, true, { 'sec-fetch-site': v })).status, v).toBe(200);
+      clock.advance(10_000);
+    }
+    expect((await download(h)).status).toBe(200);
+  });
+
+  it('writes an audit line with the owner and request id and no file content', async () => {
+    const { db, h } = await boot();
+    await download(h);
+    const lines = await auditRows(db);
+    expect(lines).toEqual([{ actor: OWNER, event: 'tracker.export', kind: 'ops', detail: 'Tracker exported as an Excel file', requestId: expect.stringMatching(/^[0-9a-f]{12}$/) }]);
+    expect(JSON.stringify(lines)).not.toContain('founder-workbook');
+  });
+
+  it('answers 503 in plain words without a builder (a setup shell)', async () => {
+    const { h } = await boot({ book: null });
+    const r = await download(h);
+    expect(r.status).toBe(503);
+    expect(r.body.toString('utf8')).toContain('not ready');
+  });
+
+  it('answers a failed build in plain words, with no error text', async () => {
+    const { h } = await boot({ book: async () => { throw new Error('secret failure'); } });
+    const r = await download(h);
+    expect(r.status).toBe(500);
+    expect(r.body.toString('utf8')).not.toContain('secret');
   });
 });

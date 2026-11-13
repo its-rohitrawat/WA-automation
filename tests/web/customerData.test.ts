@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import ExcelJS from 'exceljs';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -169,6 +170,23 @@ describe('the DATA route sweep: each session reaches only its own customer (Phas
     expect(r.status).toBe(503);
     expect(r.text).not.toMatch(/Sharma|Alpha|Beta/);
   });
+
+  it('the tracker export of A holds A’s own data only: its sheet is there, no text of the founder or B', async () => {
+    const res = await fetch(`${base}/dashboard/api/tracker/export`, { redirect: 'manual', signal: AbortSignal.timeout(20_000), headers: { cookie: `wa_session=${s.a.id}` } });
+    expect(res.status).toBe(200);
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(Buffer.from(await res.arrayBuffer()) as unknown as ExcelJS.Buffer);
+    expect(wb.worksheets.map((w) => w.name)).toContain(A_CLIENT.name);
+    const text: string[] = [];
+    wb.eachSheet((w) => {
+      text.push(w.name);
+      w.eachRow((row) => row.eachCell((c) => text.push(c.text)));
+    });
+    const all = text.join(' | ');
+    for (const f of [FOUNDER_CLIENT.name, FOUNDER_CLIENT.groupId, FOUNDER_CLIENT.code, B_CLIENT.name, B_CLIENT.groupId, B_CLIENT.code, 'Sharma', 'Beta']) {
+      expect(all, f).not.toContain(f);
+    }
+  }, 30_000);
 
   it('settings: a change by A lands in A’s own settings only (its daily Claude limit), never B’s or the founder’s', async () => {
     const r = await call('POST', '/dashboard/api/settings', s.a, { key: 'dailySpendCapUsd', value: 12 });

@@ -17,7 +17,7 @@ const EVENT_WORDS = {
   'settings.reportEnabled': 'Briefing switched', 'settings.reportDays': 'Briefing days', 'settings.reportRecipient': 'Briefing number', 'settings.reportTime': 'Briefing time',
   'settings.priorityKeywords': 'Priority keywords', 'settings.sentimentEnabled': 'Sentiment switched',
   'auth.signout_everywhere': 'Signed out everywhere', 'tracker.published': 'Tracker uploaded', 'tracker.publish_failed': 'Tracker upload failed',
-  'tracker.new_file': 'New tracker file',
+  'tracker.new_file': 'New tracker file', 'tracker.export': 'Tracker exported',
 };
 
 /** @param {ScreenCtx} ctx */

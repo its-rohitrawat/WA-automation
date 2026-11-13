@@ -26,7 +26,7 @@ import type { ClientConfigLike } from './meetings/watcher.ts';
 import { DrivePublisher, type DriveApi } from './output/drive.ts';
 import { meetingsReady } from './output/googleAuth.ts';
 import { SourcePictures } from './output/sourcePictures.ts';
-import { loadTrackerView } from './output/view.ts';
+import { loadTrackerView, type HealthLine } from './output/view.ts';
 import { buildWorkbook } from './output/workbook.ts';
 import { ReportScheduler } from './report/scheduler.ts';
 import type { ReportHealth, ReportSender, ReportSettings } from './report/types.ts';
@@ -176,6 +176,11 @@ export interface App {
   /** Applies a new allow-list. Throws, leaving the old allow-list in place, if the config conflicts with the DB. */
   reloadClients(configs: ClientConfig[]): Promise<void>;
   health: Health;
+  /**
+   * The tracker workbook built fresh from the database, as the Drive publisher builds it, for the dashboard's Export.
+   * Read-only: nothing is uploaded and the publisher's state is not touched.
+   */
+  trackerWorkbook(): Promise<Buffer>;
   publisher: DrivePublisher;
   debouncer: GroupDebouncer;
   /** Undefined without media dependencies. */
@@ -242,6 +247,8 @@ export async function createApp(d: AppDeps): Promise<App> {
   /** The IST day of the workbook being built, and of the last one that reached Drive (the Today tab is per day). */
   let buildingDay: string | undefined;
   let publishedDay: string | undefined;
+  const workbookFor = async (line: HealthLine, now: Date) =>
+    buildWorkbook(await loadTrackerView(d.db, now, line, d.dashboardUrl ? { dashboardUrl: d.dashboardUrl } : {}));
   const publisher = new DrivePublisher({
     db: d.db,
     api: d.drive,
@@ -254,7 +261,7 @@ export async function createApp(d: AppDeps): Promise<App> {
       buildingLine = line.text;
       const now = d.clock.now();
       buildingDay = istDate(now); // the date the Today tab is worked out for
-      return buildWorkbook(await loadTrackerView(d.db, now, line, d.dashboardUrl ? { dashboardUrl: d.dashboardUrl } : {}));
+      return workbookFor(line, now);
     },
     onPublished: () => {
       publishedLine = buildingLine; // one publish runs at a time, so this is the line of the upload that just succeeded
@@ -656,6 +663,7 @@ export async function createApp(d: AppDeps): Promise<App> {
 
   return {
     health,
+    trackerWorkbook: () => workbookFor(health.workbookLine(), d.clock.now()),
     publisher,
     debouncer,
     mediaQueue,

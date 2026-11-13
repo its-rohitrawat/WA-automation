@@ -63,6 +63,16 @@ export async function get(path) {
 }
 
 /**
+ * GET a file under /dashboard/api: the Response when it is ok (the caller reads the blob), else the same ApiError any
+ * other call throws (a 401 signs out, a 503 workspace_starting shows the starting page). @param {string} path
+ */
+export async function download(path) {
+  const res = await fetch(BASE + path, { credentials: 'same-origin' });
+  if (res.ok) return res;
+  return parse(res);
+}
+
+/**
  * POST JSON to a path under /dashboard/api, with the CSRF token. `keepalive` lets it finish while the page unloads.
  * @param {string} path @param {unknown} [body] @param {{ keepalive?: boolean }} [opts]
  */

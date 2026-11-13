@@ -3,6 +3,7 @@
 // in-memory database of made-up clients, tasks and meetings. No file is opened; nothing reaches the agent, WhatsApp,
 // Google or any data folder. The owner session is the fake's flag, checked by a stand-in for D1's guard.
 import type { ServerResponse } from 'node:http';
+import ExcelJS from 'exceljs';
 import { FOUNDER_TENANT_ID, parseEnv } from '../src/config/env.ts';
 import { PrioritySettings } from '../src/config/prioritySettings.ts';
 import { SettingsStore } from '../src/config/settingsStore.ts';
@@ -96,7 +97,7 @@ export async function mountFakeScreens(web: WebServer, o: { signedIn: () => bool
     },
   };
   const action = { guard, actions: { hit: () => {} } };
-  registerWorkApi(web.router, { ...action, db, clock, audit, spend, health: () => ({ line: { ok: true, text: 'All good' }, lastPublishedAt: day(0.01), publishFailingSince: null }) });
+  registerWorkApi(web.router, { ...action, db, clock, audit, spend, trackerWorkbook: fakeWorkbook, health: () => ({ line: { ok: true, text: 'All good' }, lastPublishedAt: day(0.01), publishFailingSince: null }) });
   registerControlApi(web.router, {
     ...action, db, clock, audit, spend, voiceLocal: true, uptime: { log: uptime }, isOwner: (e) => e === OWNER, settings, priority,
     sessions: { destroyAllFor: async () => 0, countFor: async () => 0, agentLabel: async () => null }, secureFor: () => false,
@@ -113,6 +114,7 @@ export async function mountFakeScreens(web: WebServer, o: { signedIn: () => bool
   // Open chat: the real chat routes (src/web/routes/chat.ts) on this database, with a stand-in socket that reaches no
   // one. It answers with a made-up message id and, a moment later, stores the founder's own copy, as WhatsApp does.
   await seedChat(db);
+  await seedProofTasks(db);
   const ACME = '120363000000000101@g.us';
   let sent = 0;
   const socket = {
@@ -178,6 +180,36 @@ export async function mountFakeScreens(web: WebServer, o: { signedIn: () => bool
     guard.requireCsrf(req, await guard.requireOwner(req));
     answer(res, await chatDeleteHandler(chat, ownerCtx, params.code ?? '', await bodyOf(req)));
   });
+}
+
+/** A tiny but real .xlsx for the Export button (the real route puts its own file name and headers on it). */
+async function fakeWorkbook(): Promise<Buffer> {
+  const wb = new ExcelJS.Workbook();
+  wb.creator = 'WA Agent (made-up data)';
+  const ws = wb.addWorksheet('Tasks');
+  ws.addRow(['Code', 'Title', 'Client']);
+  ws.addRow(['ACM-004', 'Fix the footer on mobile (from the chat)', 'Acme Traders']);
+  return Buffer.from(await wb.xlsx.writeBuffer());
+}
+
+/**
+ * The three kinds of source a task's Proof shows: a task from a message that is in Acme's fake chat (the 9th one, three
+ * days back, so the jump from the task panel finds it), a task from a meeting, and a task the owner added on the dashboard.
+ */
+async function seedProofTasks(db: Db): Promise<void> {
+  const msg = await db.get<{ ts: string; text: string }>("SELECT ts, text FROM messages WHERE wa_id = 'FAKEMSG0000000000009'");
+  if (!msg) throw new Error('the fake chat has no 9th message');
+  const istDay = (iso: string) => new Date(Date.parse(iso) + 330 * 60_000).toISOString().slice(0, 10);
+  const base = { clientId: 1, side: 'us' as const, category: 'design' as const, priority: 'medium' as const, assignedTo: 'Rohit', askedBy: null, deadline: null, latestProgress: null };
+  const foundAt = new Date(Date.parse(msg.ts) + 4 * 60_000).toISOString();
+  await createTask(db, { ...base, title: 'Fix the footer on mobile (from the chat)', raisedOn: istDay(msg.ts), sourceQuote: msg.text, sourceDate: istDay(msg.ts), sourceWaId: 'FAKEMSG0000000000009', origin: 'whatsapp' }, foundAt);
+  const started = day(1.2);
+  const meetingId = await insertFound(db, {
+    recording: 'conferenceRecords/p/recordings/q', conference: 'conferenceRecords/p', driveFileId: 'd2', meetingCode: null, title: 'Kickoff call',
+    startedAt: started, endedAt: null, attendees: [], participants: [], clientId: 1, matchKind: null, status: 'done', driveSeconds: 1800, createdAt: started,
+  });
+  await createTask(db, { ...base, title: 'Redo the logo (from the meeting)', raisedOn: istDay(started), sourceQuote: 'We agreed to redo the logo this week', sourceDate: istDay(started), sourceWaId: null, origin: 'meeting', meetingId }, day(1.1));
+  await createTask(db, { ...base, title: 'Call the printer (added on the dashboard)', raisedOn: istDay(day(0.5)), sourceQuote: null, sourceDate: null, sourceWaId: null, origin: 'dashboard' }, day(0.5));
 }
 
 /** About 70 made-up messages in Acme's group over three days: names, a photo, a file, a voice note with its words, a reply, a deleted one. */

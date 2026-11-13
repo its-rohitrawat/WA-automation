@@ -1,7 +1,11 @@
 import { readSentimentEnabled } from '../config/prioritySettings.ts';
 import type { Db } from '../store/db.ts';
 import { PRIORITIES, TASK_FIELDS, type Category, type Priority, type PrioritySource, type Sentiment, type Side, type TaskField } from '../store/tasks.ts';
+import { getClient } from '../store/clients.ts';
 import { istDate } from '../util/time.ts';
+import { mentionTags } from '../wa/groupMembers.ts';
+import { withTagNames } from './chatQueries.ts';
+import { senderLabel } from './clientQueries.ts';
 import { ControlError } from './errors.ts';
 
 // The dashboard's Tasks screen (D4 Task 1): plain parameterised SQL. Titles, quotes and progress notes are untrusted
@@ -11,7 +15,7 @@ import { ControlError } from './errors.ts';
 export const TASK_STATUSES = ['overdue', 'open', 'review', 'done'] as const;
 export type DashboardTaskStatus = (typeof TASK_STATUSES)[number];
 export const TASK_DEADLINES = ['past', 'week', 'none'] as const;
-export const TASK_SORTS = ['deadline', 'code', 'client', 'owner', 'status', 'priority'] as const;
+export const TASK_SORTS = ['deadline', 'code', 'client', 'owner', 'status', 'priority', 'asked'] as const;
 /** closed=7d: done tasks closed in the last 7 IST days, today included (the Overview's "Done this week", queries.ts). */
 export const TASK_CLOSED = ['7d'] as const;
 /** removed=1: also the tasks of removed (inactive) clients. Left out, only active clients' tasks: the Overview's scope. */
@@ -56,6 +60,10 @@ export interface DashboardTaskRow {
   sentiment: Sentiment | null;
   category: Category;
   source: TaskSource;
+  /** When it was asked (ISO): the source message's time, a meeting's start, else when the task was created. */
+  askedAt: string;
+  /** When the task was created, that is, found by the agent or added on the dashboard (ISO). */
+  createdAt: string;
   updatedAt: string;
 }
 
@@ -68,8 +76,17 @@ export interface TaskHistoryItem {
 export interface DashboardTaskDetail extends DashboardTaskRow {
   /** The owner's keyword that set the priority, when one did. */
   priorityKeyword: string | null;
+  /** The quote with each tag as the person's name ("@member" when none), never digits. */
   sourceQuote: string | null;
   sourceDate: string | null;
+  /** The source message's sender as the chat shows senders: a name, else "Member"; null when the message is not stored. */
+  sourceSender: string | null;
+  /** The source message's row number in this client's chat (for Open chat); null when not stored or not from a message. */
+  sourceMessageId: number | null;
+  /** The meeting's title, for a task made from a meeting. */
+  meetingTitle: string | null;
+  /** Whether the client is still active. A removed client's chat cannot be opened, so the panel offers no Open in chat. */
+  clientActive: boolean;
   /** The sender deleted the message the task came from (the quote is what was read before that). */
   sourceRevoked: boolean;
   latestProgress: string | null;
@@ -142,11 +159,16 @@ const SOURCE_SQL = `CASE WHEN t.origin = 'dashboard' THEN 'dashboard' WHEN t.mee
     WHERE m.client_id = t.client_id AND m.wa_id = t.source_wa_id AND md.kind = 'voice') THEN 'voice'
   ELSE 'whatsapp' END`;
 
+/** The time it was asked: the source message's ts (this client's), a meeting's start, else the creation time. All ISO strings in one format. */
+const ASKED_SQL = `COALESCE((SELECT m.ts FROM messages m WHERE m.client_id = t.client_id AND m.wa_id = t.source_wa_id),
+  (SELECT mt.started_at FROM meetings mt WHERE mt.id = t.meeting_id), t.created_at)`;
+
 const SELECT_SQL = `SELECT t.code, t.title, c.code AS clientCode, c.name AS clientName, t.side, t.assigned_to AS owner, t.asked_by AS askedBy,
     t.deadline, ${STATUS_SQL} AS status, t.priority_level AS priority, t.priority_source AS prioritySource, t.priority_keyword AS priorityKeyword,
     t.sentiment, t.category, ${SOURCE_SQL} AS source, t.updated_at AS updatedAt,
     t.id, t.source_quote AS sourceQuote, t.source_date AS sourceDate, t.source_revoked AS sourceRevoked, t.latest_progress AS latestProgress,
-    t.reminder_count AS remindedCount
+    t.reminder_count AS remindedCount, t.client_id AS clientId, t.meeting_id AS meetingId, t.source_wa_id AS sourceWaId,
+    ${ASKED_SQL} AS askedAt, t.created_at AS createdAt, c.active AS clientActive
   FROM tasks t JOIN clients c ON c.id = t.client_id`;
 
 interface RawRow {
@@ -172,6 +194,12 @@ interface RawRow {
   sourceRevoked: number;
   latestProgress: string | null;
   remindedCount: number;
+  clientId: number;
+  meetingId: number | null;
+  sourceWaId: string | null;
+  askedAt: string;
+  createdAt: string;
+  clientActive: number;
 }
 
 /** moods: sentiment is switched on; off, no task's mood leaves here. */
@@ -179,7 +207,7 @@ function toRow(r: RawRow, moods: boolean): DashboardTaskRow {
   return {
     code: r.code, title: r.title, client: { code: r.clientCode, name: r.clientName }, side: r.side, owner: r.owner, askedBy: r.askedBy,
     deadline: r.deadline, status: r.status, overdue: r.status === 'overdue', priority: r.priority, prioritySource: r.prioritySource,
-    sentiment: moods ? r.sentiment : null, category: r.category, source: r.source, updatedAt: r.updatedAt,
+    sentiment: moods ? r.sentiment : null, category: r.category, source: r.source, askedAt: r.askedAt, createdAt: r.createdAt, updatedAt: r.updatedAt,
   };
 }
 
@@ -203,6 +231,8 @@ function orderBy(sort: TaskQuery['sort'], dir: 'asc' | 'desc'): string {
       return `${STATUS_RANK_SQL} ${d}, ${tie}`;
     case 'priority':
       return `${PRIORITY_RANK_SQL} ${d}, ${tie}`;
+    case 'asked':
+      return `${ASKED_SQL} ${d}, ${tie}`;
   }
 }
 
@@ -301,6 +331,24 @@ function historyWords(op: string, actor: 'agent' | 'owner', detail: string, sour
   }
 }
 
+/**
+ * The proof of a task: its source message (this client's only) with the sender as the chat shows senders (the person's
+ * name, else "Member", never a number), the quote with tags as names, and a meeting's title. Parameterised reads only.
+ */
+async function sourceProof(db: Db, r: RawRow): Promise<{ quote: string | null; sender: string | null; messageId: number | null; meetingTitle: string | null }> {
+  const msg = r.sourceWaId === null ? undefined : await db.get<{ id: number; fromMe: number; name: string | null }>(
+    `SELECT m.id, m.from_me AS fromMe, p.name FROM messages m LEFT JOIN people p ON p.client_id = m.client_id AND p.jid = m.sender_jid
+      WHERE m.client_id = @client AND m.wa_id = @waId`,
+    { client: r.clientId, waId: r.sourceWaId },
+  );
+  const sender = msg ? senderLabel(msg.name, msg.fromMe === 1) : null;
+  const meeting = r.meetingId === null ? undefined : await db.get<{ title: string }>('SELECT title FROM meetings WHERE id = @id', { id: r.meetingId });
+  const quote = r.sourceQuote !== null && mentionTags(r.sourceQuote).size > 0
+    ? (await withTagNames(db, await getClient(db, r.clientId), [r.sourceQuote]))[0]!
+    : r.sourceQuote;
+  return { quote, sender: sender === 'Someone' ? 'Member' : sender, messageId: msg?.id ?? null, meetingTitle: meeting ? meeting.title : null };
+}
+
 /** One task with its quote, progress, reminders and history; undefined when no task has that code. */
 export async function taskDetail(db: Db, rawCode: string, now: Date): Promise<DashboardTaskDetail | undefined> {
   const code = rawCode.trim().toUpperCase();
@@ -311,11 +359,16 @@ export async function taskDetail(db: Db, rawCode: string, now: Date): Promise<Da
     'SELECT at, actor, op, detail FROM task_events WHERE task_id = ? ORDER BY at, id',
     [r.id],
   );
+  const proof = await sourceProof(db, r);
   return {
     ...toRow(r, await readSentimentEnabled(db)),
     priorityKeyword: r.priorityKeyword,
-    sourceQuote: r.sourceQuote,
+    sourceQuote: proof.quote,
     sourceDate: r.sourceDate,
+    sourceSender: proof.sender,
+    sourceMessageId: proof.messageId,
+    meetingTitle: proof.meetingTitle,
+    clientActive: r.clientActive === 1,
     sourceRevoked: r.sourceRevoked === 1,
     latestProgress: r.latestProgress,
     remindedCount: r.remindedCount,

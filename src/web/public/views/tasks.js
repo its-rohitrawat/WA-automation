@@ -1,18 +1,21 @@
 // Tasks (D4 Task 6): search and five filters kept in the address, a sortable table (cards on phones), red overdue
 // dates, status pills, the source, and the task drawer. Every value from the agent goes through esc().
-import { get } from '../api.js';
-import { $, esc, icon } from '../dom.js';
+import { ApiError, download, get } from '../api.js';
+import { $, esc, icon, toast } from '../dom.js';
+import { stamp } from '../format.js';
 import { openTaskDrawer } from './taskDrawer.js';
-import { empty, failed, listen, loading, moodTag, pill, setQuery } from './ui.js';
-import { deadlineText, moodLabel, priorityPill, sourceLabel, taskPill, taskQueryFromSearch, taskQueryToSearch } from './workLib.js';
+import { chatOpen, refreshChat } from './chat.js';
+import { empty, errorText, failed, listen, loading, moodTag, pill, setQuery } from './ui.js';
+import { deadlineText, moodLabel, priorityPill, exportFilename, sourceLabel, taskApiQuery, taskPill, taskQueryFromSearch, taskQueryToSearch } from './workLib.js';
 
 /** @typedef {import('./registry.js').ScreenCtx} ScreenCtx */
 /** @typedef {import('./workLib.js').TaskFilter} TaskFilter */
 /**
  * @typedef {{ code: string, title: string, client: { code: string, name: string }, owner: string | null, deadline: string | null,
- *   status: string, overdue: boolean, priority: string | null, sentiment: string | null, source: string }} TaskRow
+ *   status: string, overdue: boolean, priority: string | null, sentiment: string | null, source: string, askedAt: string }} TaskRow
  */
 
+const PAGE = 200; // rows per page: the first, and each "Show more"
 const SORTABLE = [['code', 'Task'], ['client', 'Client'], ['owner', 'Owner'], ['deadline', 'Deadline'], ['status', 'Status']];
 
 /** @param {ScreenCtx} ctx */
@@ -40,12 +43,22 @@ export function mountTasks(ctx) {
   let clients = [];
   /** @type {string[]} */
   let owners = [];
+  let exporting = false; // the Export button draws as busy while this is set, also after a redraw
   let typing = /** @type {ReturnType<typeof setTimeout> | undefined} */ (undefined);
   let asked = 0;
+  let moreBusy = false; // "Show more" is fetching
 
   const sel = (/** @type {keyof TaskFilter} */ id, /** @type {string} */ label, /** @type {string[][]} */ opts) =>
     `<select class="sel" data-f="${id}" aria-label="${esc(label)}"><option value="">${esc(label)}</option>${opts
       .map(([v, l]) => `<option value="${esc(v)}"${f[id] === v ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
+
+  // One button for the order of "when it was asked". While another column sorts, it offers "Sort by asked"; while
+  // asked sorts, its label is the order shown now and pressing it flips that.
+  const sortButton = () => {
+    if (f.sort !== 'asked') return `<button type="button" class="fchip ftoggle" data-asked-order aria-label="Sort by asked, oldest first">${icon('sort', 13)}Sort by asked</button>`;
+    const newest = f.dir === 'desc';
+    return `<button type="button" class="fchip ftoggle" data-asked-order aria-label="${newest ? 'Newest first. Press for oldest first.' : 'Oldest first. Press for newest first.'}">${icon('sort', 13)}${newest ? 'Newest first' : 'Oldest first'}</button>`;
+  };
 
   const toolbar = () => `<div class="toolbar"><label class="field">${icon('search', 16)}<input data-f="q" value="${esc(f.q ?? '')}" placeholder="Search tasks" aria-label="Search tasks" maxlength="200"></label>
     ${sel('client', 'All clients', clients.map((c) => [c.code, c.name]))}
@@ -55,6 +68,8 @@ export function mountTasks(ctx) {
     ${sel('priority', 'Any priority', [['critical', 'Critical'], ['major', 'Major'], ['medium', 'Medium'], ['low', 'Low']])}
     <button type="button" class="fchip ftoggle" data-removed aria-pressed="${f.removed === '1'}">${f.removed === '1' ? icon('tick', 13) : ''}Include removed clients</button>
     ${f.closed === '7d' ? `<button type="button" class="fchip" data-clear="closed" aria-label="Remove the filter: done in the last 7 days">Done · last 7 days${icon('close', 13)}</button>` : ''}
+    ${sortButton()}
+    <button type="button" class="btn btn-ghost btn-sm" data-export${exporting ? ' aria-disabled="true"' : ''}>${icon('xls', 16)}Export Excel</button>
     <span class="count-note" data-region="count"></span></div>`;
 
   const th = (/** @type {string} */ k, /** @type {string} */ l) => {
@@ -65,16 +80,17 @@ export function mountTasks(ctx) {
   const table = () => {
     if (err && !data) return failed(err);
     if (!data) return loading('Loading tasks…');
-    const head = `<thead><tr>${th('code', 'Task')}<th>Title</th>${SORTABLE.slice(1).map(([k, l]) => th(k, l)).join('')}${th('priority', 'Priority')}<th>Source</th></tr></thead>`;
+    const head = `<thead><tr>${th('code', 'Task')}<th>Title</th>${SORTABLE.slice(1).map(([k, l]) => th(k, l)).join('')}${th('priority', 'Priority')}${th('asked', 'Asked')}<th>Source</th></tr></thead>`;
     const rows = data.rows.map((t) => {
       const src = sourceLabel(t.source);
       return `<tr data-task="${esc(t.code)}" tabindex="0"><td data-label="Task"><span class="code">${esc(t.code)}</span></td><td class="ttl" data-label="Title">${esc(t.title)}${t.sentiment ? ` ${moodTag(moodLabel(t.sentiment))}` : ''}</td>
         <td data-label="Client">${esc(t.client.name)}</td><td data-label="Owner">${esc(t.owner ?? '—')}</td>
         <td data-label="Deadline" class="${t.overdue ? 'od' : ''}">${esc(deadlineText(t.deadline))}</td><td data-label="Status">${pill(taskPill(t.status))}</td>
         <td data-label="Priority">${pill(priorityPill(t.priority))}</td>
+        <td data-label="Asked">${esc(stamp(t.askedAt))}</td>
         <td data-label="Source"><span class="src">${icon(src.icon, 15)}${esc(src.label)}</span></td></tr>`;
     }).join('');
-    return `<div class="card flush"><div class="tbl-wrap"><table class="tbl tbl-cards"><caption class="sr-only">Tasks</caption>${head}<tbody>${rows || `<tr><td colspan="8">${empty('No tasks match these filters.')}</td></tr>`}</tbody></table></div></div>`;
+    return `<div class="card flush"><div class="tbl-wrap"><table class="tbl tbl-cards"><caption class="sr-only">Tasks</caption>${head}<tbody>${rows || `<tr><td colspan="9">${empty('No tasks match these filters.')}</td></tr>`}</tbody></table></div>${data.rows.length < data.total ? `<div class="more-row"><button type="button" class="btn btn-ghost" data-more${moreBusy ? ' aria-disabled="true"' : ''}>${moreBusy ? 'Loading…' : 'Show more'}</button></div>` : ''}</div>`;
   };
 
   const drawTable = () => {
@@ -87,11 +103,11 @@ export function mountTasks(ctx) {
 
   const drawAll = () => ctx.redraw(`${toolbar()}<div data-region="table">${table()}</div>`);
 
-  async function load() {
+  // keep: after a change made in the panel, reload as many rows as are shown (up to the API's 500), not just the first page.
+  async function load(keep = false) {
     const mine = ++asked;
     try {
-      const s = taskQueryToSearch(f);
-      const r = await get(`/tasks${s ? `${s}&` : '?'}limit=200`);
+      const r = await get(`/tasks${taskApiQuery(f, keep && data ? Math.min(Math.max(PAGE, data.rows.length), 500) : PAGE)}`);
       if (!ctx.live() || mine !== asked) return;
       data = r;
       err = null;
@@ -100,6 +116,58 @@ export function mountTasks(ctx) {
       err = e;
     }
     drawTable();
+  }
+
+  // Export: fetched here, not a plain download link, so a refusal (too soon, not ready) shows our own message.
+  // aria-disabled, not disabled: the button keeps keyboard focus while it works.
+  const exportBusy = () => $('.toolbar [data-export]', ctx.view)?.setAttribute('aria-disabled', 'true');
+  async function exportExcel() {
+    if (exporting) return;
+    exporting = true;
+    exportBusy();
+    try {
+      const res = await download('/tracker/export');
+      const url = URL.createObjectURL(await res.blob());
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = exportFilename(res.headers.get('Content-Disposition'));
+      document.body.append(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    } catch (e) {
+      toast(e instanceof ApiError && e.message ? e.message : "The export didn't work. Try again in a moment.", false);
+    } finally {
+      exporting = false;
+      $('.toolbar [data-export]', ctx.view)?.removeAttribute('aria-disabled');
+    }
+  }
+
+  // The next page, appended. It shares the counter with load(): a new query (a filter, a sort, a search) makes an
+  // answer still on its way for the old one draw nothing.
+  async function showMore() {
+    if (!data || moreBusy || data.rows.length >= data.total) return;
+    const mine = ++asked;
+    const before = data.rows.length;
+    moreBusy = true;
+    drawTable();
+    let fresh = false;
+    try {
+      const r = await get(`/tasks${taskApiQuery(f, PAGE, before)}`);
+      if (!ctx.live() || mine !== asked || !data) return;
+      const have = new Set(data.rows.map((t) => t.code));
+      data = { total: r.total, rows: [...data.rows, ...r.rows.filter((t) => !have.has(t.code))] };
+      fresh = true;
+    } catch (e) {
+      if (ctx.live() && mine === asked) toast(errorText(e), false);
+    } finally {
+      moreBusy = false;
+      if (ctx.live()) drawTable();
+    }
+    if (!fresh || !ctx.live() || !data) return;
+    // Focus: the button while more remain (a keyboard user can press it again), else the first new row.
+    const target = data.rows.length < data.total ? $('[data-more]', ctx.view) : ctx.view.querySelectorAll('tbody tr[data-task]')[before];
+    /** @type {HTMLElement | null} */ (target)?.focus();
   }
 
   const changed = () => {
@@ -126,8 +194,12 @@ export function mountTasks(ctx) {
   drawAll();
   void load();
   void lists();
+  // The chat opened from a task's Proof is not drawn by this screen, so it is kept current here (as the Clients screen does).
+  ctx.poll(async () => {
+    if (chatOpen()) await refreshChat();
+  }, 30_000);
 
-  const open = (/** @type {string} */ code) => openTaskDrawer(code, { onChange: () => void load() });
+  const open = (/** @type {string} */ code) => openTaskDrawer(code, { onChange: () => void load(true) });
   const stop = listen(ctx.view, {
     input: (e) => {
       const el = /** @type {HTMLInputElement} */ (e.target);
@@ -151,6 +223,8 @@ export function mountTasks(ctx) {
     },
     click: (e) => {
       const t = /** @type {Element} */ (e.target);
+      if (t.closest('[data-more]')) return void showMore();
+      if (t.closest('[data-export]')) return void exportExcel();
       const sort = /** @type {HTMLElement | null} */ (t.closest('[data-sort]'));
       if (sort) {
         const k = sort.dataset.sort ?? 'deadline';
@@ -159,6 +233,20 @@ export function mountTasks(ctx) {
           f.sort = k;
           f.dir = 'asc';
         }
+        const ob = $('.toolbar [data-asked-order]', ctx.view);
+        if (ob) ob.outerHTML = sortButton();
+        changed();
+        return;
+      }
+      if (t.closest('[data-asked-order]')) {
+        if (f.sort === 'asked') f.dir = f.dir === 'asc' ? 'desc' : 'asc';
+        else {
+          f.sort = 'asked';
+          f.dir = 'asc';
+        }
+        const bar = $('.toolbar [data-asked-order]', ctx.view);
+        if (bar) bar.outerHTML = sortButton();
+        /** @type {HTMLElement | null} */ ($('.toolbar [data-asked-order]', ctx.view))?.focus();
         changed();
         return;
       }

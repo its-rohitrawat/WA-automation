@@ -1,21 +1,43 @@
 import { describe, expect, it } from 'vitest';
 // The screens' pure helpers are a browser module; their JSDoc types are checked by tsconfig.web.json, so the import is untyped here.
 // @ts-expect-error -- browser module (see above)
-import { auditPill, deadlineText, groupByIstDay, meetingPill, numbersMatch, readList, sourceLabel, taskPill, taskQueryFromSearch, taskQueryToSearch, usageChart } from '../../src/web/public/views/workLib.js';
+import { auditPill, deadlineText, exportFilename, groupByIstDay, meetingPill, numbersMatch, readList, sourceLabel, taskApiQuery, taskPill, taskQueryFromSearch, taskQueryToSearch, usageChart } from '../../src/web/public/views/workLib.js';
 
 describe('task filters in the URL', () => {
   it('reads only allowed values, with the defaults left out', () => {
     expect(taskQueryFromSearch('?q=logo&client=sha&status=overdue&owner=Rahul&deadline=week&priority=major&sort=client&dir=desc')).toEqual({
       q: 'logo', client: 'SHA', status: 'overdue', owner: 'Rahul', deadline: 'week', priority: 'major', sort: 'client', dir: 'desc',
     });
-    expect(taskQueryFromSearch('?status=late&deadline=soon&priority=urgent&sort=title&dir=up&client=sh1')).toEqual({ sort: 'deadline', dir: 'asc' });
-    expect(taskQueryFromSearch('')).toEqual({ sort: 'deadline', dir: 'asc' });
+    expect(taskQueryFromSearch('?status=late&deadline=soon&priority=urgent&sort=title&dir=up&client=sh1')).toEqual({ sort: 'asked', dir: 'asc' });
+    expect(taskQueryFromSearch('')).toEqual({ sort: 'asked', dir: 'asc' });
   });
 
   it('writes the query back, leaving out empty values and the default sort', () => {
-    expect(taskQueryToSearch({ q: '50% off', status: 'open', sort: 'deadline', dir: 'asc' })).toBe('?q=50%25+off&status=open');
+    expect(taskQueryToSearch({ q: '50% off', status: 'open', sort: 'asked', dir: 'asc' })).toBe('?q=50%25+off&status=open');
     expect(taskQueryToSearch({ sort: 'owner', dir: 'desc' })).toBe('?sort=owner&dir=desc');
-    expect(taskQueryToSearch({ sort: 'deadline', dir: 'asc' })).toBe('');
+    expect(taskQueryToSearch({ sort: 'asked', dir: 'asc' })).toBe('');
+    expect(taskQueryToSearch({ sort: 'asked', dir: 'desc' })).toBe('?sort=asked&dir=desc');
+    expect(taskQueryToSearch({ sort: 'deadline', dir: 'asc' })).toBe('?sort=deadline');
+    expect(taskQueryFromSearch('?sort=deadline')).toEqual({ sort: 'deadline', dir: 'asc' });
+  });
+
+  it('always sends the order and the limit to the API', () => {
+    expect(taskApiQuery({ sort: 'asked', dir: 'asc' })).toBe('?sort=asked&dir=asc&limit=200');
+    expect(taskApiQuery({ sort: 'asked', dir: 'asc' }, 200, 400)).toBe('?sort=asked&dir=asc&limit=200&offset=400');
+    expect(taskApiQuery({ status: 'open', sort: 'owner', dir: 'desc' }, 50)).toBe('?status=open&sort=owner&dir=desc&limit=50');
+  });
+
+  it('takes the export file name from Content-Disposition, with a fallback', () => {
+    expect(exportFilename('attachment; filename="Tracker.xlsx"')).toBe('Tracker.xlsx');
+    expect(exportFilename('attachment; filename=Tracker-2026.xlsx')).toBe('Tracker-2026.xlsx');
+    expect(exportFilename("attachment; filename*=UTF-8''Tracker%20Nov.xlsx")).toBe('Tracker Nov.xlsx');
+    expect(exportFilename('attachment; filename="../../evil.xlsx"')).toBe('evil.xlsx');
+    expect(exportFilename(null)).toBe('Tracker.xlsx');
+    expect(exportFilename('attachment')).toBe('Tracker.xlsx');
+    expect(exportFilename('attachment; filename=""')).toBe('Tracker.xlsx');
+    expect(exportFilename('attachment; filename="Tracker' + String.fromCharCode(0x7f) + '.xlsx"')).toBe('Tracker.xlsx');
+    expect(exportFilename('attachment; filename="Tracker' + String.fromCharCode(0x202e) + 'gnp.xlsx"')).toBe('Tracker.xlsx');
+    expect(exportFilename('attachment; filename="notes.exe"')).toBe('Tracker.xlsx');
   });
 
   it('round-trips', () => {
@@ -24,8 +46,8 @@ describe('task filters in the URL', () => {
   });
 
   it('keeps the Overview\'s closed=7d filter, and drops any other closed value', () => {
-    expect(taskQueryFromSearch('?status=done&closed=7d')).toEqual({ status: 'done', closed: '7d', sort: 'deadline', dir: 'asc' });
-    expect(taskQueryToSearch({ status: 'done', closed: '7d', sort: 'deadline', dir: 'asc' })).toBe('?status=done&closed=7d');
+    expect(taskQueryFromSearch('?status=done&closed=7d')).toEqual({ status: 'done', closed: '7d', sort: 'asked', dir: 'asc' });
+    expect(taskQueryToSearch({ status: 'done', closed: '7d', sort: 'asked', dir: 'asc' })).toBe('?status=done&closed=7d');
     expect(taskQueryFromSearch('?closed=30d').closed).toBeUndefined();
     expect(taskQueryFromSearch('?removed=1').removed).toBe('1');
     expect(taskQueryFromSearch('?removed=yes').removed).toBeUndefined();

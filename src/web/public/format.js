@@ -39,6 +39,16 @@ export function date(iso) {
   return d ? d.toLocaleDateString('en-GB', { timeZone: IST, day: 'numeric', month: 'short', year: 'numeric' }) : '—';
 }
 
+/** "11 Nov, 18:42" in India time; the year is added when it is not the current year ("11 Nov 2025, 18:42"). @param {string | null | undefined} iso @param {Date} [now] */
+export function stamp(iso, now = new Date()) {
+  const d = parse(iso);
+  if (!d) return '—';
+  const year = (/** @type {Date} */ x) => x.toLocaleDateString('en-GB', { timeZone: IST, year: 'numeric' });
+  const day = d.toLocaleDateString('en-GB', { timeZone: IST, day: 'numeric', month: 'short' });
+  const time = d.toLocaleTimeString('en-GB', { timeZone: IST, hour: '2-digit', minute: '2-digit' });
+  return `${day}${year(d) === year(now) ? '' : ` ${year(d)}`}, ${time}`;
+}
+
 /** "11:55" in India time. @param {string | null | undefined} iso */
 export function clock(iso) {
   const d = parse(iso);

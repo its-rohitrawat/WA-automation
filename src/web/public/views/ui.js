@@ -99,7 +99,7 @@ function holdFocus(box, onEscape) {
 
 // ---------- the drawer ----------
 
-/** @type {{ drawer: HTMLElement, scrim: HTMLElement, back: Element | null, release: () => void } | null} */
+/** @type {{ drawer: HTMLElement, scrim: HTMLElement, back: Element | null, release: () => void, find?: () => Element | null } | null} */
 let open = null;
 
 const wireClose = (/** @type {HTMLElement} */ drawer) => {
@@ -134,6 +134,14 @@ export function openDrawer(html) {
   return drawer;
 }
 
+/**
+ * Where focus goes on closing this drawer when the element that opened it has since been redrawn away (a list that
+ * reloaded): the function finds its replacement. @param {HTMLElement} handle @param {() => Element | null} find
+ */
+export function returnFocusTo(handle, find) {
+  if (open?.drawer === handle) open.find = find;
+}
+
 /** @param {HTMLElement} drawer */
 function focusHeading(drawer) {
   const h = drawer.querySelector('h2');
@@ -164,7 +172,8 @@ export const isOpen = (handle) => open?.drawer === handle;
 /** Closes the drawer; `instant` skips the animation (a new one is opening, or the screen is left). @param {boolean} [instant] */
 export function closeDrawer(instant = false) {
   if (!open) return;
-  const { drawer, scrim, back, release } = open;
+  const { drawer, scrim, release, find } = open;
+  const back = open.back instanceof HTMLElement && document.contains(open.back) ? open.back : (find?.() ?? open.back);
   open = null;
   release();
   const done = () => {

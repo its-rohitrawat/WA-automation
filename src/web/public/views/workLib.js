@@ -7,7 +7,7 @@ const IST = 'Asia/Kolkata';
 export const TASK_STATUSES = ['overdue', 'open', 'review', 'done'];
 export const TASK_DEADLINES = ['past', 'week', 'none'];
 export const TASK_PRIORITIES = ['critical', 'major', 'medium', 'low'];
-export const TASK_SORTS = ['deadline', 'code', 'client', 'owner', 'status', 'priority'];
+export const TASK_SORTS = ['deadline', 'code', 'client', 'owner', 'status', 'priority', 'asked'];
 /** closed=7d: closed in the last 7 days (the Overview's Done count). */
 export const TASK_CLOSED = ['7d'];
 /** removed=1: also the tasks of removed clients (left out, active clients only, as the Overview counts). */
@@ -21,7 +21,7 @@ export const TASK_REMOVED = ['1'];
 export function taskQueryFromSearch(search) {
   const p = new URLSearchParams(search);
   /** @type {TaskFilter} */
-  const out = { sort: 'deadline', dir: 'asc' };
+  const out = { sort: 'asked', dir: 'asc' };
   const text = (/** @type {string} */ k) => (p.get(k) ?? '').trim().slice(0, 200);
   const q = text('q');
   if (q) out.q = q;
@@ -43,19 +43,50 @@ export function taskQueryFromSearch(search) {
   if (closed) out.closed = closed;
   const removed = pick('removed', TASK_REMOVED);
   if (removed) out.removed = removed;
-  out.sort = pick('sort', TASK_SORTS) ?? 'deadline';
+  out.sort = pick('sort', TASK_SORTS) ?? 'asked';
   out.dir = p.get('dir') === 'desc' ? 'desc' : 'asc';
   return out;
 }
 
-/** The query for these filters: "" when nothing is set; the default sort is left out. @param {TaskFilter} f */
+/**
+ * The query sent to the API: the filters, and always sort, dir and limit (the server's own default order is the
+ * deadline, so the order is never left to it). `offset`: the rows already shown, for "Show more" (left out at 0).
+ * @param {TaskFilter} f @param {number} [limit] @param {number} [offset]
+ */
+export function taskApiQuery(f, limit = 200, offset = 0) {
+  const p = new URLSearchParams(taskQueryToSearch(f));
+  p.set('sort', f.sort);
+  p.set('dir', f.dir);
+  p.set('limit', String(limit));
+  if (offset > 0) p.set('offset', String(offset));
+  return `?${p.toString()}`;
+}
+
+/** The file name from a Content-Disposition header, as a bare name; "Tracker.xlsx" when there is none. @param {string | null | undefined} header */
+export function exportFilename(header) {
+  const FALLBACK = 'Tracker.xlsx';
+  if (!header) return FALLBACK;
+  const star = /filename\*\s*=\s*UTF-8''([^;]+)/i.exec(header);
+  const plain = /filename\s*=\s*"([^"]*)"/i.exec(header) ?? /filename\s*=\s*([^;"]+)/i.exec(header);
+  let name = '';
+  try {
+    name = star ? decodeURIComponent(star[1].trim()) : (plain?.[1] ?? '').trim();
+  } catch {
+    name = (plain?.[1] ?? '').trim();
+  }
+  name = name.replaceAll(String.fromCharCode(92), '/').split('/').pop() ?? '';
+  // Plain letters, digits, spaces and . ( ) - _ only, ending .xlsx: nothing else (control or bidi characters) is trusted.
+  return /^[\w .()-]{1,120}\.xlsx$/.test(name) ? name : FALLBACK;
+}
+
+/** The query for these filters: "" when nothing is set; the default sort (asked, oldest first) is left out. @param {TaskFilter} f */
 export function taskQueryToSearch(f) {
   const p = new URLSearchParams();
   for (const k of /** @type {const} */ (['q', 'client', 'status', 'owner', 'deadline', 'priority', 'closed', 'removed'])) {
     const v = f[k];
     if (v) p.set(k, v);
   }
-  if (f.sort !== 'deadline' || f.dir !== 'asc') {
+  if (f.sort !== 'asked' || f.dir !== 'asc') {
     p.set('sort', f.sort);
     if (f.dir === 'desc') p.set('dir', 'desc');
   }

@@ -32,6 +32,7 @@ let bulkRound = 0;
 /** The screens drawn from src/web/public/views/screens.js. */
 const WORK_SCREENS = ['tasks', 'meetings', 'activity', 'tracker', 'usage', 'automations', 'audit', 'settings'];
 let round = 0;
+let exported = false; // the export is limited to one every 10 seconds, so one round downloads it
 let timeRound = 0;
 
 const state: FakeState = { signedIn: false, empty: false };
@@ -103,6 +104,103 @@ async function askClear(page: Page, where: string) {
     .map((e) => e.textContent?.trim().slice(0, 30) || e.tagName), box);
   if (covered.length) fail(where, `the Ask button covers ${covered.join(', ')} at the end of the screen`);
   await page.evaluate(() => scrollTo(0, 0));
+}
+
+/** "11 Nov, 18:42" in India time: how the Tasks screen writes a time (this year). */
+function istStamp(iso: string): string {
+  const d = new Date(iso);
+  const day = d.toLocaleDateString('en-GB', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short' });
+  return `${day}, ${d.toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' })}`;
+}
+
+/** The Tasks screen (Tasks and proof, 13 Nov 2026): Asked column and order, Export, and the Proof in the task panel. */
+async function tasksProof(p: Page, where: string, tag: string, phone: boolean) {
+  const rows = p.locator('#view tbody tr[data-task]');
+  await rows.first().waitFor();
+  if ((await p.locator('#view th button[data-sort="asked"]').count()) !== 1) fail(where, 'there is no Asked column header');
+  const rowsApi = (await p.evaluate(async () => {
+    const r = await (await fetch('/dashboard/api/tasks?limit=200')).json();
+    return r.rows.map((t: { code: string; askedAt: string }) => ({ code: t.code, askedAt: t.askedAt }));
+  })) as { code: string; askedAt: string }[];
+  const at = new Map(rowsApi.map((t) => [t.code, t.askedAt]));
+  const askedOrder = async () => (await rows.evaluateAll((rs) => rs.map((r) => r.getAttribute('data-task')))).map((c) => at.get(c ?? '') ?? '');
+  const sorted = (a: string[], dir: 1 | -1) => a.every((x, i) => i === 0 || x.localeCompare(a[i - 1]!) * dir >= 0);
+  const order = p.locator('#view [data-asked-order]');
+  if ((await order.textContent())?.trim() !== 'Oldest first') fail(where, `the sort button reads "${await order.textContent()}", not "Oldest first"`);
+  if (!sorted(await askedOrder(), 1)) fail(where, 'the tasks are not oldest first by default');
+  if (new URL(p.url()).search !== '') fail(where, 'the default order is in the address');
+  const first = rows.first().locator('td[data-label="Asked"]');
+  const firstText = ((await first.textContent()) ?? '').trim();
+  if (!(await first.isVisible()) || !/^[0-9]{1,2} [A-Z][a-z]{2}( [0-9]{4})?, [0-9]{2}:[0-9]{2}$/.test(firstText)) fail(where, `the Asked field reads "${firstText}"${phone ? ' (phone card)' : ''}`);
+  if (phone) {
+    // A phone shows each row as a card: the field carries its label.
+    const label = await first.evaluate((e) => getComputedStyle(e, '::before').content);
+    if (!label.includes('Asked')) fail(where, `the phone card does not label the Asked field (${label})`);
+  }
+  await p.screenshot({ path: join(OUT, `tasks-asked-${tag}.png`) });
+  await order.click();
+  await p.waitForURL((u) => u.search === '?sort=asked&dir=desc');
+  await p.locator('#view [data-asked-order]', { hasText: 'Newest first' }).waitFor();
+  await p.waitForTimeout(500);
+  if (!sorted(await askedOrder(), -1)) fail(where, 'the sort button did not show newest first');
+  await order.click();
+  await p.waitForURL((u) => u.pathname === '/dashboard/tasks' && u.search === '');
+  await p.locator('#view [data-asked-order]', { hasText: 'Oldest first' }).waitFor();
+  await p.waitForTimeout(500);
+  if (!sorted(await askedOrder(), 1)) fail(where, 'the sort button did not return to oldest first');
+  if (!exported) {
+    exported = true;
+    const [download] = await Promise.all([p.waitForEvent('download'), p.locator('#view [data-export]').click()]);
+    if (!/^Tracker-[0-9]{4}-[0-9]{2}-[0-9]{2}[.]xlsx$/.test(download.suggestedFilename())) fail(where, `the export is named "${download.suggestedFilename()}"`);
+    await p.locator('#view [data-export]:not([aria-disabled])').waitFor();
+  }
+
+  // The task panel's Proof: a chat message, a meeting and a dashboard task.
+  const openTask = async (title: string) => {
+    const row = p.locator('#view tbody tr[data-task]', { hasText: title });
+    const code = (await row.getAttribute('data-task')) ?? '';
+    await row.focus();
+    await row.press('Enter');
+    await p.locator('.drawer .dr-head .code', { hasText: code }).waitFor();
+    await p.locator('.drawer .h4', { hasText: 'Proof' }).waitFor();
+    return code;
+  };
+  where = `task proof ${tag}`;
+  const msgCode = await openTask('Fix the footer on mobile (from the chat)');
+  const detail = (await p.evaluate(async (c) => (await fetch(`/dashboard/api/tasks/${c}`)).json(), msgCode)) as { askedAt: string; createdAt: string };
+  const bubble = p.locator('.drawer button.quote-btn');
+  const text = (await bubble.textContent()) ?? '';
+  for (const want of ['Ajay Jain', 'Please check the footer on mobile', istStamp(detail.askedAt), 'Open in chat']) if (!text.includes(want)) fail(where, `the bubble lacks "${want}": ${text}`);
+  const body = (await p.locator('.drawer .dr-body').textContent()) ?? '';
+  for (const want of [`Asked: ${istStamp(detail.askedAt)}`, `Found by the agent: ${istStamp(detail.createdAt)}`]) if (!body.includes(want)) fail(where, `the Proof lacks "${want}"`);
+  await p.waitForTimeout(500); // the drawer's slide-in, so the picture shows it at rest
+  await p.screenshot({ path: join(OUT, `task-proof-${tag}.png`) });
+  await bubble.click();
+  const lit = p.locator('.chat-sheet .ch-row.ch-hit');
+  await lit.waitFor();
+  if (!((await lit.textContent()) ?? '').includes('Please check the footer on mobile')) fail(where, 'the chat lit another message');
+  if ((await p.locator('.chat-sheet [data-chat-back]').getAttribute('aria-label')) !== 'Back to the task') fail(where, 'the chat Back button is not named "Back to the task"');
+  await p.waitForTimeout(500);
+  await p.screenshot({ path: join(OUT, `task-proof-chat-${tag}.png`) });
+  await p.locator('.chat-sheet [data-chat-back]').click();
+  await p.locator('.drawer .dr-head .code', { hasText: msgCode }).waitFor();
+  await p.waitForFunction(() => document.activeElement?.hasAttribute('data-open-source') === true).catch(() => fail(where, 'focus did not return to Open in chat'));
+  await p.keyboard.press('Escape');
+  await p.locator('.drawer').waitFor({ state: 'detached' });
+  const back = await p.evaluate(() => document.activeElement?.getAttribute('data-task') ?? '');
+  if (back !== msgCode) fail(where, `closing the panel left focus on "${back}", not the task row`);
+
+  const meetCode = await openTask('Redo the logo (from the meeting)');
+  const meet = (await p.locator('.drawer .dr-body').textContent()) ?? '';
+  for (const want of ['From the meeting Kickoff call', 'Found by the agent', 'Said in the meeting']) if (!meet.includes(want)) fail(where, `the meeting Proof of ${meetCode} lacks "${want}"`);
+  if ((await p.locator('.drawer [data-open-source]').count()) !== 0) fail(where, 'a meeting task offers Open in chat');
+  await p.keyboard.press('Escape');
+  await p.locator('.drawer').waitFor({ state: 'detached' });
+
+  await openTask('Call the printer (added on the dashboard)');
+  if (!((await p.locator('.drawer .dr-body').textContent()) ?? '').includes('Added by you on')) fail(where, 'the dashboard task does not say who added it');
+  await p.keyboard.press('Escape');
+  await p.locator('.drawer').waitFor({ state: 'detached' });
 }
 
 async function launch() {
@@ -379,6 +477,7 @@ async function main() {
             if ((await p.locator('#view [data-new-file]', { hasText: 'A new tracker file was started on' }).count()) !== 1) fail(where, 'has no new-file note');
             if ((await p.locator('#view a[href^="https://drive.google.com/file/d/"]', { hasText: 'Open in Drive' }).count()) !== 1) fail(where, 'has no Open in Drive');
           }
+          if (screen === 'tasks') await tasksProof(p, where, tag, vp.width < 500);
           if (screen === 'automations') {
             // The send time is saved with its own button (a new one each round: a time already in force saves nothing),
             // and the next report follows it.
