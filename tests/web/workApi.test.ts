@@ -7,7 +7,9 @@ import { createTask, getTaskByCode } from '../../src/store/tasks.ts';
 import { manualClock } from '../../src/util/clock.ts';
 import { AuditLog } from '../../src/web/audit.ts';
 import { registerWorkApi } from '../../src/web/routes/work.ts';
-import { NOW, row, rows, seeded } from '../helpers/db.ts';
+import { NOW, row, rows, seeded, SHARMA } from '../helpers/db.ts';
+
+const SHARMA_GROUP = SHARMA.groupId;
 import { bootDashboard, OWNER } from '../helpers/web.ts';
 
 vi.mock('../../src/output/chatPicture.ts', async (orig) => {
@@ -20,7 +22,7 @@ afterEach(async () => {
   for (const c of closers.splice(0)) await c();
 });
 
-async function boot(o: { paused?: boolean; actionCapacity?: number; exportTimeoutMs?: number; failAudit?: { on: boolean }; book?: (() => Promise<Buffer>) | null } = {}) {
+async function boot(o: { pictureTimeoutMs?: number; groupMembers?: (g: string) => Promise<never[] | null>; connected?: (g: string) => boolean; paused?: boolean; actionCapacity?: number; exportTimeoutMs?: number; failAudit?: { on: boolean }; book?: (() => Promise<Buffer>) | null } = {}) {
   const { db, ids } = await seeded();
   const clock = manualClock(NOW);
   await createTask(db, { clientId: ids.sharma, side: 'us', title: 'Banner', category: 'design', priority: 'major', assignedTo: null, askedBy: null, raisedOn: '2026-10-10',
@@ -38,7 +40,8 @@ async function boot(o: { paused?: boolean; actionCapacity?: number; exportTimeou
   const h = await bootDashboard({
     db, clock, actionCapacity: o.actionCapacity, moreOwners: ['second@example.com'],
     mount: (router, x) => registerWorkApi(router, {
-      ...x, db, clock, audit: o.failAudit ? { record: async (e, q) => { if (o.failAudit!.on) throw new Error('audit down'); await audit.record(e, q); } } : audit, spend: { isPaused: () => o.paused ?? false }, log: { warn: (f: unknown) => { warned.push(f as Record<string, unknown>); } }, ...(o.exportTimeoutMs ? { exportTimeoutMs: o.exportTimeoutMs } : {}),
+      ...x, db, clock, audit: o.failAudit ? { record: async (e, q) => { if (o.failAudit!.on) throw new Error('audit down'); await audit.record(e, q); } } : audit, spend: { isPaused: () => o.paused ?? false }, log: { warn: (f: unknown) => { warned.push(f as Record<string, unknown>); } }, ...(o.exportTimeoutMs ? { exportTimeoutMs: o.exportTimeoutMs } : {}), ...(o.pictureTimeoutMs ? { pictureTimeoutMs: o.pictureTimeoutMs } : {}),
+      ...(o.groupMembers ? { groupMembers: o.groupMembers, ...(o.connected ? { connected: o.connected } : {}) } : {}),
       ...(o.book === null ? {} : { trackerWorkbook: o.book ?? (async () => Buffer.from('PK-founder-workbook', 'latin1')) }),
     }),
   });
@@ -165,7 +168,7 @@ describe('work API: the task picture', () => {
     const meeting = await mk({ origin: 'meeting', meetingId: b.m2 });
     const dash = await mk({ origin: 'dashboard' });
     const gone = await mk({ sourceWaId: 'NOPE' });
-    return { ...b, chat, meeting, dash, gone };
+    return { ...b, client, chat, meeting, dash, gone };
   }
   const pic = async (h: Awaited<ReturnType<typeof boot>>['h'], code: string, o: { signedIn?: boolean | string; headers?: Record<string, string> } = {}) => {
     const signedIn = o.signedIn ?? true;
@@ -178,7 +181,7 @@ describe('work API: the task picture', () => {
     const r = await pic(h, chat);
     expect(r.status).toBe(200);
     expect(r.headers.get('content-type')).toBe('image/png');
-    expect(r.headers.get('cache-control')).toBe('private, max-age=300');
+    expect(r.headers.get('cache-control')).toBe('no-store');
     expect(r.headers.get('x-content-type-options')).toBe('nosniff');
     expect(Buffer.from(await r.arrayBuffer()).subarray(0, 4).equals(PNG)).toBe(true);
   }, 30_000);
@@ -215,6 +218,32 @@ describe('work API: the task picture', () => {
     expect(((await r.json()) as { error: { code: string } }).error.code).toBe('rate_limited');
     expect((await pic(h, chat, { signedIn: 'second@example.com' })).status).toBe(200);
   }, 60_000);
+
+  it('answers 503 with Retry-After when drawing takes too long, logs only the code, and the next picture still works', async () => {
+    const { h, chat, warned } = await bootPicture({ pictureTimeoutMs: 1000 });
+    vi.mocked(chatPicture.drawChatPicture).mockImplementationOnce(() => new Promise<Buffer>(() => undefined));
+    const r = await pic(h, chat);
+    expect(r.status).toBe(503);
+    expect(r.headers.get('retry-after')).toBe('10');
+    expect(((await r.json()) as { error: { code: string } }).error.code).toBe('busy');
+    expect(warned).toEqual([expect.objectContaining({ code: 'PictureTimeout' })]);
+    expect((await pic(h, chat)).status).toBe(200);
+  }, 30_000);
+
+  it('reads the group members only while the phone is connected', async () => {
+    const calls: string[] = [];
+    let connected = false;
+    const { db, h, client } = await bootPicture({ groupMembers: async (g) => { calls.push(g); return []; }, connected: () => connected });
+    // A message with a tag nobody in the chat is known by: naming it is what asks for the group's members.
+    await insertMessage(db, { waId: 'W3', clientId: client, senderJid: 'j1', senderNumber: null, senderName: null, fromMe: false, ts: '2026-10-10T04:06:00.000Z', text: 'ask @919800000077 please', quotedWaId: null, mediaType: null });
+    const tagged = (await createTask(db, { clientId: client, side: 'us', title: 'Tag', category: 'design', priority: 'major', assignedTo: null, askedBy: null, raisedOn: '2026-10-10',
+      deadline: null, latestProgress: null, sourceQuote: null, sourceDate: null, sourceWaId: 'W3', origin: 'whatsapp' }, NOW)).code;
+    expect((await pic(h, tagged)).status).toBe(200);
+    expect(calls).toEqual([]); // not connected: WhatsApp is not asked
+    connected = true;
+    expect((await pic(h, tagged)).status).toBe(200);
+    expect(calls).toEqual([SHARMA_GROUP]);
+  }, 30_000);
 
   it('answers 500 with a plain message and logs only the error name when drawing fails', async () => {
     const { h, chat, warned } = await bootPicture();

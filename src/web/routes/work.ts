@@ -46,6 +46,8 @@ export interface WorkApiDeps extends ActionGuard {
   groupMembers?: GroupMembersSource;
   /** WhatsApp is open for this group's phone (as the chat routes ask before reading members). */
   connected?: (groupId: string) => boolean;
+  /** How long a picture may take to draw before the route gives up (20 s; short in tests). */
+  pictureTimeoutMs?: number;
   /** How long a tracker build may take before the export gives up (60 s; short in tests). */
   exportTimeoutMs?: number;
 }
@@ -56,6 +58,8 @@ const EXPORT_BUILD_MS = 60_000;
 
 /** At most 30 task pictures a minute per signed-in owner. */
 const PICTURE_LIMIT = { capacity: 30, refillPerSec: 30 / 60 };
+const PICTURE_DRAW_MS = 20_000;
+const PICTURE_BUSY = 'The picture is taking too long. Try again in a moment.';
 const PICTURE_FAILED = 'The picture could not be drawn. Try again in a moment.';
 
 const NOT_READY = 'The tracker is not ready yet. Try again in a moment.';
@@ -94,19 +98,32 @@ export function registerWorkApi(router: Router, d: WorkApiDeps): void {
     const client = await getClientByCode(d.db, t.client.code);
     if (!client) return none();
     let png: Buffer;
+    let timer: NodeJS.Timeout | undefined;
     try {
       const members = d.groupMembers && d.connected?.(client.groupId) ? () => d.groupMembers!(client.groupId) : undefined;
       const window = await pictureWindow(d.db, client, t.sourceMessageId, members);
       if (!window) return none();
-      png = await drawChatPicture(window);
+      // A drawing that never finishes ends as a 503, so the browser is not left waiting.
+      const timeout = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(Object.assign(new Error('picture timed out'), { name: 'PictureTimeout' })), d.pictureTimeoutMs ?? PICTURE_DRAW_MS);
+      });
+      png = await Promise.race([drawChatPicture(window), timeout]);
     } catch (e) {
+      if ((e as Error | null)?.name === 'PictureTimeout') {
+        d.log?.warn({ code: 'PictureTimeout', requestId: ctx.requestId }, 'task picture timed out');
+        ctx.res.setHeader('Retry-After', '10');
+        return sendJson(ctx.res, 503, { error: { code: 'busy', message: PICTURE_BUSY } });
+      }
       const code = (e as { code?: unknown } | null)?.code;
       d.log?.warn({ code: typeof code === 'string' && /^[A-Z0-9_]{2,40}$/.test(code) ? code : (e as Error | null)?.name ?? 'Error', requestId: ctx.requestId }, 'task picture failed');
       return sendJson(ctx.res, 500, { error: { code: 'internal', message: PICTURE_FAILED } });
+    } finally {
+      clearTimeout(timer);
     }
     ctx.res.statusCode = 200;
     ctx.res.setHeader('Content-Type', 'image/png');
-    ctx.res.setHeader('Cache-Control', 'private, max-age=300');
+    // Never cached: a cached picture would outlive sign-out, and task codes repeat across workspaces.
+    ctx.res.setHeader('Cache-Control', 'no-store');
     ctx.res.setHeader('X-Content-Type-Options', 'nosniff');
     ctx.res.setHeader('Content-Length', png.length);
     ctx.res.end(png);

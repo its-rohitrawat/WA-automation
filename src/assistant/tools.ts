@@ -225,7 +225,9 @@ export async function runReadTool(name: Exclude<ToolName, 'open_screen' | (typeo
       const i = INPUTS.get_task.parse(raw);
       const t = await taskDetail(d.db, i.code, now);
       if (!t) throw new ControlError(404, `No task called ${i.code}`);
-      return t;
+      // Drive and Docs links are the owner's, not the AI's (as list_meetings leaves out docUrl).
+      const { pictureDriveUrl: _picture, meetingDocUrl: _doc, ...safe } = t;
+      return safe;
     }
     case 'search_messages':
       return await searchMessages(d.db, INPUTS.search_messages.parse(raw), now);

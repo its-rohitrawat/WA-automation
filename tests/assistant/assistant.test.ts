@@ -562,6 +562,22 @@ describe('Assistant: priority levels, sentiment and the combine\'s filters (29 O
     expect(seen[3]).toContain('"sentiment":"frustrated"');
   });
 
+  it('get_task leaves out the Drive picture link and the meeting notes link', async () => {
+    const seen: string[] = [];
+    const ai = new FakeAi([
+      () => ({ content: [use('get_task', { code: 'SHA-1' })] }),
+      (m) => {
+        seen.push(results(m)[0]!.content);
+        return { content: [text('ok')] };
+      },
+    ]);
+    const { run } = await setup({ ai });
+    await run('SHA-1?');
+    expect(seen[0]).toContain('"code":"SHA-001"');
+    expect(seen[0]).not.toContain('pictureDriveUrl');
+    expect(seen[0]).not.toContain('meetingDocUrl');
+  });
+
   it('open_screen passes closed=7d and removed=1 to the Tasks screen', async () => {
     const ai = new FakeAi([() => ({ content: [use('open_screen', { screen: 'tasks', closed: '7d', includeRemovedClients: true })] }), () => ({ content: [text('ok')] })]);
     const { run } = await setup({ ai });
