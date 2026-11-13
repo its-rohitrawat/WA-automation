@@ -1,7 +1,7 @@
 // Meetings (D4 Task 6): the segmented filter kept in the address, the list, and the drawer with the summary, the action
 // items, Assign (a client select), Skip, Retry ("This costs money. Continue?") and Open summary doc. Titles and
 // summaries are meeting text: they go through esc().
-import { get, post } from '../api.js';
+import { ApiError, get, post } from '../api.js';
 import { esc, icon, toast } from '../dom.js';
 import { when } from '../format.js';
 import { confirmDialog, empty, errorText, failed, listen, loading, openDrawer, pill, refillDrawer, setQuery } from './ui.js';
@@ -40,10 +40,9 @@ export function mountMeetings(ctx) {
   let err = null;
   /** @type {{ code: string, name: string }[]} */
   let clients = [];
-  // A link from a task (?meeting=<id>) opens that meeting once its list is loaded, and the address is cleaned at once, so
-  // a reload or Back does not open it again.
-  /** @type {number | null} */
-  let jump = meetingLinkId(location.search);
+  // A link from a task (?meeting=<id>) opens that meeting once, by asking for it directly (the list holds only the newest
+  // ones), and the address is cleaned at once, so a reload or Back does not open it again.
+  const jump = meetingLinkId(location.search);
   if (new URLSearchParams(location.search).has('meeting')) setQuery(view === 'all' ? '' : `?view=${view}`);
 
   const draw = () => {
@@ -72,12 +71,6 @@ export function mountMeetings(ctx) {
       err = e;
     }
     draw();
-    if (jump !== null && data) {
-      const id = jump;
-      jump = null;
-      if (data.rows.some((m) => m.id === id)) openMeeting(id, () => clients, clientsReady, () => void load());
-      else toast("That meeting isn't in this workspace.");
-    }
   }
 
   draw();
@@ -86,6 +79,18 @@ export function mountMeetings(ctx) {
   const clientsReady = get('/overview').then((ov) => {
     clients = (ov?.byClient ?? []).map((/** @type {{ client: { code: string, name: string } }} */ c) => c.client);
   }).catch(() => {});
+
+  if (jump !== null) {
+    get(`/meetings/${jump}`).then(
+      () => {
+        if (ctx.live()) openMeeting(jump, () => clients, clientsReady, () => void load());
+      },
+      (e) => {
+        if (!ctx.live()) return;
+        toast(e instanceof ApiError && e.status === 404 ? "That meeting isn't in this workspace." : errorText(e));
+      },
+    );
+  }
 
   return listen(ctx.view, {
     click: (e) => {

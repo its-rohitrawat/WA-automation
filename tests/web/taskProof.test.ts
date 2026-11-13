@@ -93,6 +93,7 @@ describe('the task panel Proof block', () => {
   it('escapes everything the agent sent', () => {
     const html: string = render(task({ sourceSender: '<img src=x onerror=1>', sourceQuote: '<script>1</script>' }));
     expect(html).not.toContain('<img src=x');
+    expect(html).toContain('&lt;img src=x onerror=1&gt;');
     expect(html).not.toContain('<script>');
     const m: string = render(task({ source: 'meeting', sourceMessageId: null, meetingTitle: '"><b>' }));
     expect(m).not.toContain('"><b>');
@@ -120,8 +121,9 @@ describe('the chat picture and the meeting links in the Proof block', () => {
     expect(render(task({ pictureDriveUrl: null }))).not.toContain('Open on Drive');
   });
 
-  it('has no figure for a meeting task, a dashboard task, an inactive client or a task with no stored message', () => {
-    expect(render(task({ source: 'meeting', meetingId: 7 }))).not.toContain('src-pic');
+  it('has no figure for a meeting task without a stored message, a dashboard task, an inactive client or a task with no stored message', () => {
+    expect(render(task({ source: 'meeting', sourceMessageId: null, meetingId: 7 }))).not.toContain('src-pic');
+    expect(render(task({ source: 'meeting', meetingId: 7 }))).toContain('src-pic');
     expect(render(task({ source: 'dashboard', sourceMessageId: null }))).not.toContain('src-pic');
     expect(render(task({ clientActive: false }))).not.toContain('src-pic');
     expect(render(task({ sourceMessageId: null }))).not.toContain('src-pic');
@@ -144,6 +146,10 @@ describe('the chat picture and the meeting links in the Proof block', () => {
     expect(html).toContain('See the meeting');
     expect(render(task({ source: 'meeting', sourceMessageId: null, meetingId: null }))).not.toContain('See the meeting');
     expect(render(task({ source: 'meeting', sourceMessageId: null, meetingId: 7, meetingDocUrl: 'https://evil.example/x' }))).not.toContain('evil.example');
+  });
+
+  it('needs a positive whole meeting id for See the meeting', () => {
+    for (const meetingId of [0, -3, 1.5, Number.NaN]) expect(render(task({ source: 'meeting', sourceMessageId: null, meetingId }))).not.toContain('See the meeting');
   });
 
   it('does not show meeting links on a chat task', () => {

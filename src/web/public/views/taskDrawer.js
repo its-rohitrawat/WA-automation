@@ -35,7 +35,7 @@ function picture(t) {
 
 /** The meeting links of a meeting task: its notes doc (when there is one) and the meeting on the Meetings screen. @param {TaskDetail} t */
 function meetingLinks(t) {
-  if (typeof t.meetingId !== 'number') return '';
+  if (!Number.isInteger(t.meetingId) || /** @type {number} */ (t.meetingId) <= 0) return '';
   const doc = typeof t.meetingDocUrl === 'string' && DOC_URL.test(t.meetingDocUrl) ? t.meetingDocUrl : null;
   return `<p class="proof-links">${doc ? `<a class="btn btn-ghost btn-sm" href="${esc(doc)}" target="_blank" rel="noopener">${icon('doc', 14)}Open the meeting notes</a>` : ''}<button type="button" class="btn btn-ghost btn-sm" data-go="meetings" data-query="?meeting=${t.meetingId}">${icon('video', 14)}See the meeting</button></p>`;
 }
@@ -72,7 +72,7 @@ function proof(t) {
     bubble = `<p><button type="button" class="btn btn-ghost btn-sm" data-open-source>${icon('bubble', 14)}Open in chat</button></p>`;
   }
   const also = t.source === 'meeting' && t.meetingTitle ? `<p class="muted-p">Also discussed in the meeting ${esc(t.meetingTitle)}</p>` : '';
-  const pic = canOpen && t.source !== 'meeting' ? picture(t) : '';
+  const pic = canOpen ? picture(t) : '';
   return `${head}${bubble}${pic}<p class="muted-p proof-lines">Asked: ${esc(stamp(t.askedAt))}<br>${found}</p>${also}${t.source === 'meeting' ? meetingLinks(t) : ''}`;
 }
 
