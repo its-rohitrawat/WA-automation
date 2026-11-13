@@ -21,7 +21,7 @@ export const TASK_REMOVED = ['1'];
 export function taskQueryFromSearch(search) {
   const p = new URLSearchParams(search);
   /** @type {TaskFilter} */
-  const out = { sort: 'deadline', dir: 'asc' };
+  const out = { sort: 'asked', dir: 'asc' };
   const text = (/** @type {string} */ k) => (p.get(k) ?? '').trim().slice(0, 200);
   const q = text('q');
   if (q) out.q = q;
@@ -43,19 +43,19 @@ export function taskQueryFromSearch(search) {
   if (closed) out.closed = closed;
   const removed = pick('removed', TASK_REMOVED);
   if (removed) out.removed = removed;
-  out.sort = pick('sort', TASK_SORTS) ?? 'deadline';
+  out.sort = pick('sort', TASK_SORTS) ?? 'asked';
   out.dir = p.get('dir') === 'desc' ? 'desc' : 'asc';
   return out;
 }
 
-/** The query for these filters: "" when nothing is set; the default sort is left out. @param {TaskFilter} f */
+/** The query for these filters: "" when nothing is set; the default sort (asked, oldest first) is left out. @param {TaskFilter} f */
 export function taskQueryToSearch(f) {
   const p = new URLSearchParams();
   for (const k of /** @type {const} */ (['q', 'client', 'status', 'owner', 'deadline', 'priority', 'closed', 'removed'])) {
     const v = f[k];
     if (v) p.set(k, v);
   }
-  if (f.sort !== 'deadline' || f.dir !== 'asc') {
+  if (f.sort !== 'asked' || f.dir !== 'asc') {
     p.set('sort', f.sort);
     if (f.dir === 'desc') p.set('dir', 'desc');
   }

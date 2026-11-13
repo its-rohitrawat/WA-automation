@@ -2,6 +2,7 @@
 // dates, status pills, the source, and the task drawer. Every value from the agent goes through esc().
 import { get } from '../api.js';
 import { $, esc, icon } from '../dom.js';
+import { stamp } from '../format.js';
 import { openTaskDrawer } from './taskDrawer.js';
 import { empty, failed, listen, loading, moodTag, pill, setQuery } from './ui.js';
 import { deadlineText, moodLabel, priorityPill, sourceLabel, taskPill, taskQueryFromSearch, taskQueryToSearch } from './workLib.js';
@@ -10,7 +11,7 @@ import { deadlineText, moodLabel, priorityPill, sourceLabel, taskPill, taskQuery
 /** @typedef {import('./workLib.js').TaskFilter} TaskFilter */
 /**
  * @typedef {{ code: string, title: string, client: { code: string, name: string }, owner: string | null, deadline: string | null,
- *   status: string, overdue: boolean, priority: string | null, sentiment: string | null, source: string }} TaskRow
+ *   status: string, overdue: boolean, priority: string | null, sentiment: string | null, source: string, askedAt: string }} TaskRow
  */
 
 const SORTABLE = [['code', 'Task'], ['client', 'Client'], ['owner', 'Owner'], ['deadline', 'Deadline'], ['status', 'Status']];
@@ -47,6 +48,14 @@ export function mountTasks(ctx) {
     `<select class="sel" data-f="${id}" aria-label="${esc(label)}"><option value="">${esc(label)}</option>${opts
       .map(([v, l]) => `<option value="${esc(v)}"${f[id] === v ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
 
+  // One button for the oldest/newest order of "when it was asked": the label says what is shown now.
+  const sortButton = () => {
+    const on = f.sort === 'asked';
+    const now = on && f.dir === 'desc' ? 'Newest first' : 'Oldest first';
+    const next = on && f.dir === 'asc' ? 'newest first' : 'oldest first';
+    return `<button type="button" class="fchip ftoggle" data-asked-order aria-pressed="${on}" aria-label="${esc(`${now}. Press to show ${next}.`)}">${icon('sort', 13)}${now}</button>`;
+  };
+
   const toolbar = () => `<div class="toolbar"><label class="field">${icon('search', 16)}<input data-f="q" value="${esc(f.q ?? '')}" placeholder="Search tasks" aria-label="Search tasks" maxlength="200"></label>
     ${sel('client', 'All clients', clients.map((c) => [c.code, c.name]))}
     ${sel('status', 'Any status', [['overdue', 'Overdue'], ['open', 'Open'], ['review', 'Needs review'], ['done', 'Done']])}
@@ -55,6 +64,8 @@ export function mountTasks(ctx) {
     ${sel('priority', 'Any priority', [['critical', 'Critical'], ['major', 'Major'], ['medium', 'Medium'], ['low', 'Low']])}
     <button type="button" class="fchip ftoggle" data-removed aria-pressed="${f.removed === '1'}">${f.removed === '1' ? icon('tick', 13) : ''}Include removed clients</button>
     ${f.closed === '7d' ? `<button type="button" class="fchip" data-clear="closed" aria-label="Remove the filter: done in the last 7 days">Done · last 7 days${icon('close', 13)}</button>` : ''}
+    ${sortButton()}
+    <a class="btn btn-ghost btn-sm" href="/dashboard/api/tracker/export" download>${icon('file', 16)}Export Excel</a>
     <span class="count-note" data-region="count"></span></div>`;
 
   const th = (/** @type {string} */ k, /** @type {string} */ l) => {
@@ -65,16 +76,17 @@ export function mountTasks(ctx) {
   const table = () => {
     if (err && !data) return failed(err);
     if (!data) return loading('Loading tasks…');
-    const head = `<thead><tr>${th('code', 'Task')}<th>Title</th>${SORTABLE.slice(1).map(([k, l]) => th(k, l)).join('')}${th('priority', 'Priority')}<th>Source</th></tr></thead>`;
+    const head = `<thead><tr>${th('code', 'Task')}<th>Title</th>${SORTABLE.slice(1).map(([k, l]) => th(k, l)).join('')}${th('priority', 'Priority')}${th('asked', 'Asked')}<th>Source</th></tr></thead>`;
     const rows = data.rows.map((t) => {
       const src = sourceLabel(t.source);
       return `<tr data-task="${esc(t.code)}" tabindex="0"><td data-label="Task"><span class="code">${esc(t.code)}</span></td><td class="ttl" data-label="Title">${esc(t.title)}${t.sentiment ? ` ${moodTag(moodLabel(t.sentiment))}` : ''}</td>
         <td data-label="Client">${esc(t.client.name)}</td><td data-label="Owner">${esc(t.owner ?? '—')}</td>
         <td data-label="Deadline" class="${t.overdue ? 'od' : ''}">${esc(deadlineText(t.deadline))}</td><td data-label="Status">${pill(taskPill(t.status))}</td>
         <td data-label="Priority">${pill(priorityPill(t.priority))}</td>
+        <td data-label="Asked">${esc(stamp(t.askedAt))}</td>
         <td data-label="Source"><span class="src">${icon(src.icon, 15)}${esc(src.label)}</span></td></tr>`;
     }).join('');
-    return `<div class="card flush"><div class="tbl-wrap"><table class="tbl tbl-cards"><caption class="sr-only">Tasks</caption>${head}<tbody>${rows || `<tr><td colspan="8">${empty('No tasks match these filters.')}</td></tr>`}</tbody></table></div></div>`;
+    return `<div class="card flush"><div class="tbl-wrap"><table class="tbl tbl-cards"><caption class="sr-only">Tasks</caption>${head}<tbody>${rows || `<tr><td colspan="9">${empty('No tasks match these filters.')}</td></tr>`}</tbody></table></div></div>`;
   };
 
   const drawTable = () => {
@@ -90,8 +102,12 @@ export function mountTasks(ctx) {
   async function load() {
     const mine = ++asked;
     try {
-      const s = taskQueryToSearch(f);
-      const r = await get(`/tasks${s ? `${s}&` : '?'}limit=200`);
+      // The server's own default is the deadline, so the order is always sent, even when the address leaves it out.
+      const p = new URLSearchParams(taskQueryToSearch(f));
+      p.set('sort', f.sort);
+      p.set('dir', f.dir);
+      p.set('limit', '200');
+      const r = await get(`/tasks?${p.toString()}`);
       if (!ctx.live() || mine !== asked) return;
       data = r;
       err = null;
@@ -159,6 +175,20 @@ export function mountTasks(ctx) {
           f.sort = k;
           f.dir = 'asc';
         }
+        const ob = $('.toolbar [data-asked-order]', ctx.view);
+        if (ob) ob.outerHTML = sortButton();
+        changed();
+        return;
+      }
+      if (t.closest('[data-asked-order]')) {
+        if (f.sort === 'asked') f.dir = f.dir === 'asc' ? 'desc' : 'asc';
+        else {
+          f.sort = 'asked';
+          f.dir = 'asc';
+        }
+        const bar = $('.toolbar [data-asked-order]', ctx.view);
+        if (bar) bar.outerHTML = sortButton();
+        /** @type {HTMLElement | null} */ ($('.toolbar [data-asked-order]', ctx.view))?.focus();
         changed();
         return;
       }

@@ -8,14 +8,17 @@ describe('task filters in the URL', () => {
     expect(taskQueryFromSearch('?q=logo&client=sha&status=overdue&owner=Rahul&deadline=week&priority=major&sort=client&dir=desc')).toEqual({
       q: 'logo', client: 'SHA', status: 'overdue', owner: 'Rahul', deadline: 'week', priority: 'major', sort: 'client', dir: 'desc',
     });
-    expect(taskQueryFromSearch('?status=late&deadline=soon&priority=urgent&sort=title&dir=up&client=sh1')).toEqual({ sort: 'deadline', dir: 'asc' });
-    expect(taskQueryFromSearch('')).toEqual({ sort: 'deadline', dir: 'asc' });
+    expect(taskQueryFromSearch('?status=late&deadline=soon&priority=urgent&sort=title&dir=up&client=sh1')).toEqual({ sort: 'asked', dir: 'asc' });
+    expect(taskQueryFromSearch('')).toEqual({ sort: 'asked', dir: 'asc' });
   });
 
   it('writes the query back, leaving out empty values and the default sort', () => {
-    expect(taskQueryToSearch({ q: '50% off', status: 'open', sort: 'deadline', dir: 'asc' })).toBe('?q=50%25+off&status=open');
+    expect(taskQueryToSearch({ q: '50% off', status: 'open', sort: 'asked', dir: 'asc' })).toBe('?q=50%25+off&status=open');
     expect(taskQueryToSearch({ sort: 'owner', dir: 'desc' })).toBe('?sort=owner&dir=desc');
-    expect(taskQueryToSearch({ sort: 'deadline', dir: 'asc' })).toBe('');
+    expect(taskQueryToSearch({ sort: 'asked', dir: 'asc' })).toBe('');
+    expect(taskQueryToSearch({ sort: 'asked', dir: 'desc' })).toBe('?sort=asked&dir=desc');
+    expect(taskQueryToSearch({ sort: 'deadline', dir: 'asc' })).toBe('?sort=deadline');
+    expect(taskQueryFromSearch('?sort=deadline')).toEqual({ sort: 'deadline', dir: 'asc' });
   });
 
   it('round-trips', () => {
@@ -24,8 +27,8 @@ describe('task filters in the URL', () => {
   });
 
   it('keeps the Overview\'s closed=7d filter, and drops any other closed value', () => {
-    expect(taskQueryFromSearch('?status=done&closed=7d')).toEqual({ status: 'done', closed: '7d', sort: 'deadline', dir: 'asc' });
-    expect(taskQueryToSearch({ status: 'done', closed: '7d', sort: 'deadline', dir: 'asc' })).toBe('?status=done&closed=7d');
+    expect(taskQueryFromSearch('?status=done&closed=7d')).toEqual({ status: 'done', closed: '7d', sort: 'asked', dir: 'asc' });
+    expect(taskQueryToSearch({ status: 'done', closed: '7d', sort: 'asked', dir: 'asc' })).toBe('?status=done&closed=7d');
     expect(taskQueryFromSearch('?closed=30d').closed).toBeUndefined();
     expect(taskQueryFromSearch('?removed=1').removed).toBe('1');
     expect(taskQueryFromSearch('?removed=yes').removed).toBeUndefined();

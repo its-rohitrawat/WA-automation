@@ -12,7 +12,7 @@ import { problems, readBulk, readChat, readClientDetail, readClients, readConnec
 import { PUBLIC_MAIL_DOMAINS as BROWSER_PUBLIC, fieldProblem } from '../../src/web/public/views/rules.js';
 import { PUBLIC_MAIL_DOMAINS } from '../../src/config/domains.ts';
 // @ts-expect-error -- browser module (see above)
-import { ago, date, greeting, initials, usd, when } from '../../src/web/public/format.js';
+import { ago, date, greeting, initials, stamp, usd, when } from '../../src/web/public/format.js';
 // @ts-expect-error -- browser module (see above)
 import { HI } from '../../src/web/public/icons.js';
 // @ts-expect-error -- browser module (see above)
@@ -209,6 +209,15 @@ describe('format (India time)', () => {
     expect(ago(null, now)).toBe('—');
     expect(ago('not a date', now)).toBe('—');
     expect(ago('2026-10-27T06:31:00Z', now)).toBe('0 s ago');
+  });
+
+  it('stamps a date and time in India time, with the year only when it is not this year', () => {
+    const now = new Date('2026-11-13T06:30:00Z');
+    expect(stamp('2026-11-11T13:12:00Z', now)).toBe('11 Nov, 18:42');
+    expect(stamp('2025-12-31T19:00:00Z', now)).toBe('1 Jan, 00:30'); // already 2026 in India
+    expect(stamp('2025-06-01T03:42:00Z', now)).toBe('1 Jun 2025, 09:12');
+    expect(stamp(null, now)).toBe('—');
+    expect(stamp('nope', now)).toBe('—');
   });
 
   it('names the day in India time, not the machine time', () => {
