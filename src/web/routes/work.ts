@@ -38,10 +38,13 @@ export interface WorkApiDeps extends ActionGuard {
    */
   trackerWorkbook?: () => Promise<Buffer>;
   log?: Pick<Logger, 'warn'>;
+  /** How long a tracker build may take before the export gives up (60 s; short in tests). */
+  exportTimeoutMs?: number;
 }
 
 /** One tracker export per 10 seconds per signed-in owner, counted from the last one that worked. */
 const EXPORT_GAP_MS = 10_000;
+const EXPORT_BUILD_MS = 60_000;
 
 const NOT_READY = 'The tracker is not ready yet. Try again in a moment.';
 const EXPORT_FAILED = 'The tracker could not be exported. Try again in a moment.';
@@ -97,7 +100,9 @@ export function registerWorkApi(router: Router, d: WorkApiDeps): void {
     const s = await d.guard.requireOwner(ctx.req);
     if (!d.trackerWorkbook) return sendJson(ctx.res, 503, { error: { code: 'not_ready', message: NOT_READY } });
     const now = d.clock.now().getTime();
-    const wait = Math.ceil(((lastExport.get(s.email) ?? -Infinity) + EXPORT_GAP_MS - now) / 1000);
+    // A clock that stepped back (now before the last export) holds nobody: the gap counts forward from the last export only.
+    const last = lastExport.get(s.email);
+    const wait = last === undefined || now < last ? 0 : Math.ceil((last + EXPORT_GAP_MS - now) / 1000);
     if (building.has(s.email) || wait > 0) {
       ctx.res.setHeader('Retry-After', String(building.has(s.email) ? EXPORT_GAP_MS / 1000 : wait));
       return sendJson(ctx.res, 429, { error: { code: 'rate_limited', message: 'One export every 10 seconds. Wait a moment and try again.' } });
@@ -105,13 +110,19 @@ export function registerWorkApi(router: Router, d: WorkApiDeps): void {
     // The limit counts only an export that worked, so a failed build can be tried again at once.
     let book: Buffer;
     building.add(s.email);
+    let timer: NodeJS.Timeout | undefined;
     try {
-      book = await d.trackerWorkbook();
+      // A build that never finishes ends as a failure, so the owner is not stuck as "building".
+      const timeout = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(Object.assign(new Error('export timed out'), { name: 'ExportTimeout' })), d.exportTimeoutMs ?? EXPORT_BUILD_MS);
+      });
+      book = await Promise.race([d.trackerWorkbook(), timeout]);
     } catch (e) {
       const code = (e as { code?: unknown } | null)?.code;
       d.log?.warn({ code: typeof code === 'string' && /^[A-Z0-9_]{2,40}$/.test(code) ? code : (e as Error | null)?.name ?? 'Error', requestId: ctx.requestId }, 'tracker export could not be built');
       return sendJson(ctx.res, 500, { error: { code: 'internal', message: EXPORT_FAILED } });
     } finally {
+      clearTimeout(timer);
       building.delete(s.email);
     }
     lastExport.set(s.email, d.clock.now().getTime());

@@ -13,7 +13,7 @@ afterEach(async () => {
   for (const c of closers.splice(0)) await c();
 });
 
-async function boot(o: { paused?: boolean; actionCapacity?: number; book?: (() => Promise<Buffer>) | null } = {}) {
+async function boot(o: { paused?: boolean; actionCapacity?: number; exportTimeoutMs?: number; book?: (() => Promise<Buffer>) | null } = {}) {
   const { db, ids } = await seeded();
   const clock = manualClock(NOW);
   await createTask(db, { clientId: ids.sharma, side: 'us', title: 'Banner', category: 'design', priority: 'major', assignedTo: null, askedBy: null, raisedOn: '2026-10-10',
@@ -30,7 +30,7 @@ async function boot(o: { paused?: boolean; actionCapacity?: number; book?: (() =
   const h = await bootDashboard({
     db, clock, actionCapacity: o.actionCapacity, moreOwners: ['second@example.com'],
     mount: (router, x) => registerWorkApi(router, {
-      ...x, db, clock, audit, spend: { isPaused: () => o.paused ?? false },
+      ...x, db, clock, audit, spend: { isPaused: () => o.paused ?? false }, ...(o.exportTimeoutMs ? { exportTimeoutMs: o.exportTimeoutMs } : {}),
       ...(o.book === null ? {} : { trackerWorkbook: o.book ?? (async () => Buffer.from('PK-founder-workbook', 'latin1')) }),
     }),
   });
@@ -185,6 +185,22 @@ describe('work API: tracker export', () => {
     clock.advance(9_000);
     expect((await download(h)).status).toBe(429);
     clock.advance(1_000);
+    expect((await download(h)).status).toBe(200);
+  });
+
+  it('a clock that steps back does not hold the owner', async () => {
+    const { h, clock } = await boot();
+    expect((await download(h)).status).toBe(200);
+    clock.advance(-3_600_000);
+    expect((await download(h)).status).toBe(200);
+    expect((await download(h)).status).toBe(429); // the gap counts again from that export
+  });
+
+  it('a build that never finishes ends as a 500 and frees the owner', async () => {
+    let hang = true;
+    const { h } = await boot({ exportTimeoutMs: 50, book: () => (hang ? new Promise<Buffer>(() => undefined) : Promise.resolve(Buffer.from('PK-x', 'latin1'))) });
+    expect((await download(h)).status).toBe(500);
+    hang = false;
     expect((await download(h)).status).toBe(200);
   });
 

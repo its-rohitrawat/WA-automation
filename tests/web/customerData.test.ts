@@ -180,7 +180,7 @@ describe('the DATA route sweep: each session reaches only its own customer (Phas
     const text: string[] = [];
     wb.eachSheet((w) => {
       text.push(w.name);
-      w.eachRow((row) => row.eachCell((c) => text.push(String(c.value ?? ''))));
+      w.eachRow((row) => row.eachCell((c) => text.push(c.text)));
     });
     const all = text.join(' | ');
     for (const f of [FOUNDER_CLIENT.name, FOUNDER_CLIENT.groupId, FOUNDER_CLIENT.code, B_CLIENT.name, B_CLIENT.groupId, B_CLIENT.code, 'Sharma', 'Beta']) {
