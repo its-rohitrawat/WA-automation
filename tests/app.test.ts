@@ -690,6 +690,22 @@ describe('app health and publishing', () => {
     expectNoTimers();
   });
 
+  it('trackerWorkbook builds a fresh workbook without uploading or changing the publisher', async () => {
+    const drive = new CapturingDrive();
+    const { app } = await setup({ drive });
+    await advance(1_000);
+    expect(drive.created).toHaveLength(1);
+    const before = { created: drive.created.length, updated: drive.updated.length, uploads: drive.uploads };
+    let book: Buffer | undefined;
+    await work.until(app.trackerWorkbook().then((b) => { book = b; }), { fakeMs: 10_000, stepMs: 1_000, realCapMs: 8_000, label: 'trackerWorkbook()' });
+    expect({ created: drive.created.length, updated: drive.updated.length, uploads: drive.uploads }).toEqual(before);
+    await stopApp(app);
+
+    vi.useRealTimers();
+    expect(book!.subarray(0, 2).toString('latin1')).toBe('PK');
+    expect((await overviewTexts(book!)).length).toBeGreaterThan(0);
+  });
+
   it('reports Drive failures in health, keeps them out of the uploaded workbook, and clears them after an upload', async () => {
     const drive = new CapturingDrive();
     const { db, app } = await setup({ drive });

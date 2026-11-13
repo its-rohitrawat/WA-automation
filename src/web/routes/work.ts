@@ -9,10 +9,13 @@ import { listDashboardTasks, parseTaskQuery, taskDetail } from '../../control/ta
 import { trackerSummary } from '../../control/trackerQueries.ts';
 import type { HealthSnapshot } from '../../health/health.ts';
 import type { Db, Sql } from '../../store/db.ts';
+import { XLSX_MIME } from '../../output/workbook.ts';
 import type { Clock } from '../../util/clock.ts';
+import { istDate } from '../../util/time.ts';
+import type { Logger } from '../../util/logger.ts';
 import type { AuditLog } from '../audit.ts';
 import { sendJson } from '../http.ts';
-import type { Guard } from '../guard.ts';
+import { RateLimiter, type Guard, type RateLimit } from '../guard.ts';
 import type { Router } from '../router.ts';
 import { actionSession, controlled, readBody, type ActionGuard } from './respond.ts';
 
@@ -29,7 +32,21 @@ export interface WorkApiDeps extends ActionGuard {
   /** The live health snapshot, for the Tracker screen. */
   health?: () => Pick<HealthSnapshot, 'line' | 'lastPublishedAt' | 'publishFailingSince'>;
   accountOf?: AccountOf;
+  /**
+   * This workspace's tracker workbook, built fresh for a download (App.trackerWorkbook). Left out in a setup shell: the
+   * export then answers 503.
+   */
+  trackerWorkbook?: () => Promise<Buffer>;
+  log?: Pick<Logger, 'warn'>;
+  /** The export limit; EXPORT_LIMIT when not given. */
+  exports?: Pick<RateLimiter, 'take' | 'retryAfter'>;
 }
+
+/** One tracker export per 10 seconds per signed-in owner. */
+export const EXPORT_LIMIT: Readonly<RateLimit> = Object.freeze({ capacity: 1, refillPerSec: 1 / 10 });
+
+const NOT_READY = 'The tracker is not ready yet. Try again in a moment.';
+const EXPORT_FAILED = 'The tracker could not be exported. Try again in a moment.';
 
 export function registerWorkApi(router: Router, d: WorkApiDeps): void {
   const read = (path: string, answer: (ctx: Parameters<Parameters<Router['get']>[1]>[0]) => unknown) =>
@@ -37,6 +54,7 @@ export function registerWorkApi(router: Router, d: WorkApiDeps): void {
       await d.guard.requireOwner(ctx.req);
       sendJson(ctx.res, 200, await answer(ctx));
     }));
+  const exportLimit = d.exports ?? new RateLimiter({ ...EXPORT_LIMIT, clock: d.clock });
   const auditFor = (actor: string, requestId: string) => (q: Sql, e: AuditEntry) => d.audit.record({ ...e, actor, requestId }, q);
 
   read('/dashboard/api/tasks', async ({ url }) => await listDashboardTasks(d.db, parseTaskQuery(url.searchParams), d.clock.now()));
@@ -70,4 +88,30 @@ export function registerWorkApi(router: Router, d: WorkApiDeps): void {
 
   read('/dashboard/api/activity', async ({ url }) => await listActivity(d.db, parseActivityParams(url.searchParams)));
   read('/dashboard/api/tracker', async () => await trackerSummary(d.db, d.clock.now(), d.health?.()));
+
+  // The whole tracker as an Excel file, built fresh (the same workbook as on Drive; nothing is uploaded). Read-only, so
+  // no CSRF check; one a signed-in owner per 10 seconds, audited without any of the file's content.
+  router.get('/dashboard/api/tracker/export', controlled(async (ctx) => {
+    const s = await d.guard.requireOwner(ctx.req);
+    if (!d.trackerWorkbook) return sendJson(ctx.res, 503, { error: { code: 'not_ready', message: NOT_READY } });
+    if (!exportLimit.take(s.email)) {
+      ctx.res.setHeader('Retry-After', String(exportLimit.retryAfter(s.email)));
+      return sendJson(ctx.res, 429, { error: { code: 'rate_limited', message: 'One export every 10 seconds. Wait a moment and try again.' } });
+    }
+    let book: Buffer;
+    try {
+      book = await d.trackerWorkbook();
+    } catch (e) {
+      d.log?.warn({ code: (e as Error | null)?.name ?? 'Error', requestId: ctx.requestId }, 'tracker export could not be built');
+      return sendJson(ctx.res, 500, { error: { code: 'internal', message: EXPORT_FAILED } });
+    }
+    await d.audit.record({ actor: s.email, kind: 'ops', requestId: ctx.requestId, event: 'tracker.export', detail: 'Tracker exported as an Excel file' });
+    ctx.res.statusCode = 200;
+    ctx.res.setHeader('Content-Type', XLSX_MIME);
+    ctx.res.setHeader('Content-Disposition', `attachment; filename="Tracker-${istDate(d.clock.now())}.xlsx"`);
+    ctx.res.setHeader('Cache-Control', 'no-store');
+    ctx.res.setHeader('X-Content-Type-Options', 'nosniff');
+    ctx.res.setHeader('Content-Length', book.length);
+    ctx.res.end(book);
+  }));
 }

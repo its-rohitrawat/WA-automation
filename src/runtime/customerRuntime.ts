@@ -563,7 +563,7 @@ export async function buildCustomerRuntime(
         // On the guard, session store and limiter startDashboard builds: every route shares them.
         mount: (m) => mountAgentRoutes(m, {
           tenantId: t.id,
-          db: trackerStore, clock: systemClock, log, control, spend: app.spend, health: () => app.health.snapshot(),
+          db: trackerStore, clock: systemClock, log, control, spend: app.spend, health: () => app.health.snapshot(), trackerWorkbook: () => app.trackerWorkbook(),
           ...(meetingsApi ? { accountOf: (c: string) => meetingsApi.accountOf(c) } : {}),
           voiceLocal: env.VOICE_STT_PROVIDER === 'local',
           uptime: { log: log30, ...(env.UPTIMEROBOT_READ_KEY ? { robot: new UptimeRobotClient({ apiKey: env.UPTIMEROBOT_READ_KEY, clock: systemClock, log }) } : {}) },

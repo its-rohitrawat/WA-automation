@@ -53,6 +53,8 @@ export interface AgentRoutesDeps {
   spend: SpendView;
   /** The live health snapshot, for the Tracker screen. */
   health: () => Pick<HealthSnapshot, 'line' | 'lastPublishedAt' | 'publishFailingSince'>;
+  /** This workspace's own tracker workbook, built fresh for the Export button (its app's trackerWorkbook). */
+  trackerWorkbook?: () => Promise<Buffer>;
   accountOf?: AccountOf;
   /** VOICE_STT_PROVIDER is local. */
   voiceLocal: boolean;
@@ -131,7 +133,8 @@ export function mountAgentRoutes(m: DashboardMount, d: AgentRoutesDeps): void {
 
   registerReadApi(router, { guard, control: d.control });
   registerWorkApi(router, {
-    ...action, db: d.db, clock: d.clock, audit: m.audit, spend: d.spend, health: d.health, ...(d.accountOf ? { accountOf: d.accountOf } : {}),
+    ...action, db: d.db, clock: d.clock, audit: m.audit, spend: d.spend, health: d.health, log: d.log, ...(d.accountOf ? { accountOf: d.accountOf } : {}),
+    ...(d.trackerWorkbook ? { trackerWorkbook: d.trackerWorkbook } : {}),
   });
   registerControlApi(router, {
     ...action, db: d.db, clock: d.clock, audit: m.audit, spend: d.spend, voiceLocal: d.voiceLocal, uptime: d.uptime,
