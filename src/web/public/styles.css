@@ -333,6 +333,13 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .quote-btn:hover { filter: brightness(1.06); } .quote-btn:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
 .quote-btn .q-open { display: inline-flex; gap: 5px; align-items: center; margin-top: 8px; font: 600 12px var(--mono); opacity: .8; }
 .proof-lines { line-height: 1.6; }
+.proof-links { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.src-pic-fig { margin: 12px 0; } .src-pic-fig[hidden] { display: none; }
+.src-pic { display: block; min-height: 96px; border-radius: 14px; overflow: hidden; background: var(--panel-2); border: 1px solid var(--line, rgba(128,128,128,.25)); }
+.src-pic:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+.src-pic img { display: block; width: 100%; max-width: 100%; height: auto; }
+.src-pic-fig figcaption { margin-top: 6px; font: 500 12px var(--mono); color: var(--muted, inherit); opacity: .85; }
+.src-pic-fig figcaption a { color: var(--link); }
 .quote small { display: block; font: 500 11.5px var(--mono); opacity: .7; margin-top: 6px; }
 .timeline { list-style: none; margin: 8px 0 0; padding: 0; } .timeline li { position: relative; padding: 0 0 14px 22px; font-size: 13px; color: var(--muted); }
 .timeline li::before { content: ""; position: absolute; left: 4px; top: 6px; width: 7px; height: 7px; border-radius: 50%; background: var(--green); }

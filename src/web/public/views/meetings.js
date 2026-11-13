@@ -20,6 +20,15 @@ const POLL_MS = 30_000;
 /** A doc link is used only when it is the Google Docs address the agent builds. */
 const DOC_URL = /^https:\/\/docs\.google\.com\/document\/d\/[A-Za-z0-9_-]{10,200}\/edit$/;
 
+/**
+ * The meeting an address names (?meeting=<digits>, from the task panel's See the meeting), or null.
+ * @param {string} search
+ */
+export function meetingLinkId(search) {
+  const v = new URLSearchParams(search).get('meeting');
+  return v !== null && /^\d{1,9}$/.test(v) ? Number(v) : null;
+}
+
 const titleOf = (/** @type {MeetingRow} */ m) => m.title || (m.status === 'internal' ? 'Internal meeting' : 'Meeting');
 
 /** @param {ScreenCtx} ctx */
@@ -31,6 +40,11 @@ export function mountMeetings(ctx) {
   let err = null;
   /** @type {{ code: string, name: string }[]} */
   let clients = [];
+  // A link from a task (?meeting=<id>) opens that meeting once its list is loaded, and the address is cleaned at once, so
+  // a reload or Back does not open it again.
+  /** @type {number | null} */
+  let jump = meetingLinkId(location.search);
+  if (new URLSearchParams(location.search).has('meeting')) setQuery(view === 'all' ? '' : `?view=${view}`);
 
   const draw = () => {
     const seg = `<div class="toolbar"><div class="seg" role="tablist">${VIEWS.map(([k, l]) => `<button type="button" role="tab" aria-selected="${view === k}" class="${view === k ? 'on' : ''}" data-mview="${k}">${esc(l)}</button>`).join('')}</div>
@@ -58,6 +72,12 @@ export function mountMeetings(ctx) {
       err = e;
     }
     draw();
+    if (jump !== null && data) {
+      const id = jump;
+      jump = null;
+      if (data.rows.some((m) => m.id === id)) openMeeting(id, () => clients, clientsReady, () => void load());
+      else toast("That meeting isn't in this workspace.");
+    }
   }
 
   draw();

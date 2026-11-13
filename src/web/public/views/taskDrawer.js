@@ -12,9 +12,33 @@ import { deadlineText, moodLabel, priorityPill, prioritySourceText, sourceLabel,
  *   deadline: string | null, status: string, overdue: boolean, priority: string | null, prioritySource: string | null,
  *   priorityKeyword: string | null, sentiment: string | null, source: string, sourceQuote: string | null,
  *   sourceDate: string | null, sourceSender: string | null, sourceMessageId: number | null, clientActive?: boolean, meetingTitle: string | null,
+ *   pictureDriveUrl?: string | null, meetingId?: number | null, meetingDocUrl?: string | null,
  *   askedAt: string, createdAt: string, sourceRevoked: boolean, latestProgress: string | null, remindedCount: number,
  *   history: { at: string, actor: 'agent' | 'owner', what: string }[] }} TaskDetail
  */
+
+/** Only the Google addresses the agent builds are linked. */
+const DRIVE_URL = /^https:\/\/drive\.google\.com\/file\/d\/[A-Za-z0-9_-]+\/view$/;
+const DOC_URL = /^https:\/\/docs\.google\.com\/document\/d\/[A-Za-z0-9_-]+(\/[a-z]+)?$/;
+
+/**
+ * The chat picture of a chat task: a preview of the WhatsApp-style picture (the source message highlighted), a link to
+ * it full size, and the Drive copy when there is one. The picture comes from the dashboard's own route.
+ * @param {TaskDetail} t
+ */
+function picture(t) {
+  const url = `/dashboard/api/tasks/${encodeURIComponent(t.code)}/picture`;
+  const drive = typeof t.pictureDriveUrl === 'string' && DRIVE_URL.test(t.pictureDriveUrl) ? t.pictureDriveUrl : null;
+  return `<figure class="src-pic-fig" data-src-fig><a class="src-pic" href="${esc(url)}" target="_blank" rel="noopener"><img src="${esc(url)}" alt="The chat around the source message, with it highlighted" loading="lazy" width="1440"></a>
+    <figcaption>Chat picture · tap to see it full size${drive ? ` · <a href="${esc(drive)}" target="_blank" rel="noopener">Open on Drive</a>` : ''}</figcaption></figure>`;
+}
+
+/** The meeting links of a meeting task: its notes doc (when there is one) and the meeting on the Meetings screen. @param {TaskDetail} t */
+function meetingLinks(t) {
+  if (typeof t.meetingId !== 'number') return '';
+  const doc = typeof t.meetingDocUrl === 'string' && DOC_URL.test(t.meetingDocUrl) ? t.meetingDocUrl : null;
+  return `<p class="proof-links">${doc ? `<a class="btn btn-ghost btn-sm" href="${esc(doc)}" target="_blank" rel="noopener">${icon('doc', 14)}Open the meeting notes</a>` : ''}<button type="button" class="btn btn-ghost btn-sm" data-go="meetings" data-query="?meeting=${t.meetingId}">${icon('video', 14)}See the meeting</button></p>`;
+}
 
 /**
  * The Proof block: where the task came from and when. A task from a stored chat message shows the sender's bubble (a
@@ -34,7 +58,7 @@ function proof(t) {
       ? `<div class="quote"><b class="q-who">Said in the meeting</b>${esc(t.sourceQuote)}<small>${esc(stamp(t.askedAt))}</small></div>`
       : '';
     const from = t.meetingTitle ? `the meeting ${esc(t.meetingTitle)}` : 'a meeting';
-    return `${head}<p class="muted-p proof-lines">From ${from}, ${esc(stamp(t.askedAt))}<br>${found}</p>${bubble}`;
+    return `${head}<p class="muted-p proof-lines">From ${from}, ${esc(stamp(t.askedAt))}<br>${found}</p>${bubble}${meetingLinks(t)}`;
   }
   // A chat message. Its time is the message's own (askedAt) when it is stored; otherwise only the day is known.
   const sent = stored ? stamp(t.askedAt) : t.sourceDate ? date(t.sourceDate) : '';
@@ -48,7 +72,8 @@ function proof(t) {
     bubble = `<p><button type="button" class="btn btn-ghost btn-sm" data-open-source>${icon('bubble', 14)}Open in chat</button></p>`;
   }
   const also = t.source === 'meeting' && t.meetingTitle ? `<p class="muted-p">Also discussed in the meeting ${esc(t.meetingTitle)}</p>` : '';
-  return `${head}${bubble}<p class="muted-p proof-lines">Asked: ${esc(stamp(t.askedAt))}<br>${found}</p>${also}`;
+  const pic = canOpen && t.source !== 'meeting' ? picture(t) : '';
+  return `${head}${bubble}${pic}<p class="muted-p proof-lines">Asked: ${esc(stamp(t.askedAt))}<br>${found}</p>${also}${t.source === 'meeting' ? meetingLinks(t) : ''}`;
 }
 
 /** @param {TaskDetail} t @param {{ editing?: boolean, problem?: { field?: string, message: string } | null }} [o] */
@@ -96,6 +121,13 @@ export function openTaskDrawer(code, o, focusSource = false) {
     if (!t) return;
     const d = refillDrawer(drawer, render(t, state));
     if (!d) return;
+    // The picture may be missing (404) or fail to draw (500): the figure is hidden. A CSP-safe listener, not onerror.
+    for (const img of d.querySelectorAll('[data-src-fig] img')) {
+      img.addEventListener('error', () => {
+        const fig = img.closest('[data-src-fig]');
+        if (fig instanceof HTMLElement) fig.hidden = true;
+      });
+    }
     if (state.editing) $(`[name="${state.problem?.field === 'deadline' ? 'deadline' : 'assignedTo'}"]`, d)?.focus();
   };
 
