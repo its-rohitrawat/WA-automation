@@ -135,7 +135,7 @@ function addTaskTable(
 
 const DRIVE_ID = /^[A-Za-z0-9_-]{1,200}$/;
 /** A Drive file's or Google Doc's link, or null when the id is missing or not a plain Drive id. */
-const driveUrl = (id: string | null): string | null => (id !== null && DRIVE_ID.test(id) ? `https://drive.google.com/file/d/${id}/view` : null);
+export const driveUrl = (id: string | null): string | null => (id !== null && DRIVE_ID.test(id) ? `https://drive.google.com/file/d/${id}/view` : null);
 const docUrl = (id: string | null): string | null => (id !== null && DRIVE_ID.test(id) ? `https://docs.google.com/document/d/${id}/edit` : null);
 /**
  * Client tab column widths, A to Q. Excel counts a width in characters: the width of the digit 0 in the default 11 pt Calibri.

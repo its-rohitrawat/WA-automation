@@ -5,17 +5,21 @@ import { ControlError } from '../../control/errors.ts';
 import { runMeetingAction } from '../../control/meetingActions.ts';
 import { listDashboardMeetings, meetingDetail, parseMeetingList, type AccountOf } from '../../control/meetingQueries.ts';
 import { runTaskAction } from '../../control/taskActions.ts';
+import { pictureWindow } from '../../control/chatQueries.ts';
 import { listDashboardTasks, parseTaskQuery, taskDetail } from '../../control/taskQueries.ts';
 import { trackerSummary } from '../../control/trackerQueries.ts';
 import type { HealthSnapshot } from '../../health/health.ts';
 import type { Db, Sql } from '../../store/db.ts';
+import { getClientByCode } from '../../store/clients.ts';
+import { drawChatPicture } from '../../output/chatPicture.ts';
+import type { GroupMembersSource } from '../../wa/groupMembers.ts';
 import { XLSX_MIME } from '../../output/workbook.ts';
 import type { Clock } from '../../util/clock.ts';
 import { istDate } from '../../util/time.ts';
 import type { Logger } from '../../util/logger.ts';
 import type { AuditLog } from '../audit.ts';
 import { sendJson } from '../http.ts';
-import type { Guard } from '../guard.ts';
+import { RateLimiter, type Guard } from '../guard.ts';
 import type { Router } from '../router.ts';
 import { actionSession, controlled, readBody, type ActionGuard } from './respond.ts';
 
@@ -38,6 +42,10 @@ export interface WorkApiDeps extends ActionGuard {
    */
   trackerWorkbook?: () => Promise<Buffer>;
   log?: Pick<Logger, 'warn'>;
+  /** The group members, to name tags in the task picture (as the chat routes get them); left out, tags read as "@member". */
+  groupMembers?: GroupMembersSource;
+  /** WhatsApp is open for this group's phone (as the chat routes ask before reading members). */
+  connected?: (groupId: string) => boolean;
   /** How long a tracker build may take before the export gives up (60 s; short in tests). */
   exportTimeoutMs?: number;
 }
@@ -45,6 +53,10 @@ export interface WorkApiDeps extends ActionGuard {
 /** One tracker export per 10 seconds per signed-in owner, counted from the last one that worked. */
 const EXPORT_GAP_MS = 10_000;
 const EXPORT_BUILD_MS = 60_000;
+
+/** At most 30 task pictures a minute per signed-in owner. */
+const PICTURE_LIMIT = { capacity: 30, refillPerSec: 30 / 60 };
+const PICTURE_FAILED = 'The picture could not be drawn. Try again in a moment.';
 
 const NOT_READY = 'The tracker is not ready yet. Try again in a moment.';
 const EXPORT_FAILED = 'The tracker could not be exported. Try again in a moment.';
@@ -58,6 +70,7 @@ export function registerWorkApi(router: Router, d: WorkApiDeps): void {
   /** Owner email to the time of their last good export, and the owners whose export is being built now. */
   const lastExport = new Map<string, number>();
   const building = new Set<string>();
+  const pictures = new RateLimiter({ ...PICTURE_LIMIT, clock: d.clock });
   const auditFor = (actor: string, requestId: string) => (q: Sql, e: AuditEntry) => d.audit.record({ ...e, actor, requestId }, q);
 
   read('/dashboard/api/tasks', async ({ url }) => await listDashboardTasks(d.db, parseTaskQuery(url.searchParams), d.clock.now()));
@@ -66,6 +79,38 @@ export function registerWorkApi(router: Router, d: WorkApiDeps): void {
     if (!t) throw new ControlError(404, 'No task with that code');
     return t;
   });
+  // The chat picture of a task's source message (the one the tracker links to), drawn here from this workspace's own
+  // database, so it shows before the Drive copy exists. Draws go one at a time (chatPicture's queue).
+  router.get('/dashboard/api/tasks/:code/picture', controlled(async (ctx) => {
+    if (ctx.req.headers['sec-fetch-site'] === 'cross-site') return sendJson(ctx.res, 403, { error: { code: 'forbidden', message: 'This request is not allowed from another site.' } });
+    const s = await d.guard.requireOwner(ctx.req);
+    if (!pictures.take(s.email)) {
+      ctx.res.setHeader('Retry-After', String(pictures.retryAfter(s.email)));
+      return sendJson(ctx.res, 429, { error: { code: 'rate_limited', message: 'Too many pictures. Wait a moment and try again.' } });
+    }
+    const none = () => sendJson(ctx.res, 404, { error: { code: 'not_found', message: 'There is no picture for this task.' } });
+    const t = await taskDetail(d.db, ctx.params.code!, d.clock.now());
+    if (!t || t.sourceMessageId === null || !t.clientActive) return none();
+    const client = await getClientByCode(d.db, t.client.code);
+    if (!client) return none();
+    let png: Buffer;
+    try {
+      const members = d.groupMembers && d.connected?.(client.groupId) ? () => d.groupMembers!(client.groupId) : undefined;
+      const window = await pictureWindow(d.db, client, t.sourceMessageId, members);
+      if (!window) return none();
+      png = await drawChatPicture(window);
+    } catch (e) {
+      const code = (e as { code?: unknown } | null)?.code;
+      d.log?.warn({ code: typeof code === 'string' && /^[A-Z0-9_]{2,40}$/.test(code) ? code : (e as Error | null)?.name ?? 'Error', requestId: ctx.requestId }, 'task picture failed');
+      return sendJson(ctx.res, 500, { error: { code: 'internal', message: PICTURE_FAILED } });
+    }
+    ctx.res.statusCode = 200;
+    ctx.res.setHeader('Content-Type', 'image/png');
+    ctx.res.setHeader('Cache-Control', 'private, max-age=300');
+    ctx.res.setHeader('X-Content-Type-Options', 'nosniff');
+    ctx.res.setHeader('Content-Length', png.length);
+    ctx.res.end(png);
+  }));
   router.post('/dashboard/api/tasks/:code/:action', controlled(async (ctx) => {
     const s = await actionSession(ctx, d);
     const body = ctx.params.action === 'edit' ? await readBody(ctx) : undefined;

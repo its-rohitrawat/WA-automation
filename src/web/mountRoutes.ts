@@ -135,6 +135,8 @@ export function mountAgentRoutes(m: DashboardMount, d: AgentRoutesDeps): void {
   registerWorkApi(router, {
     ...action, db: d.db, clock: d.clock, audit: m.audit, spend: d.spend, health: d.health, log: d.log, ...(d.accountOf ? { accountOf: d.accountOf } : {}),
     ...(d.trackerWorkbook ? { trackerWorkbook: d.trackerWorkbook } : {}),
+    // Tags in the task picture are named as in Open chat: the group's members, while that group's phone is open.
+    ...(d.chat?.groupMembers ? { groupMembers: d.chat.groupMembers, connected: d.chat.connected } : {}),
   });
   registerControlApi(router, {
     ...action, db: d.db, clock: d.clock, audit: m.audit, spend: d.spend, voiceLocal: d.voiceLocal, uptime: d.uptime,
