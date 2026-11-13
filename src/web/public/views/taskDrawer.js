@@ -2,7 +2,7 @@
 // Edit owner or deadline as a small inline form. The quote and every other value from the agent go through esc().
 import { get, post } from '../api.js';
 import { $, esc, icon, toast } from '../dom.js';
-import { stamp, when } from '../format.js';
+import { date, stamp, when } from '../format.js';
 import { openChat } from './chat.js';
 import { closeDrawer, errorText, failed, loading, moodTag, openDrawer, pill, refillDrawer } from './ui.js';
 import { deadlineText, moodLabel, priorityPill, prioritySourceText, sourceLabel, taskPill, TASK_PRIORITIES } from './workLib.js';
@@ -17,26 +17,36 @@ import { deadlineText, moodLabel, priorityPill, prioritySourceText, sourceLabel,
  */
 
 /**
- * The Proof block: where the task came from and when. A message task shows the sender's bubble (a button into the chat
- * when the message is stored), a meeting task names the meeting, a dashboard task says it was added by the owner.
+ * The Proof block: where the task came from and when. A task from a stored chat message shows the sender's bubble (a
+ * button into the chat), a task from a meeting names the meeting, a dashboard task says it was added by the owner.
  * @param {TaskDetail} t
  */
 function proof(t) {
-  const lines = (/** @type {string} */ asked) => `<p class="muted-p proof-lines">${asked ? `Asked: ${esc(stamp(t.askedAt))}<br>` : ''}Found by the agent: ${esc(stamp(t.createdAt))}</p>`;
-  if (t.source === 'dashboard') return `<div class="h4">Proof</div><p class="muted-p">Added by you on ${esc(stamp(t.createdAt))}</p>`;
-  const inner = (/** @type {string} */ when) => `<b class="q-who">${esc(t.sourceSender ?? 'Member')}</b>${esc(t.sourceQuote)}<small>${esc(when)}${t.sourceRevoked ? ' · the sender deleted this message' : ''}</small>`;
-  if (t.source === 'meeting') {
-    const bubble = t.sourceQuote ? `<div class="quote">${inner(stamp(t.askedAt))}</div>` : '';
-    return `<div class="h4">Proof</div><p class="muted-p">From the meeting ${esc(t.meetingTitle ?? 'a meeting')}, ${esc(stamp(t.askedAt))}<br>Found by the agent: ${esc(stamp(t.createdAt))}</p>${bubble}`;
+  const head = '<div class="h4">Proof</div>';
+  const found = `Found by the agent: ${esc(stamp(t.createdAt))}`;
+  if (t.source === 'dashboard') return `${head}<p class="muted-p">Added by you on ${esc(stamp(t.createdAt))}</p>`;
+  const stored = typeof t.sourceMessageId === 'number';
+  if (t.source === 'meeting' && !stored) {
+    // Said in the meeting, not by a chat member: no sender name.
+    const bubble = t.sourceQuote
+      ? `<div class="quote"><b class="q-who">Said in the meeting</b>${esc(t.sourceQuote)}<small>${esc(stamp(t.askedAt))}</small></div>`
+      : '';
+    const from = t.meetingTitle ? `the meeting ${esc(t.meetingTitle)}` : 'a meeting';
+    return `${head}<p class="muted-p proof-lines">From ${from}, ${esc(stamp(t.askedAt))}<br>${found}</p>${bubble}`;
   }
-  const sent = stamp(t.sourceDate ?? t.askedAt);
+  // A chat message. Its time is the message's own (askedAt) when it is stored; otherwise only the day is known.
+  const sent = stored ? stamp(t.askedAt) : t.sourceDate ? date(t.sourceDate) : '';
+  const inner = `<b class="q-who">${esc(t.sourceSender ?? 'Member')}</b>${esc(t.sourceQuote)}<small>${esc(sent)}${t.sourceRevoked ? `${sent ? ' · ' : ''}the sender deleted this message` : ''}</small>`;
   let bubble = '';
   if (t.sourceQuote) {
-    bubble = t.sourceMessageId === null
-      ? `<div class="quote">${inner(sent)}</div>`
-      : `<button type="button" class="quote quote-btn" data-open-source aria-label="Open in chat: ${esc(t.sourceSender ?? 'Member')}, ${esc(sent)}">${inner(sent)}<span class="q-open">${icon('bubble', 14)}Open in chat</span></button>`;
+    bubble = stored
+      ? `<button type="button" class="quote quote-btn" data-open-source>${inner}<span class="q-open">${icon('bubble', 14)}Open in chat</span></button>`
+      : `<div class="quote">${inner}</div>`;
+  } else if (stored) {
+    bubble = `<p><button type="button" class="btn btn-ghost btn-sm" data-open-source>${icon('bubble', 14)}Open in chat</button></p>`;
   }
-  return `<div class="h4">Proof</div>${bubble}${lines('asked')}`;
+  const also = t.source === 'meeting' && t.meetingTitle ? `<p class="muted-p">Also discussed in the meeting ${esc(t.meetingTitle)}</p>` : '';
+  return `${head}${bubble}<p class="muted-p proof-lines">Asked: ${esc(stamp(t.askedAt))}<br>${found}</p>${also}`;
 }
 
 /** @param {TaskDetail} t @param {{ editing?: boolean, problem?: { field?: string, message: string } | null }} [o] */
@@ -66,9 +76,12 @@ export function render(t, o = {}) {
 /**
  * Opens the drawer for a task. onChange runs after the task was changed, so the list can refresh.
  * @param {string} code @param {{ onChange: () => void }} o
+ * @param {boolean} [focusSource] after drawing, focus the Open in chat button (coming back from the chat)
  */
-export function openTaskDrawer(code, o) {
+export function openTaskDrawer(code, o, focusSource = false) {
   const path = `/tasks/${encodeURIComponent(code)}`;
+  // The row (or button) that opened the panel: Back from the chat, and closing the panel, bring focus here.
+  const returnTo = document.activeElement;
   const drawer = openDrawer(`<div class="dr-head"><div><span class="code">${esc(code)}</span></div><button class="icon-btn" type="button" data-close aria-label="Close">${icon('close', 18)}</button></div><div class="dr-body">${loading('Loading the task…')}</div>`);
   /** @type {TaskDetail | null} */
   let t = null;
@@ -85,6 +98,7 @@ export function openTaskDrawer(code, o) {
     try {
       t = await get(path);
       show();
+      if (focusSource) /** @type {HTMLElement | null} */ ($('[data-open-source]', drawer))?.focus();
     } catch (e) {
       refillDrawer(drawer, `<div class="dr-head"><div><span class="code">${esc(code)}</span></div><button class="icon-btn" type="button" data-close aria-label="Close">${icon('close', 18)}</button></div><div class="dr-body">${failed(e)}</div>`);
     }
@@ -116,8 +130,15 @@ export function openTaskDrawer(code, o) {
     if (target.closest('[data-retry]')) return void load();
     if (target.closest('[data-cancel]')) return show();
     if (target.closest('[data-open-source]')) {
-      // The chat replaces the panel; its Back brings the panel back, with the same options.
-      if (t?.sourceMessageId != null) openChat(t.client.code, () => void openTaskDrawer(code, o), t.sourceMessageId, { backLabel: 'Back to the task' });
+      // The chat is its own layer, so the panel is closed first (two layers would fight over Tab and Escape). Back
+      // opens the panel again with the same options, and focus goes back to the row, then to the Open in chat button.
+      const id = t?.sourceMessageId;
+      if (!t || typeof id !== 'number') return;
+      closeDrawer(true);
+      openChat(t.client.code, () => {
+        if (returnTo instanceof HTMLElement && document.contains(returnTo)) returnTo.focus();
+        openTaskDrawer(code, o, true);
+      }, id, { backLabel: 'Back to the task' });
       return;
     }
     const b = /** @type {HTMLElement | null} */ (target.closest('[data-act]'));

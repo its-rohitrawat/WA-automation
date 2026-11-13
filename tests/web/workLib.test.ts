@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 // The screens' pure helpers are a browser module; their JSDoc types are checked by tsconfig.web.json, so the import is untyped here.
 // @ts-expect-error -- browser module (see above)
-import { auditPill, deadlineText, groupByIstDay, meetingPill, numbersMatch, readList, sourceLabel, taskPill, taskQueryFromSearch, taskQueryToSearch, usageChart } from '../../src/web/public/views/workLib.js';
+import { auditPill, deadlineText, exportFilename, groupByIstDay, meetingPill, numbersMatch, readList, sourceLabel, taskApiQuery, taskPill, taskQueryFromSearch, taskQueryToSearch, usageChart } from '../../src/web/public/views/workLib.js';
 
 describe('task filters in the URL', () => {
   it('reads only allowed values, with the defaults left out', () => {
@@ -19,6 +19,21 @@ describe('task filters in the URL', () => {
     expect(taskQueryToSearch({ sort: 'asked', dir: 'desc' })).toBe('?sort=asked&dir=desc');
     expect(taskQueryToSearch({ sort: 'deadline', dir: 'asc' })).toBe('?sort=deadline');
     expect(taskQueryFromSearch('?sort=deadline')).toEqual({ sort: 'deadline', dir: 'asc' });
+  });
+
+  it('always sends the order and the limit to the API', () => {
+    expect(taskApiQuery({ sort: 'asked', dir: 'asc' })).toBe('?sort=asked&dir=asc&limit=200');
+    expect(taskApiQuery({ status: 'open', sort: 'owner', dir: 'desc' }, 50)).toBe('?status=open&sort=owner&dir=desc&limit=50');
+  });
+
+  it('takes the export file name from Content-Disposition, with a fallback', () => {
+    expect(exportFilename('attachment; filename="Tracker.xlsx"')).toBe('Tracker.xlsx');
+    expect(exportFilename('attachment; filename=Tracker-2026.xlsx')).toBe('Tracker-2026.xlsx');
+    expect(exportFilename("attachment; filename*=UTF-8''Tracker%20Nov.xlsx")).toBe('Tracker Nov.xlsx');
+    expect(exportFilename('attachment; filename="../../evil.xlsx"')).toBe('evil.xlsx');
+    expect(exportFilename(null)).toBe('Tracker.xlsx');
+    expect(exportFilename('attachment')).toBe('Tracker.xlsx');
+    expect(exportFilename('attachment; filename=""')).toBe('Tracker.xlsx');
   });
 
   it('round-trips', () => {

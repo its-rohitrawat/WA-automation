@@ -48,6 +48,35 @@ export function taskQueryFromSearch(search) {
   return out;
 }
 
+/**
+ * The query sent to the API: the filters, and always sort, dir and limit (the server's own default order is the
+ * deadline, so the order is never left to it). @param {TaskFilter} f @param {number} [limit]
+ */
+export function taskApiQuery(f, limit = 200) {
+  const p = new URLSearchParams(taskQueryToSearch(f));
+  p.set('sort', f.sort);
+  p.set('dir', f.dir);
+  p.set('limit', String(limit));
+  return `?${p.toString()}`;
+}
+
+/** The file name from a Content-Disposition header, as a bare name; "Tracker.xlsx" when there is none. @param {string | null | undefined} header */
+export function exportFilename(header) {
+  const FALLBACK = 'Tracker.xlsx';
+  if (!header) return FALLBACK;
+  const star = /filename\*\s*=\s*UTF-8''([^;]+)/i.exec(header);
+  const plain = /filename\s*=\s*"([^"]*)"/i.exec(header) ?? /filename\s*=\s*([^;"]+)/i.exec(header);
+  let name = '';
+  try {
+    name = star ? decodeURIComponent(star[1].trim()) : (plain?.[1] ?? '').trim();
+  } catch {
+    name = (plain?.[1] ?? '').trim();
+  }
+  name = name.replaceAll(String.fromCharCode(92), '/').split('/').pop() ?? '';
+  name = [...name].filter((c) => c.charCodeAt(0) >= 32).join('').trim();
+  return name && name !== '.' && name !== '..' ? name.slice(0, 120) : FALLBACK;
+}
+
 /** The query for these filters: "" when nothing is set; the default sort (asked, oldest first) is left out. @param {TaskFilter} f */
 export function taskQueryToSearch(f) {
   const p = new URLSearchParams();

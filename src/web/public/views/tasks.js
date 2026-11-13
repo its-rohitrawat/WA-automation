@@ -1,11 +1,12 @@
 // Tasks (D4 Task 6): search and five filters kept in the address, a sortable table (cards on phones), red overdue
 // dates, status pills, the source, and the task drawer. Every value from the agent goes through esc().
 import { get } from '../api.js';
-import { $, esc, icon } from '../dom.js';
+import { $, esc, icon, toast } from '../dom.js';
 import { stamp } from '../format.js';
 import { openTaskDrawer } from './taskDrawer.js';
+import { chatOpen, refreshChat } from './chat.js';
 import { empty, failed, listen, loading, moodTag, pill, setQuery } from './ui.js';
-import { deadlineText, moodLabel, priorityPill, sourceLabel, taskPill, taskQueryFromSearch, taskQueryToSearch } from './workLib.js';
+import { deadlineText, moodLabel, priorityPill, exportFilename, sourceLabel, taskApiQuery, taskPill, taskQueryFromSearch, taskQueryToSearch } from './workLib.js';
 
 /** @typedef {import('./registry.js').ScreenCtx} ScreenCtx */
 /** @typedef {import('./workLib.js').TaskFilter} TaskFilter */
@@ -48,12 +49,12 @@ export function mountTasks(ctx) {
     `<select class="sel" data-f="${id}" aria-label="${esc(label)}"><option value="">${esc(label)}</option>${opts
       .map(([v, l]) => `<option value="${esc(v)}"${f[id] === v ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
 
-  // One button for the oldest/newest order of "when it was asked": the label says what is shown now.
+  // One button for the order of "when it was asked". While another column sorts, it offers "Sort by asked"; while
+  // asked sorts, its label is the order shown now and pressing it flips that.
   const sortButton = () => {
-    const on = f.sort === 'asked';
-    const now = on && f.dir === 'desc' ? 'Newest first' : 'Oldest first';
-    const next = on && f.dir === 'asc' ? 'newest first' : 'oldest first';
-    return `<button type="button" class="fchip ftoggle" data-asked-order aria-pressed="${on}" aria-label="${esc(`${now}. Press to show ${next}.`)}">${icon('sort', 13)}${now}</button>`;
+    if (f.sort !== 'asked') return `<button type="button" class="fchip ftoggle" data-asked-order aria-label="Sort by when asked, oldest first">${icon('sort', 13)}Sort by asked</button>`;
+    const newest = f.dir === 'desc';
+    return `<button type="button" class="fchip ftoggle" data-asked-order aria-label="${newest ? 'Newest first. Press for oldest first.' : 'Oldest first. Press for newest first.'}">${icon('sort', 13)}${newest ? 'Newest first' : 'Oldest first'}</button>`;
   };
 
   const toolbar = () => `<div class="toolbar"><label class="field">${icon('search', 16)}<input data-f="q" value="${esc(f.q ?? '')}" placeholder="Search tasks" aria-label="Search tasks" maxlength="200"></label>
@@ -65,7 +66,7 @@ export function mountTasks(ctx) {
     <button type="button" class="fchip ftoggle" data-removed aria-pressed="${f.removed === '1'}">${f.removed === '1' ? icon('tick', 13) : ''}Include removed clients</button>
     ${f.closed === '7d' ? `<button type="button" class="fchip" data-clear="closed" aria-label="Remove the filter: done in the last 7 days">Done · last 7 days${icon('close', 13)}</button>` : ''}
     ${sortButton()}
-    <a class="btn btn-ghost btn-sm" href="/dashboard/api/tracker/export" download>${icon('xls', 16)}Export Excel</a>
+    <button type="button" class="btn btn-ghost btn-sm" data-export>${icon('xls', 16)}Export Excel</button>
     <span class="count-note" data-region="count"></span></div>`;
 
   const th = (/** @type {string} */ k, /** @type {string} */ l) => {
@@ -102,12 +103,7 @@ export function mountTasks(ctx) {
   async function load() {
     const mine = ++asked;
     try {
-      // The server's own default is the deadline, so the order is always sent, even when the address leaves it out.
-      const p = new URLSearchParams(taskQueryToSearch(f));
-      p.set('sort', f.sort);
-      p.set('dir', f.dir);
-      p.set('limit', '200');
-      const r = await get(`/tasks?${p.toString()}`);
+      const r = await get(`/tasks${taskApiQuery(f)}`);
       if (!ctx.live() || mine !== asked) return;
       data = r;
       err = null;
@@ -116,6 +112,41 @@ export function mountTasks(ctx) {
       err = e;
     }
     drawTable();
+  }
+
+  // Export: fetched here, not a plain download link, so a refusal (too soon, not ready) shows our own message.
+  let exporting = false;
+  async function exportExcel(/** @type {HTMLButtonElement} */ btn) {
+    if (exporting) return;
+    exporting = true;
+    btn.disabled = true;
+    try {
+      const res = await fetch('/dashboard/api/tracker/export', { credentials: 'same-origin' });
+      if (!res.ok) {
+        let message = '';
+        try {
+          const body = await res.json();
+          if (typeof body?.error?.message === 'string') message = body.error.message;
+        } catch {
+          // not JSON: the plain message below
+        }
+        toast(message || "The export didn't work. Try again in a moment.", false);
+        return;
+      }
+      const url = URL.createObjectURL(await res.blob());
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = exportFilename(res.headers.get('Content-Disposition'));
+      document.body.append(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    } catch {
+      toast("The export didn't work. Check the connection and try again.", false);
+    } finally {
+      exporting = false;
+      btn.disabled = false;
+    }
   }
 
   const changed = () => {
@@ -142,6 +173,10 @@ export function mountTasks(ctx) {
   drawAll();
   void load();
   void lists();
+  // The chat opened from a task's Proof is not drawn by this screen, so it is kept current here (as the Clients screen does).
+  ctx.poll(async () => {
+    if (chatOpen()) await refreshChat();
+  }, 30_000);
 
   const open = (/** @type {string} */ code) => openTaskDrawer(code, { onChange: () => void load() });
   const stop = listen(ctx.view, {
@@ -167,6 +202,8 @@ export function mountTasks(ctx) {
     },
     click: (e) => {
       const t = /** @type {Element} */ (e.target);
+      const exp = /** @type {HTMLButtonElement | null} */ (t.closest('[data-export]'));
+      if (exp) return void exportExcel(exp);
       const sort = /** @type {HTMLElement | null} */ (t.closest('[data-sort]'));
       if (sort) {
         const k = sort.dataset.sort ?? 'deadline';
