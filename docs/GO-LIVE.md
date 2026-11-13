@@ -121,7 +121,7 @@ The website's files come with the code, in the `site` folder of `/opt/wa-agent`,
 
 The Mac never builds the website. The developer builds it in the website project and copies it into the code with `npm run site:import`, which checks the files first; the Mac's usual update (step 2) then brings it.
 
-**Due on or after 6 Nov 2026:** the website's Next.js upgrade (16.4.0 to 16.4.3). The known Next.js advisories need a Next.js server, and the agent serves the website as plain files, so this can wait until the new version is two weeks old. Then the developer upgrades, rebuilds the website and re-imports it with `npm run site:import`.
+**Done 13 Nov 2026:** the website's Next.js upgrade (16.4.0 to 16.4.3). The website was rebuilt on 16.4.3 and re-imported with `npm run site:import`; the Mac's usual update (step 2) brings it. The known Next.js advisories needed a Next.js server, and the agent serves the website as plain files, so this waited until 16.4.3 was two weeks old.
 
 ## 6. Point the domain at the Mac
 
