@@ -13,7 +13,7 @@ afterEach(async () => {
   for (const c of closers.splice(0)) await c();
 });
 
-async function boot(o: { paused?: boolean; actionCapacity?: number; exportTimeoutMs?: number; book?: (() => Promise<Buffer>) | null } = {}) {
+async function boot(o: { paused?: boolean; actionCapacity?: number; exportTimeoutMs?: number; failAudit?: { on: boolean }; book?: (() => Promise<Buffer>) | null } = {}) {
   const { db, ids } = await seeded();
   const clock = manualClock(NOW);
   await createTask(db, { clientId: ids.sharma, side: 'us', title: 'Banner', category: 'design', priority: 'major', assignedTo: null, askedBy: null, raisedOn: '2026-10-10',
@@ -30,7 +30,7 @@ async function boot(o: { paused?: boolean; actionCapacity?: number; exportTimeou
   const h = await bootDashboard({
     db, clock, actionCapacity: o.actionCapacity, moreOwners: ['second@example.com'],
     mount: (router, x) => registerWorkApi(router, {
-      ...x, db, clock, audit, spend: { isPaused: () => o.paused ?? false }, ...(o.exportTimeoutMs ? { exportTimeoutMs: o.exportTimeoutMs } : {}),
+      ...x, db, clock, audit: o.failAudit ? { record: async (e, q) => { if (o.failAudit!.on) throw new Error('audit down'); await audit.record(e, q); } } : audit, spend: { isPaused: () => o.paused ?? false }, ...(o.exportTimeoutMs ? { exportTimeoutMs: o.exportTimeoutMs } : {}),
       ...(o.book === null ? {} : { trackerWorkbook: o.book ?? (async () => Buffer.from('PK-founder-workbook', 'latin1')) }),
     }),
   });
@@ -202,6 +202,18 @@ describe('work API: tracker export', () => {
     expect((await download(h)).status).toBe(500);
     hang = false;
     expect((await download(h)).status).toBe(200);
+  });
+
+  it('an audit failure gives a 500 and no file, and an immediate retry works', async () => {
+    const failAudit = { on: true };
+    const { db, h } = await boot({ failAudit });
+    const r = await download(h);
+    expect(r.status).toBe(500);
+    expect(r.body.subarray(0, 2).toString('latin1')).not.toBe('PK');
+    failAudit.on = false;
+    expect((await download(h)).status).toBe(200);
+    expect((await auditRows(db)).filter((x) => x.event === 'tracker.export')).toHaveLength(1);
+    expect((await download(h)).status).toBe(429);
   });
 
   it('a failed build does not use up the limit', async () => {

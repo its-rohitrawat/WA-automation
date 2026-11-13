@@ -107,7 +107,8 @@ export function registerWorkApi(router: Router, d: WorkApiDeps): void {
       ctx.res.setHeader('Retry-After', String(building.has(s.email) ? EXPORT_GAP_MS / 1000 : wait));
       return sendJson(ctx.res, 429, { error: { code: 'rate_limited', message: 'One export every 10 seconds. Wait a moment and try again.' } });
     }
-    // The limit counts only an export that worked, so a failed build can be tried again at once.
+    // The limit counts only an export that worked, audit line included, so a failure can be tried again at once. The
+    // in-flight guard is held until then, so two builds never run at once for one owner.
     let book: Buffer;
     building.add(s.email);
     let timer: NodeJS.Timeout | undefined;
@@ -117,16 +118,16 @@ export function registerWorkApi(router: Router, d: WorkApiDeps): void {
         timer = setTimeout(() => reject(Object.assign(new Error('export timed out'), { name: 'ExportTimeout' })), d.exportTimeoutMs ?? EXPORT_BUILD_MS);
       });
       book = await Promise.race([d.trackerWorkbook(), timeout]);
+      await d.audit.record({ actor: s.email, kind: 'ops', requestId: ctx.requestId, event: 'tracker.export', detail: 'Tracker exported as an Excel file' });
+      lastExport.set(s.email, d.clock.now().getTime());
     } catch (e) {
       const code = (e as { code?: unknown } | null)?.code;
-      d.log?.warn({ code: typeof code === 'string' && /^[A-Z0-9_]{2,40}$/.test(code) ? code : (e as Error | null)?.name ?? 'Error', requestId: ctx.requestId }, 'tracker export could not be built');
+      d.log?.warn({ code: typeof code === 'string' && /^[A-Z0-9_]{2,40}$/.test(code) ? code : (e as Error | null)?.name ?? 'Error', requestId: ctx.requestId }, 'tracker export failed');
       return sendJson(ctx.res, 500, { error: { code: 'internal', message: EXPORT_FAILED } });
     } finally {
       clearTimeout(timer);
       building.delete(s.email);
     }
-    lastExport.set(s.email, d.clock.now().getTime());
-    await d.audit.record({ actor: s.email, kind: 'ops', requestId: ctx.requestId, event: 'tracker.export', detail: 'Tracker exported as an Excel file' });
     ctx.res.statusCode = 200;
     ctx.res.setHeader('Content-Type', XLSX_MIME);
     ctx.res.setHeader('Content-Disposition', `attachment; filename="Tracker-${istDate(d.clock.now())}.xlsx"`);
