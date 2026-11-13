@@ -73,8 +73,8 @@ export function exportFilename(header) {
     name = (plain?.[1] ?? '').trim();
   }
   name = name.replaceAll(String.fromCharCode(92), '/').split('/').pop() ?? '';
-  name = [...name].filter((c) => c.charCodeAt(0) >= 32).join('').trim();
-  return name && name !== '.' && name !== '..' ? name.slice(0, 120) : FALLBACK;
+  // Plain letters, digits, spaces and . ( ) - _ only, ending .xlsx: nothing else (control or bidi characters) is trusted.
+  return /^[\w .()-]{1,120}\.xlsx$/.test(name) ? name : FALLBACK;
 }
 
 /** The query for these filters: "" when nothing is set; the default sort (asked, oldest first) is left out. @param {TaskFilter} f */

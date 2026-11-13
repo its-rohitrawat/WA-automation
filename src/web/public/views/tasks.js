@@ -1,6 +1,6 @@
 // Tasks (D4 Task 6): search and five filters kept in the address, a sortable table (cards on phones), red overdue
 // dates, status pills, the source, and the task drawer. Every value from the agent goes through esc().
-import { get } from '../api.js';
+import { ApiError, download, get } from '../api.js';
 import { $, esc, icon, toast } from '../dom.js';
 import { stamp } from '../format.js';
 import { openTaskDrawer } from './taskDrawer.js';
@@ -42,6 +42,7 @@ export function mountTasks(ctx) {
   let clients = [];
   /** @type {string[]} */
   let owners = [];
+  let exporting = false; // the Export button draws as busy while this is set, also after a redraw
   let typing = /** @type {ReturnType<typeof setTimeout> | undefined} */ (undefined);
   let asked = 0;
 
@@ -52,7 +53,7 @@ export function mountTasks(ctx) {
   // One button for the order of "when it was asked". While another column sorts, it offers "Sort by asked"; while
   // asked sorts, its label is the order shown now and pressing it flips that.
   const sortButton = () => {
-    if (f.sort !== 'asked') return `<button type="button" class="fchip ftoggle" data-asked-order aria-label="Sort by when asked, oldest first">${icon('sort', 13)}Sort by asked</button>`;
+    if (f.sort !== 'asked') return `<button type="button" class="fchip ftoggle" data-asked-order aria-label="Sort by asked, oldest first">${icon('sort', 13)}Sort by asked</button>`;
     const newest = f.dir === 'desc';
     return `<button type="button" class="fchip ftoggle" data-asked-order aria-label="${newest ? 'Newest first. Press for oldest first.' : 'Oldest first. Press for newest first.'}">${icon('sort', 13)}${newest ? 'Newest first' : 'Oldest first'}</button>`;
   };
@@ -66,7 +67,7 @@ export function mountTasks(ctx) {
     <button type="button" class="fchip ftoggle" data-removed aria-pressed="${f.removed === '1'}">${f.removed === '1' ? icon('tick', 13) : ''}Include removed clients</button>
     ${f.closed === '7d' ? `<button type="button" class="fchip" data-clear="closed" aria-label="Remove the filter: done in the last 7 days">Done · last 7 days${icon('close', 13)}</button>` : ''}
     ${sortButton()}
-    <button type="button" class="btn btn-ghost btn-sm" data-export>${icon('xls', 16)}Export Excel</button>
+    <button type="button" class="btn btn-ghost btn-sm" data-export${exporting ? ' aria-disabled="true"' : ''}>${icon('xls', 16)}Export Excel</button>
     <span class="count-note" data-region="count"></span></div>`;
 
   const th = (/** @type {string} */ k, /** @type {string} */ l) => {
@@ -115,24 +116,14 @@ export function mountTasks(ctx) {
   }
 
   // Export: fetched here, not a plain download link, so a refusal (too soon, not ready) shows our own message.
-  let exporting = false;
-  async function exportExcel(/** @type {HTMLButtonElement} */ btn) {
+  // aria-disabled, not disabled: the button keeps keyboard focus while it works.
+  const exportBusy = () => $('.toolbar [data-export]', ctx.view)?.setAttribute('aria-disabled', 'true');
+  async function exportExcel() {
     if (exporting) return;
     exporting = true;
-    btn.disabled = true;
+    exportBusy();
     try {
-      const res = await fetch('/dashboard/api/tracker/export', { credentials: 'same-origin' });
-      if (!res.ok) {
-        let message = '';
-        try {
-          const body = await res.json();
-          if (typeof body?.error?.message === 'string') message = body.error.message;
-        } catch {
-          // not JSON: the plain message below
-        }
-        toast(message || "The export didn't work. Try again in a moment.", false);
-        return;
-      }
+      const res = await download('/tracker/export');
       const url = URL.createObjectURL(await res.blob());
       const a = document.createElement('a');
       a.href = url;
@@ -141,11 +132,11 @@ export function mountTasks(ctx) {
       a.click();
       a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 10_000);
-    } catch {
-      toast("The export didn't work. Check the connection and try again.", false);
+    } catch (e) {
+      toast(e instanceof ApiError && e.message ? e.message : "The export didn't work. Try again in a moment.", false);
     } finally {
       exporting = false;
-      btn.disabled = false;
+      $('.toolbar [data-export]', ctx.view)?.removeAttribute('aria-disabled');
     }
   }
 
@@ -202,8 +193,7 @@ export function mountTasks(ctx) {
     },
     click: (e) => {
       const t = /** @type {Element} */ (e.target);
-      const exp = /** @type {HTMLButtonElement | null} */ (t.closest('[data-export]'));
-      if (exp) return void exportExcel(exp);
+      if (t.closest('[data-export]')) return void exportExcel();
       const sort = /** @type {HTMLElement | null} */ (t.closest('[data-sort]'));
       if (sort) {
         const k = sort.dataset.sort ?? 'deadline';

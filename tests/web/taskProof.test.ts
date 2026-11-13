@@ -44,6 +44,10 @@ describe('the task panel Proof block', () => {
     expect(html).not.toContain('05:30');
   });
 
+  it('leaves out an empty time line', () => {
+    expect(render(task({ sourceMessageId: null, sourceDate: null }))).not.toContain('<small></small>');
+  });
+
   it('draws the button only for a real id', () => {
     expect(render(task({ sourceMessageId: undefined }))).not.toContain('data-open-source');
   });

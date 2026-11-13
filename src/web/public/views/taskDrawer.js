@@ -4,7 +4,7 @@ import { get, post } from '../api.js';
 import { $, esc, icon, toast } from '../dom.js';
 import { date, stamp, when } from '../format.js';
 import { openChat } from './chat.js';
-import { closeDrawer, errorText, failed, loading, moodTag, openDrawer, pill, refillDrawer } from './ui.js';
+import { closeDrawer, errorText, failed, loading, moodTag, openDrawer, pill, refillDrawer, returnFocusTo } from './ui.js';
 import { deadlineText, moodLabel, priorityPill, prioritySourceText, sourceLabel, taskPill, TASK_PRIORITIES } from './workLib.js';
 
 /**
@@ -36,7 +36,7 @@ function proof(t) {
   }
   // A chat message. Its time is the message's own (askedAt) when it is stored; otherwise only the day is known.
   const sent = stored ? stamp(t.askedAt) : t.sourceDate ? date(t.sourceDate) : '';
-  const inner = `<b class="q-who">${esc(t.sourceSender ?? 'Member')}</b>${esc(t.sourceQuote)}<small>${esc(sent)}${t.sourceRevoked ? `${sent ? ' · ' : ''}the sender deleted this message` : ''}</small>`;
+  const inner = `<b class="q-who">${esc(t.sourceSender ?? 'Member')}</b>${esc(t.sourceQuote)}${sent || t.sourceRevoked ? `<small>${esc(sent)}${t.sourceRevoked ? `${sent ? ' · ' : ''}the sender deleted this message` : ''}</small>` : ''}`;
   let bubble = '';
   if (t.sourceQuote) {
     bubble = stored
@@ -82,7 +82,10 @@ export function openTaskDrawer(code, o, focusSource = false) {
   const path = `/tasks/${encodeURIComponent(code)}`;
   // The row (or button) that opened the panel: Back from the chat, and closing the panel, bring focus here.
   const returnTo = document.activeElement;
+  // The row again, by its code: the list may have been redrawn (after Mark done or Edit), so the old element is gone.
+  const rowAgain = () => (returnTo instanceof HTMLElement && document.contains(returnTo) ? returnTo : document.querySelector(`[data-task="${CSS.escape(code)}"]`));
   const drawer = openDrawer(`<div class="dr-head"><div><span class="code">${esc(code)}</span></div><button class="icon-btn" type="button" data-close aria-label="Close">${icon('close', 18)}</button></div><div class="dr-body">${loading('Loading the task…')}</div>`);
+  returnFocusTo(drawer, rowAgain);
   /** @type {TaskDetail | null} */
   let t = null;
   let busy = false;
@@ -136,7 +139,7 @@ export function openTaskDrawer(code, o, focusSource = false) {
       if (!t || typeof id !== 'number') return;
       closeDrawer(true);
       openChat(t.client.code, () => {
-        if (returnTo instanceof HTMLElement && document.contains(returnTo)) returnTo.focus();
+        /** @type {HTMLElement | null} */ (rowAgain())?.focus();
         openTaskDrawer(code, o, true);
       }, id, { backLabel: 'Back to the task' });
       return;

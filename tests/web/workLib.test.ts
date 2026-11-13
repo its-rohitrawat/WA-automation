@@ -34,6 +34,9 @@ describe('task filters in the URL', () => {
     expect(exportFilename(null)).toBe('Tracker.xlsx');
     expect(exportFilename('attachment')).toBe('Tracker.xlsx');
     expect(exportFilename('attachment; filename=""')).toBe('Tracker.xlsx');
+    expect(exportFilename('attachment; filename="Tracker' + String.fromCharCode(0x7f) + '.xlsx"')).toBe('Tracker.xlsx');
+    expect(exportFilename('attachment; filename="Tracker' + String.fromCharCode(0x202e) + 'gnp.xlsx"')).toBe('Tracker.xlsx');
+    expect(exportFilename('attachment; filename="notes.exe"')).toBe('Tracker.xlsx');
   });
 
   it('round-trips', () => {
