@@ -3,6 +3,7 @@ import type { Db } from '../store/db.ts';
 import { PRIORITIES, TASK_FIELDS, type Category, type Priority, type PrioritySource, type Sentiment, type Side, type TaskField } from '../store/tasks.ts';
 import { getClient } from '../store/clients.ts';
 import { istDate } from '../util/time.ts';
+import { mentionTags } from '../wa/groupMembers.ts';
 import { withTagNames } from './chatQueries.ts';
 import { senderLabel } from './clientQueries.ts';
 import { ControlError } from './errors.ts';
@@ -339,7 +340,9 @@ async function sourceProof(db: Db, r: RawRow): Promise<{ quote: string | null; s
   );
   const sender = msg ? senderLabel(msg.name, msg.fromMe === 1) : null;
   const meeting = r.meetingId === null ? undefined : await db.get<{ title: string }>('SELECT title FROM meetings WHERE id = @id', { id: r.meetingId });
-  const quote = r.sourceQuote === null ? null : (await withTagNames(db, await getClient(db, r.clientId), [r.sourceQuote]))[0]!;
+  const quote = r.sourceQuote !== null && mentionTags(r.sourceQuote).size > 0
+    ? (await withTagNames(db, await getClient(db, r.clientId), [r.sourceQuote]))[0]!
+    : r.sourceQuote;
   return { quote, sender: sender === 'Someone' ? 'Member' : sender, messageId: msg?.id ?? null, meetingTitle: meeting ? meeting.title : null };
 }
 

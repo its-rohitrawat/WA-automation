@@ -434,6 +434,17 @@ describe('asked at and proof', () => {
     expect(d.sourceQuote).not.toMatch(/\d{7}/);
   });
 
+  it('a tag of a person with a name reads as that name; a message from the founder has the sender Founder', async () => {
+    const { db, ids } = await seeded();
+    await upsertPerson(db, { clientId: ids.sharma, jid: '919800000002@s.whatsapp.net', number: '919800000002', name: 'Anita Rao', fromMe: false });
+    await msg(db, ids.sharma, 'F1', '2026-10-05T04:00:00.000Z', { jid: 'me@s.whatsapp.net', fromMe: true });
+    const tagged = await task(db, { sourceWaId: 'F1', sourceQuote: 'ask @919800000002 and @919800000003 today' });
+    const d = (await taskDetail(db, tagged, now))!;
+    expect(d.sourceQuote).toBe('ask @Anita Rao and @member today');
+    expect(d.sourceSender).toBe('Founder');
+    expect(await taskDetail(db, await task(db, { sourceQuote: 'plain words' }), now)).toMatchObject({ sourceQuote: 'plain words' });
+  });
+
   it('a meeting task carries the meeting title and no message id', async () => {
     const { db, ids } = await seeded();
     const meetingId = (await insertFound(db, {

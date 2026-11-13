@@ -32,6 +32,8 @@ export async function bootDashboard(o: {
   clock: ManualClock;
   mount: (router: Router, x: { guard: ReturnType<typeof createGuard>; actions: RateLimiter; sessions: SessionStore; audited: AuditedWrite }) => void;
   actionCapacity?: number;
+  /** Further owners besides OWNER. */
+  moreOwners?: string[];
 }) {
   const lines: string[] = [];
   const log = createLogger('info', { write: (s: string) => { lines.push(s); } } as unknown as DestinationStream);
@@ -42,7 +44,7 @@ export async function bootDashboard(o: {
   // (wa_platform) on Postgres, where a customer's Db cannot reach web_sessions.
   const sessionDb = onSqlite ? o.db : (await import('./pg.ts')).openTestPlatformDb();
   const sessions = new SessionStore(sessionDb, o.clock);
-  const guard = createGuard({ sessions, ownerEmails: [OWNER], port: () => port });
+  const guard = createGuard({ sessions, ownerEmails: [OWNER, ...(o.moreOwners ?? [])], port: () => port });
   const actions = new RateLimiter({ capacity: o.actionCapacity ?? 1000, refillPerSec: 1, clock: o.clock });
   const server: WebServer = createWebServer({ control: {}, env: { DASHBOARD_PORT: 0 }, log, clock: o.clock, publicDir: root });
   // A session change with its audit row, as the dashboard mounts it: the audit row in this Db, then the session's Db.

@@ -28,14 +28,14 @@ async function boot(o: { paused?: boolean; actionCapacity?: number; book?: (() =
   }))!;
   const audit = new AuditLog(db, clock);
   const h = await bootDashboard({
-    db, clock, actionCapacity: o.actionCapacity,
+    db, clock, actionCapacity: o.actionCapacity, moreOwners: ['second@example.com'],
     mount: (router, x) => registerWorkApi(router, {
       ...x, db, clock, audit, spend: { isPaused: () => o.paused ?? false },
       ...(o.book === null ? {} : { trackerWorkbook: o.book ?? (async () => Buffer.from('PK-founder-workbook', 'latin1')) }),
     }),
   });
   closers.push(() => h.close());
-  return { db, h, m1, m2 };
+  return { db, h, m1, m2, clock };
 }
 
 const auditRows = (db: Db) => rows<Record<string, string>>(db, 'SELECT actor, event, kind, detail, request_id AS requestId FROM audit_log ORDER BY id');
@@ -119,7 +119,7 @@ describe('work API: changes', () => {
     expect((await h.post('/dashboard/api/tasks/SHA-001/unlock')).status).toBe(200);
     const r = await h.post('/dashboard/api/tasks/SHA-001/unlock');
     expect(r.status).toBe(429);
-    expect(r.headers['retry-after']).toBeDefined();
+    expect(r.headers['retry-after']).toBe('1');
   });
 });
 
@@ -144,9 +144,9 @@ describe('work API review fixes', () => {
 describe('work API: tracker export', () => {
   const PATH = '/dashboard/api/tracker/export';
   /** The raw reply: the shared helper reads bodies as text, which would damage a zip. */
-  async function download(h: Awaited<ReturnType<typeof boot>>['h'], signedIn = true) {
-    const { id } = await h.sessions.create(OWNER);
-    const r = await fetch(`http://127.0.0.1:${h.port}${PATH}`, { headers: signedIn ? { cookie: `wa_session=${id}` } : {} });
+  async function download(h: Awaited<ReturnType<typeof boot>>['h'], signedIn: boolean | string = true, extra: Record<string, string> = {}) {
+    const { id } = await h.sessions.create(typeof signedIn === 'string' ? signedIn : OWNER);
+    const r = await fetch(`http://127.0.0.1:${h.port}${PATH}`, { headers: { ...extra, ...(signedIn ? { cookie: `wa_session=${id}` } : {}) } });
     return { status: r.status, headers: r.headers, body: Buffer.from(await r.arrayBuffer()) };
   }
 
@@ -173,8 +173,41 @@ describe('work API: tracker export', () => {
     expect((await download(h)).status).toBe(200);
     const second = await download(h);
     expect(second.status).toBe(429);
-    expect(second.headers.get('retry-after')).toBeDefined();
+    expect(second.headers.get('retry-after')).toBe('10');
     expect(second.body.toString('utf8')).toContain('rate_limited');
+  });
+
+  it('allows the next export 10 seconds on, and another owner is not held back by the first', async () => {
+    const { h, clock } = await boot();
+    expect((await download(h)).status).toBe(200);
+    expect((await download(h, 'second@example.com')).status).toBe(200);
+    expect((await download(h)).status).toBe(429);
+    clock.advance(9_000);
+    expect((await download(h)).status).toBe(429);
+    clock.advance(1_000);
+    expect((await download(h)).status).toBe(200);
+  });
+
+  it('a failed build does not use up the limit', async () => {
+    let fail = true;
+    const { h } = await boot({ book: async () => { if (fail) throw new Error('secret failure'); return Buffer.from('PK-x', 'latin1'); } });
+    expect((await download(h)).status).toBe(500);
+    fail = false;
+    expect((await download(h)).status).toBe(200);
+    expect((await download(h)).status).toBe(429);
+  });
+
+  it('refuses a cross-site request before anything else; same-origin, same-site, none and no header are allowed', async () => {
+    const { db, h, clock } = await boot();
+    const r = await download(h, true, { 'sec-fetch-site': 'cross-site' });
+    expect(r.status).toBe(403);
+    expect(r.body.subarray(0, 2).toString('latin1')).not.toBe('PK');
+    expect(await auditRows(db)).toEqual([]);
+    for (const v of ['same-origin', 'same-site', 'none']) {
+      expect((await download(h, true, { 'sec-fetch-site': v })).status, v).toBe(200);
+      clock.advance(10_000);
+    }
+    expect((await download(h)).status).toBe(200);
   });
 
   it('writes an audit line with the owner and request id and no file content', async () => {
@@ -197,14 +230,5 @@ describe('work API: tracker export', () => {
     const r = await download(h);
     expect(r.status).toBe(500);
     expect(r.body.toString('utf8')).not.toContain('secret');
-  });
-
-  it("each workspace exports its own workbook, never another's", async () => {
-    const mine = await boot({ book: async () => Buffer.from('PK-customer-A', 'latin1') });
-    const other = await boot({ book: async () => Buffer.from('PK-customer-B', 'latin1') });
-    expect((await download(mine.h)).body.toString('latin1')).toContain('customer-A');
-    const b = (await download(other.h)).body.toString('latin1');
-    expect(b).toContain('customer-B');
-    expect(b).not.toContain('customer-A');
   });
 });

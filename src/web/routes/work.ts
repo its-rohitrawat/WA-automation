@@ -15,7 +15,7 @@ import { istDate } from '../../util/time.ts';
 import type { Logger } from '../../util/logger.ts';
 import type { AuditLog } from '../audit.ts';
 import { sendJson } from '../http.ts';
-import { RateLimiter, type Guard, type RateLimit } from '../guard.ts';
+import type { Guard } from '../guard.ts';
 import type { Router } from '../router.ts';
 import { actionSession, controlled, readBody, type ActionGuard } from './respond.ts';
 
@@ -38,12 +38,10 @@ export interface WorkApiDeps extends ActionGuard {
    */
   trackerWorkbook?: () => Promise<Buffer>;
   log?: Pick<Logger, 'warn'>;
-  /** The export limit; EXPORT_LIMIT when not given. */
-  exports?: Pick<RateLimiter, 'take' | 'retryAfter'>;
 }
 
-/** One tracker export per 10 seconds per signed-in owner. */
-export const EXPORT_LIMIT: Readonly<RateLimit> = Object.freeze({ capacity: 1, refillPerSec: 1 / 10 });
+/** One tracker export per 10 seconds per signed-in owner, counted from the last one that worked. */
+const EXPORT_GAP_MS = 10_000;
 
 const NOT_READY = 'The tracker is not ready yet. Try again in a moment.';
 const EXPORT_FAILED = 'The tracker could not be exported. Try again in a moment.';
@@ -54,7 +52,9 @@ export function registerWorkApi(router: Router, d: WorkApiDeps): void {
       await d.guard.requireOwner(ctx.req);
       sendJson(ctx.res, 200, await answer(ctx));
     }));
-  const exportLimit = d.exports ?? new RateLimiter({ ...EXPORT_LIMIT, clock: d.clock });
+  /** Owner email to the time of their last good export, and the owners whose export is being built now. */
+  const lastExport = new Map<string, number>();
+  const building = new Set<string>();
   const auditFor = (actor: string, requestId: string) => (q: Sql, e: AuditEntry) => d.audit.record({ ...e, actor, requestId }, q);
 
   read('/dashboard/api/tasks', async ({ url }) => await listDashboardTasks(d.db, parseTaskQuery(url.searchParams), d.clock.now()));
@@ -92,19 +92,29 @@ export function registerWorkApi(router: Router, d: WorkApiDeps): void {
   // The whole tracker as an Excel file, built fresh (the same workbook as on Drive; nothing is uploaded). Read-only, so
   // no CSRF check; one a signed-in owner per 10 seconds, audited without any of the file's content.
   router.get('/dashboard/api/tracker/export', controlled(async (ctx) => {
+    // A page on another site must not make the owner's browser build and download the whole tracker.
+    if (ctx.req.headers['sec-fetch-site'] === 'cross-site') return sendJson(ctx.res, 403, { error: { code: 'forbidden', message: 'This request is not allowed from another site.' } });
     const s = await d.guard.requireOwner(ctx.req);
     if (!d.trackerWorkbook) return sendJson(ctx.res, 503, { error: { code: 'not_ready', message: NOT_READY } });
-    if (!exportLimit.take(s.email)) {
-      ctx.res.setHeader('Retry-After', String(exportLimit.retryAfter(s.email)));
+    const now = d.clock.now().getTime();
+    const wait = Math.ceil(((lastExport.get(s.email) ?? -Infinity) + EXPORT_GAP_MS - now) / 1000);
+    if (building.has(s.email) || wait > 0) {
+      ctx.res.setHeader('Retry-After', String(building.has(s.email) ? EXPORT_GAP_MS / 1000 : wait));
       return sendJson(ctx.res, 429, { error: { code: 'rate_limited', message: 'One export every 10 seconds. Wait a moment and try again.' } });
     }
+    // The limit counts only an export that worked, so a failed build can be tried again at once.
     let book: Buffer;
+    building.add(s.email);
     try {
       book = await d.trackerWorkbook();
     } catch (e) {
-      d.log?.warn({ code: (e as Error | null)?.name ?? 'Error', requestId: ctx.requestId }, 'tracker export could not be built');
+      const code = (e as { code?: unknown } | null)?.code;
+      d.log?.warn({ code: typeof code === 'string' && /^[A-Z0-9_]{2,40}$/.test(code) ? code : (e as Error | null)?.name ?? 'Error', requestId: ctx.requestId }, 'tracker export could not be built');
       return sendJson(ctx.res, 500, { error: { code: 'internal', message: EXPORT_FAILED } });
+    } finally {
+      building.delete(s.email);
     }
+    lastExport.set(s.email, d.clock.now().getTime());
     await d.audit.record({ actor: s.email, kind: 'ops', requestId: ctx.requestId, event: 'tracker.export', detail: 'Tracker exported as an Excel file' });
     ctx.res.statusCode = 200;
     ctx.res.setHeader('Content-Type', XLSX_MIME);
