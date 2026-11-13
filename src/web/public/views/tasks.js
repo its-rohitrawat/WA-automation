@@ -65,7 +65,7 @@ export function mountTasks(ctx) {
     <button type="button" class="fchip ftoggle" data-removed aria-pressed="${f.removed === '1'}">${f.removed === '1' ? icon('tick', 13) : ''}Include removed clients</button>
     ${f.closed === '7d' ? `<button type="button" class="fchip" data-clear="closed" aria-label="Remove the filter: done in the last 7 days">Done · last 7 days${icon('close', 13)}</button>` : ''}
     ${sortButton()}
-    <a class="btn btn-ghost btn-sm" href="/dashboard/api/tracker/export" download>${icon('file', 16)}Export Excel</a>
+    <a class="btn btn-ghost btn-sm" href="/dashboard/api/tracker/export" download>${icon('xls', 16)}Export Excel</a>
     <span class="count-note" data-region="count"></span></div>`;
 
   const th = (/** @type {string} */ k, /** @type {string} */ l) => {

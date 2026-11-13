@@ -326,6 +326,11 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .kv { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 10px 14px; font-size: 13.5px; } .kv dt { color: var(--muted); } .kv dd { margin: 0; }
 .quote { margin: 16px 0; padding: 14px 16px; border-radius: 14px; background: var(--bubble, #005C4B); color: #E9EDEF; font-size: 14px; position: relative; }
 :root[data-theme="light"] .quote { background: #D9FDD3; color: #111B21; box-shadow: 0 1px 0.5px rgba(11,20,26,.13); }
+.quote .q-who { display: block; font-weight: 600; font-size: 12.5px; margin-bottom: 4px; opacity: .85; }
+.quote-btn { display: block; width: 100%; text-align: left; border: 0; font-family: inherit; cursor: pointer; }
+.quote-btn:hover { filter: brightness(1.06); } .quote-btn:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+.quote-btn .q-open { display: inline-flex; gap: 5px; align-items: center; margin-top: 8px; font: 600 12px var(--mono); opacity: .8; }
+.proof-lines { line-height: 1.6; }
 .quote small { display: block; font: 500 11.5px var(--mono); opacity: .7; margin-top: 6px; }
 .timeline { list-style: none; margin: 8px 0 0; padding: 0; } .timeline li { position: relative; padding: 0 0 14px 22px; font-size: 13px; color: var(--muted); }
 .timeline li::before { content: ""; position: absolute; left: 4px; top: 6px; width: 7px; height: 7px; border-radius: 50%; background: var(--green); }

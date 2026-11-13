@@ -682,11 +682,12 @@ function closeInfo() {
 /**
  * Opens the chat of a client. `onBack` reopens what it came from (the client's panel). `at`: a message to open at (a
  * tracker Chat link), or null.
- * @param {string} code @param {() => void} onBack @param {number | null} [at]
+ * `backLabel` names the Back button for screen readers (default "Back to the client").
+ * @param {string} code @param {() => void} onBack @param {number | null} [at] @param {{ backLabel?: string }} [opts]
  */
-export function openChat(code, onBack, at = null) {
+export function openChat(code, onBack, at = null, opts = {}) {
   // The group's picture and name open its info, as in WhatsApp. The name is the sheet's title (the h2), as a button.
-  const el = openChatLayer(`<div class="ch-head"><button class="icon-btn" type="button" data-chat-back aria-label="Back to the client">${icon('arrowL', 18)}</button>
+  const el = openChatLayer(`<div class="ch-head"><button class="icon-btn" type="button" data-chat-back aria-label="${esc(opts.backLabel ?? 'Back to the client')}">${icon('arrowL', 18)}</button>
       <span class="ch-av" data-chat-info aria-hidden="true">${icon('users', 18)}</span><div class="grow-1 ch-title"><h2><button class="ch-who" type="button" data-chat-info aria-haspopup="dialog">Loading…</button></h2><small class="ch-sub">${esc(code)}</small></div>
       <button class="icon-btn" type="button" data-chat-menu aria-haspopup="menu" aria-expanded="false" aria-controls="ch-menu" aria-label="Chat menu">${icon('dots', 18)}</button>
       <button class="icon-btn" type="button" data-close aria-label="Close the chat">${icon('close', 18)}</button>

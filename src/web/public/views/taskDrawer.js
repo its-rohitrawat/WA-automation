@@ -2,7 +2,8 @@
 // Edit owner or deadline as a small inline form. The quote and every other value from the agent go through esc().
 import { get, post } from '../api.js';
 import { $, esc, icon, toast } from '../dom.js';
-import { when } from '../format.js';
+import { stamp, when } from '../format.js';
+import { openChat } from './chat.js';
 import { closeDrawer, errorText, failed, loading, moodTag, openDrawer, pill, refillDrawer } from './ui.js';
 import { deadlineText, moodLabel, priorityPill, prioritySourceText, sourceLabel, taskPill, TASK_PRIORITIES } from './workLib.js';
 
@@ -10,12 +11,36 @@ import { deadlineText, moodLabel, priorityPill, prioritySourceText, sourceLabel,
  * @typedef {{ code: string, title: string, client: { code: string, name: string }, owner: string | null, askedBy: string | null,
  *   deadline: string | null, status: string, overdue: boolean, priority: string | null, prioritySource: string | null,
  *   priorityKeyword: string | null, sentiment: string | null, source: string, sourceQuote: string | null,
- *   sourceDate: string | null, sourceRevoked: boolean, latestProgress: string | null, remindedCount: number,
+ *   sourceDate: string | null, sourceSender: string | null, sourceMessageId: number | null, meetingTitle: string | null,
+ *   askedAt: string, createdAt: string, sourceRevoked: boolean, latestProgress: string | null, remindedCount: number,
  *   history: { at: string, actor: 'agent' | 'owner', what: string }[] }} TaskDetail
  */
 
+/**
+ * The Proof block: where the task came from and when. A message task shows the sender's bubble (a button into the chat
+ * when the message is stored), a meeting task names the meeting, a dashboard task says it was added by the owner.
+ * @param {TaskDetail} t
+ */
+function proof(t) {
+  const lines = (/** @type {string} */ asked) => `<p class="muted-p proof-lines">${asked ? `Asked: ${esc(stamp(t.askedAt))}<br>` : ''}Found by the agent: ${esc(stamp(t.createdAt))}</p>`;
+  if (t.source === 'dashboard') return `<div class="h4">Proof</div><p class="muted-p">Added by you on ${esc(stamp(t.createdAt))}</p>`;
+  const inner = (/** @type {string} */ when) => `<b class="q-who">${esc(t.sourceSender ?? 'Member')}</b>${esc(t.sourceQuote)}<small>${esc(when)}${t.sourceRevoked ? ' · the sender deleted this message' : ''}</small>`;
+  if (t.source === 'meeting') {
+    const bubble = t.sourceQuote ? `<div class="quote">${inner(stamp(t.askedAt))}</div>` : '';
+    return `<div class="h4">Proof</div><p class="muted-p">From the meeting ${esc(t.meetingTitle ?? 'a meeting')}, ${esc(stamp(t.askedAt))}<br>Found by the agent: ${esc(stamp(t.createdAt))}</p>${bubble}`;
+  }
+  const sent = stamp(t.sourceDate ?? t.askedAt);
+  let bubble = '';
+  if (t.sourceQuote) {
+    bubble = t.sourceMessageId === null
+      ? `<div class="quote">${inner(sent)}</div>`
+      : `<button type="button" class="quote quote-btn" data-open-source aria-label="Open in chat: ${esc(t.sourceSender ?? 'Member')}, ${esc(sent)}">${inner(sent)}<span class="q-open">${icon('bubble', 14)}Open in chat</span></button>`;
+  }
+  return `<div class="h4">Proof</div>${bubble}${lines('asked')}`;
+}
+
 /** @param {TaskDetail} t @param {{ editing?: boolean, problem?: { field?: string, message: string } | null }} [o] */
-function render(t, o = {}) {
+export function render(t, o = {}) {
   const src = sourceLabel(t.source);
   const problem = o.problem ? `<p class="field-err" role="alert">${esc(o.problem.message)}</p>` : '';
   const edit = o.editing
@@ -30,7 +55,7 @@ function render(t, o = {}) {
       ${t.sentiment ? `<dt>Client mood</dt><dd>${moodTag(moodLabel(t.sentiment))}</dd>` : ''}
       <dt>Source</dt><dd><span class="src">${icon(src.icon, 15)}${esc(src.label)}</span></dd>${t.remindedCount ? `<dt>Reminders</dt><dd>${esc(t.remindedCount)}</dd>` : ''}</dl>
       ${edit}
-      ${t.sourceQuote ? `<div class="h4">Where it came from</div><div class="quote">${esc(t.sourceQuote)}<small>${esc(src.label)}${t.sourceDate ? ` · ${esc(deadlineText(t.sourceDate))}` : ''}${t.sourceRevoked ? ' · the sender deleted this message' : ''}</small></div>` : ''}
+      ${proof(t)}
       ${t.latestProgress ? `<div class="h4">Latest progress</div><p class="muted-p">${esc(t.latestProgress)}</p>` : ''}
       <div class="h4">History</div>${t.history.length ? `<ul class="timeline">${t.history.map((h) => `<li><b>${esc(h.what)}</b> · ${esc(when(h.at))}</li>`).join('')}</ul>` : '<p class="muted-p">No history yet.</p>'}</div>
     <div class="dr-foot">${t.status === 'done' ? `<button class="btn btn-ghost" type="button" data-act="reopen">${icon('undo', 16)}Reopen</button>` : `<button class="btn btn-primary" type="button" data-act="done">${icon('tick', 16)}Mark done</button>`}
@@ -90,6 +115,11 @@ export function openTaskDrawer(code, o) {
     const target = /** @type {Element} */ (e.target);
     if (target.closest('[data-retry]')) return void load();
     if (target.closest('[data-cancel]')) return show();
+    if (target.closest('[data-open-source]')) {
+      // The chat replaces the panel; its Back brings the panel back, with the same options.
+      if (t?.sourceMessageId != null) openChat(t.client.code, () => void openTaskDrawer(code, o), t.sourceMessageId, { backLabel: 'Back to the task' });
+      return;
+    }
     const b = /** @type {HTMLElement | null} */ (target.closest('[data-act]'));
     if (!b) return;
     if (b.dataset.act === 'edit') return show({ editing: true });
